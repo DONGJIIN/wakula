@@ -1,0 +1,106 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="quadruped">
+  <xacro:property name="body_length" value="0.52"/>
+  <xacro:property name="body_width" value="0.24"/>
+  <xacro:property name="body_height" value="0.12"/>
+  <xacro:property name="upper_leg_length" value="0.22"/>
+  <xacro:property name="lower_leg_length" value="0.23"/>
+  <xacro:property name="leg_radius" value="0.025"/>
+
+  <xacro:macro name="box_inertial" params="mass x y z">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass * (y*y + z*z) / 12.0}" ixy="0" ixz="0"
+               iyy="${mass * (x*x + z*z) / 12.0}" iyz="0"
+               izz="${mass * (x*x + y*y) / 12.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <link name="base_footprint"/>
+  <link name="base_link">
+    <visual>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <material name="body_blue"><color rgba="0.08 0.25 0.55 1"/></material>
+    </visual>
+    <collision><geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry></collision>
+    <xacro:box_inertial mass="12.0" x="${body_length}" y="${body_width}" z="${body_height}"/>
+  </link>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/><child link="base_link"/>
+    <origin xyz="0 0 0.48"/>
+  </joint>
+
+  <xacro:macro name="leg" params="prefix x y side">
+    <link name="${prefix}_hip_link">
+      <visual><geometry><cylinder radius="${leg_radius}" length="0.10"/></geometry></visual>
+      <collision><geometry><cylinder radius="${leg_radius}" length="0.10"/></geometry></collision>
+      <xacro:box_inertial mass="0.55" x="0.05" y="0.05" z="0.10"/>
+    </link>
+    <joint name="${prefix}_hip_joint" type="revolute">
+      <parent link="base_link"/><child link="${prefix}_hip_link"/>
+      <origin xyz="${x} ${y} 0" rpy="${pi/2} 0 0"/>
+      <axis xyz="1 0 0"/><limit lower="-0.75" upper="0.75" effort="80" velocity="8"/>
+    </joint>
+
+    <link name="${prefix}_upper_leg">
+      <visual><origin xyz="0 0 ${-upper_leg_length/2}"/><geometry><cylinder radius="${leg_radius}" length="${upper_leg_length}"/></geometry></visual>
+      <collision><origin xyz="0 0 ${-upper_leg_length/2}"/><geometry><cylinder radius="${leg_radius}" length="${upper_leg_length}"/></geometry></collision>
+      <xacro:box_inertial mass="1.0" x="0.05" y="0.05" z="${upper_leg_length}"/>
+    </link>
+    <joint name="${prefix}_thigh_joint" type="revolute">
+      <parent link="${prefix}_hip_link"/><child link="${prefix}_upper_leg"/>
+      <origin xyz="0 0 ${-0.05}"/>
+      <axis xyz="0 1 0"/><limit lower="-1.57" upper="1.20" effort="120" velocity="10"/>
+    </joint>
+
+    <link name="${prefix}_lower_leg">
+      <visual><origin xyz="0 0 ${-lower_leg_length/2}"/><geometry><cylinder radius="${leg_radius * 0.8}" length="${lower_leg_length}"/></geometry></visual>
+      <collision><origin xyz="0 0 ${-lower_leg_length/2}"/><geometry><cylinder radius="${leg_radius * 0.8}" length="${lower_leg_length}"/></geometry></collision>
+      <xacro:box_inertial mass="0.65" x="0.04" y="0.04" z="${lower_leg_length}"/>
+    </link>
+    <joint name="${prefix}_calf_joint" type="revolute">
+      <parent link="${prefix}_upper_leg"/><child link="${prefix}_lower_leg"/>
+      <origin xyz="0 0 ${-upper_leg_length}"/>
+      <axis xyz="0 1 0"/><limit lower="-2.70" upper="-0.15" effort="120" velocity="10"/>
+    </joint>
+
+    <link name="${prefix}_foot">
+      <visual><geometry><sphere radius="0.035"/></geometry></visual>
+      <collision><geometry><sphere radius="0.035"/></geometry></collision>
+      <xacro:box_inertial mass="0.12" x="0.07" y="0.07" z="0.07"/>
+    </link>
+    <joint name="${prefix}_foot_joint" type="fixed">
+      <parent link="${prefix}_lower_leg"/><child link="${prefix}_foot"/>
+      <origin xyz="0 0 ${-lower_leg_length}"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:leg prefix="front_left"  x="0.20"  y="0.15"  side="1"/>
+  <xacro:leg prefix="front_right" x="0.20"  y="-0.15" side="-1"/>
+  <xacro:leg prefix="rear_left"   x="-0.20" y="0.15"  side="1"/>
+  <xacro:leg prefix="rear_right"  x="-0.20" y="-0.15" side="-1"/>
+
+  <ros2_control name="QuadrupedSystem" type="system">
+    <hardware><plugin>mock_components/GenericSystem</plugin></hardware>
+    <xacro:macro name="controlled_joint" params="name">
+      <joint name="${name}">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+    </xacro:macro>
+    <xacro:controlled_joint name="front_left_hip_joint"/>
+    <xacro:controlled_joint name="front_left_thigh_joint"/>
+    <xacro:controlled_joint name="front_left_calf_joint"/>
+    <xacro:controlled_joint name="front_right_hip_joint"/>
+    <xacro:controlled_joint name="front_right_thigh_joint"/>
+    <xacro:controlled_joint name="front_right_calf_joint"/>
+    <xacro:controlled_joint name="rear_left_hip_joint"/>
+    <xacro:controlled_joint name="rear_left_thigh_joint"/>
+    <xacro:controlled_joint name="rear_left_calf_joint"/>
+    <xacro:controlled_joint name="rear_right_hip_joint"/>
+    <xacro:controlled_joint name="rear_right_thigh_joint"/>
+    <xacro:controlled_joint name="rear_right_calf_joint"/>
+  </ros2_control>
+</robot>
+

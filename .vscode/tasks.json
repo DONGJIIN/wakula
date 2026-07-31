@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ROS: build workspace",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "group": {"kind": "build", "isDefault": true},
+      "problemMatcher": []
+    },
+    {
+      "label": "ROS: test workspace",
+      "type": "shell",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && colcon test && colcon test-result --verbose'",
+      "problemMatcher": []
+    },
+    {
+      "label": "ROS: launch quadruped",
+      "type": "shell",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_bringup bringup.launch.py'",
+      "problemMatcher": []
+    }
+  ]
+}
+

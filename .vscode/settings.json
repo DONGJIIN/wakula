@@ -1,0 +1,36 @@
+{
+  "python.defaultInterpreterPath": "/usr/bin/python3",
+  "cmake.configureOnOpen": false,
+  "files.associations": {
+    "*.xacro": "xml",
+    "*.urdf": "xml"
+  },
+  "terminal.integrated.env.linux": {
+    "ROS_DISTRO": "jazzy",
+    "TURTLEBOT3_MODEL": "burger"
+  },
+  "ros.distro": "jazzy",
+  "python.autoComplete.extraPaths": [
+    "/home/mo/桌面/wakula/build/slam",
+    "/home/mo/桌面/wakula/install/slam/lib/python3.12/site-packages",
+    "/home/mo/桌面/wakula/build/quadruped_bringup",
+    "/home/mo/桌面/wakula/install/quadruped_bringup/lib/python3.12/site-packages",
+    "/home/mo/桌面/wakula/build/quadruped_planning",
+    "/home/mo/桌面/wakula/install/quadruped_planning/lib/python3.12/site-packages",
+    "/home/mo/桌面/wakula/build/quadruped_perception",
+    "/home/mo/桌面/wakula/install/quadruped_perception/lib/python3.12/site-packages",
+    "/opt/ros/jazzy/lib/python3.12/site-packages"
+  ],
+  "python.analysis.extraPaths": [
+    "/home/mo/桌面/wakula/build/slam",
+    "/home/mo/桌面/wakula/install/slam/lib/python3.12/site-packages",
+    "/home/mo/桌面/wakula/build/quadruped_bringup",
+    "/home/mo/桌面/wakula/install/quadruped_bringup/lib/python3.12/site-packages",
+    "/home/mo/桌面/wakula/build/quadruped_planning",
+    "/home/mo/桌面/wakula/install/quadruped_planning/lib/python3.12/site-packages",
+    "/home/mo/桌面/wakula/build/quadruped_perception",
+    "/home/mo/桌面/wakula/install/quadruped_perception/lib/python3.12/site-packages",
+    "/opt/ros/jazzy/lib/python3.12/site-packages"
+  ]
+}
+

@@ -1,0 +1,5 @@
+obstacle_crossing_manager:
+  ros__parameters:
+    step_threshold: 0.08
+    climb_threshold: 0.18
+    stop_threshold: 0.32
