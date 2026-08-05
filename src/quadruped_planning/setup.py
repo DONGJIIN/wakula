@@ -10,6 +10,8 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/config", ["config/crossing.yaml"]),
+        ("share/" + package_name + "/config", ["config/competition.yaml"]),
+        ("share/" + package_name + "/config", ["config/course_waypoints.yaml"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -21,7 +23,11 @@ setup(
         "console_scripts": [
             "obstacle_crossing_manager = "
             "quadruped_planning.obstacle_crossing_manager:main",
+            "cmd_vel_gate = quadruped_planning.cmd_vel_gate:main",
+            "competition_obstacle_manager = "
+            "quadruped_planning.competition_obstacle_manager:main",
+            "course_waypoint_navigator = "
+            "quadruped_planning.course_waypoint_navigator:main",
         ],
     },
 )
-
