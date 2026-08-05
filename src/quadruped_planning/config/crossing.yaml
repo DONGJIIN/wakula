@@ -3,3 +3,13 @@ obstacle_crossing_manager:
     step_threshold: 0.08
     climb_threshold: 0.18
     stop_threshold: 0.32
+    max_slope: 0.45
+    max_roughness: 0.06
+    min_points: 30
+    sensor_timeout: 0.7
+cmd_vel_gate:
+  ros__parameters:
+    input_topic: /cmd_vel_nav
+    output_topic: /cmd_vel
+    command_timeout: 0.5
+    default_speed_scale: 1.0

@@ -2,6 +2,12 @@ terrain_analyzer:
   ros__parameters:
     input_topic: /camera/depth/color/points
     max_points: 30000
+    front_x_min: 0.10
+    front_x_max: 1.50
+    lateral_half_width: 0.45
+    ground_percentile: 0.10
     warning_height: 0.12
     critical_height: 0.28
-
+    max_slope: 0.45
+    max_roughness: 0.06
+    min_valid_points: 30
