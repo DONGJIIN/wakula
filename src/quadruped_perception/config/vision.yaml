@@ -1,0 +1,11 @@
+vision_obstacle_detector:
+  ros__parameters:
+    image_topic: /camera/color/image_raw
+    debug_mask_topic: /vision/color_mask
+    min_area_px: 300.0
+    morphology_size: 5
+    # OpenCV HSV ranges; recalibrate under venue lighting before competition.
+    orange_hsv_lower: [5, 80, 70]
+    orange_hsv_upper: [25, 255, 255]
+    blue_hsv_lower: [90, 70, 50]
+    blue_hsv_upper: [135, 255, 255]
