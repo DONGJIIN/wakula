@@ -1,0 +1,19 @@
+yolo_obstacle_detector:
+  ros__parameters:
+    # Keep false in the shared configuration. Launch explicitly overrides it
+    # only when yolo:=true and a valid yolo_model path are supplied.
+    enabled: false
+    model_path: ""
+    labels_path: ""
+    image_topic: /camera/color/image_raw
+    detections_topic: /vision/yolo/detections
+    debug_image_topic: /vision/yolo/debug_image
+    publish_debug_image: false
+    input_width: 320
+    input_height: 320
+    inference_hz: 5.0
+    confidence_threshold: 0.45
+    nms_threshold: 0.45
+    output_has_objectness: false
+    max_detections: 20
+    opencv_threads: 2

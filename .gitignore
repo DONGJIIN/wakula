@@ -6,3 +6,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .vscode/*.log
+*.egg-info/
+.ros/
+*.swp
+# Large inference artifacts are deployed separately on the target computer.
+*.onnx
+*.rknn
+*.pt

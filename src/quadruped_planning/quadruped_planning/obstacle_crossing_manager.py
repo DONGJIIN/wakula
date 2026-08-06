@@ -1,8 +1,64 @@
 """Terrain-to-behavior state machine for the quadruped prototype."""
 
+from math import isfinite
+from typing import Sequence, Tuple
+
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, Float32MultiArray, String
+from std_msgs.msg import Bool, Float32, Float32MultiArray, String
+
+
+Decision = Tuple[str, str, float]
+
+
+def select_terrain_decision(
+    obstacle_height: float,
+    points: float,
+    slope: float,
+    roughness: float,
+    min_points: int,
+    step_threshold: float,
+    climb_threshold: float,
+    stop_threshold: float,
+    max_slope: float,
+    max_roughness: float,
+) -> Decision:
+    """Return the conservative motion recommendation for terrain geometry."""
+    values = (obstacle_height, points, slope, roughness)
+    if not all(isfinite(value) for value in values) or points < min_points:
+        return "STOP", "WAIT_FOR_TERRAIN", 0.0
+    if obstacle_height >= stop_threshold or slope >= max_slope * 1.5:
+        return "STOP", "REPLAN_OR_REQUEST_FOOTSTEPS", 0.0
+    if obstacle_height >= climb_threshold or slope >= max_slope:
+        return "CLIMB", "CROSS_CLIMB", 0.20
+    if obstacle_height >= step_threshold or roughness >= max_roughness:
+        return "STEP", "CROSS_STEP", 0.45
+    return "WALK", "NAVIGATE", 1.0
+
+
+def visual_target_in_path(
+    features: Sequence[float], min_area_ratio: float, center_margin: float
+) -> bool:
+    """Check whether either color region is large and centered in the path."""
+    if len(features) < 10 or not all(isfinite(float(value)) for value in features[:10]):
+        return False
+    margin = max(0.0, min(0.49, center_margin))
+    for offset in (0, 5):
+        area_ratio = float(features[offset])
+        center_x = float(features[offset + 1])
+        if area_ratio >= min_area_ratio and margin <= center_x <= 1.0 - margin:
+            return True
+    return False
+
+
+def apply_visual_assist(
+    decision: Decision, visual_active: bool, vision_speed_scale: float
+) -> Decision:
+    """Slow clear-terrain navigation while depth confirms visual evidence."""
+    mode, action, speed = decision
+    if mode != "WALK" or not visual_active:
+        return decision
+    return mode, "VERIFY_VISUAL_OBSTACLE_WITH_DEPTH", min(speed, vision_speed_scale)
 
 
 class ObstacleCrossingManager(Node):
@@ -17,6 +73,11 @@ class ObstacleCrossingManager(Node):
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_points", 30)
         self.declare_parameter("sensor_timeout", 0.7)
+        self.declare_parameter("vision_assist_enabled", True)
+        self.declare_parameter("vision_timeout", 0.6)
+        self.declare_parameter("vision_min_area_ratio", 0.03)
+        self.declare_parameter("vision_center_margin", 0.20)
+        self.declare_parameter("vision_speed_scale", 0.35)
         self.step_threshold = float(self.get_parameter("step_threshold").value)
         self.climb_threshold = float(self.get_parameter("climb_threshold").value)
         self.stop_threshold = float(self.get_parameter("stop_threshold").value)
@@ -24,13 +85,43 @@ class ObstacleCrossingManager(Node):
         self.max_roughness = float(self.get_parameter("max_roughness").value)
         self.min_points = int(self.get_parameter("min_points").value)
         self.sensor_timeout = float(self.get_parameter("sensor_timeout").value)
+        self.vision_enabled = bool(self.get_parameter("vision_assist_enabled").value)
+        self.vision_timeout = max(
+            0.0, float(self.get_parameter("vision_timeout").value)
+        )
+        self.vision_min_area = max(
+            0.0, float(self.get_parameter("vision_min_area_ratio").value)
+        )
+        self.vision_center_margin = float(
+            self.get_parameter("vision_center_margin").value
+        )
+        self.vision_speed_scale = max(
+            0.0,
+            min(1.0, float(self.get_parameter("vision_speed_scale").value)),
+        )
 
         self.mode_pub = self.create_publisher(String, "/crossing/mode", 10)
         self.action_pub = self.create_publisher(String, "/crossing/action", 10)
         self.speed_pub = self.create_publisher(Float32, "/crossing/speed_scale", 10)
-        self.create_subscription(Float32MultiArray, "/terrain/features", self.features_callback, 10)
+        self.visual_active_pub = self.create_publisher(
+            Bool, "/crossing/visual_assist_active", 10
+        )
+        self.create_subscription(
+            Float32MultiArray,
+            "/terrain/features",
+            self.features_callback,
+            10,
+        )
+        self.create_subscription(
+            Float32MultiArray,
+            "/vision/color_features",
+            self.vision_callback,
+            10,
+        )
         self.last_features_time = self.get_clock().now()
-        self.last_mode = None
+        self.last_vision_time = None
+        self.visual_target = False
+        self.last_decision = None
         self.timer = self.create_timer(0.1, self.timeout_callback)
         self.publish_decision("STOP", "WAIT_FOR_TERRAIN", 0.0)
         self.get_logger().info("Obstacle-crossing state machine ready")
@@ -45,17 +136,38 @@ class ObstacleCrossingManager(Node):
         slope = abs(float(msg.data[4])) if len(msg.data) > 4 else 0.0
         roughness = float(msg.data[5]) if len(msg.data) > 5 else 0.0
 
-        if points < self.min_points:
-            mode, action, speed = "STOP", "WAIT_FOR_TERRAIN", 0.0
-        elif obstacle_height >= self.stop_threshold or slope >= self.max_slope * 1.5:
-            mode, action, speed = "STOP", "REPLAN_OR_REQUEST_FOOTSTEPS", 0.0
-        elif obstacle_height >= self.climb_threshold or slope >= self.max_slope:
-            mode, action, speed = "CLIMB", "CROSS_CLIMB", 0.20
-        elif obstacle_height >= self.step_threshold or roughness >= self.max_roughness:
-            mode, action, speed = "STEP", "CROSS_STEP", 0.45
-        else:
-            mode, action, speed = "WALK", "NAVIGATE", 1.0
+        decision = select_terrain_decision(
+            obstacle_height,
+            points,
+            slope,
+            roughness,
+            self.min_points,
+            self.step_threshold,
+            self.climb_threshold,
+            self.stop_threshold,
+            self.max_slope,
+            self.max_roughness,
+        )
+        visual_active = self._fresh_visual_target()
+        mode, action, speed = apply_visual_assist(
+            decision, visual_active, self.vision_speed_scale
+        )
+        self.visual_active_pub.publish(Bool(data=visual_active))
         self.publish_decision(mode, action, speed)
+
+    def vision_callback(self, msg: Float32MultiArray) -> None:
+        self.last_vision_time = self.get_clock().now()
+        self.visual_target = visual_target_in_path(
+            msg.data,
+            self.vision_min_area,
+            self.vision_center_margin,
+        )
+
+    def _fresh_visual_target(self) -> bool:
+        if not self.vision_enabled or self.last_vision_time is None:
+            return False
+        age = (self.get_clock().now() - self.last_vision_time).nanoseconds / 1e9
+        return age <= self.vision_timeout and self.visual_target
 
     def timeout_callback(self) -> None:
         age = (self.get_clock().now() - self.last_features_time).nanoseconds / 1e9
@@ -72,9 +184,12 @@ class ObstacleCrossingManager(Node):
         self.mode_pub.publish(mode_msg)
         self.action_pub.publish(action_msg)
         self.speed_pub.publish(speed_msg)
-        if mode != self.last_mode:
-            self.get_logger().info(f"Crossing mode -> {mode}, action -> {action}, speed -> {speed:.2f}")
-            self.last_mode = mode
+        decision = (mode, action, speed)
+        if decision != self.last_decision:
+            self.get_logger().info(
+                f"Crossing mode -> {mode}, action -> {action}, speed -> {speed:.2f}"
+            )
+            self.last_decision = decision
 
 
 def main(args=None):

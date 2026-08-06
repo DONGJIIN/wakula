@@ -19,6 +19,9 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     rviz = LaunchConfiguration("rviz")
+    vision = LaunchConfiguration("vision")
+    yolo = LaunchConfiguration("yolo")
+    yolo_model = LaunchConfiguration("yolo_model")
     competition = LaunchConfiguration("competition")
     model = PathJoinSubstitution(
         [FindPackageShare("quadruped_description"), "urdf", "quadruped.urdf.xacro"]
@@ -27,6 +30,12 @@ def generate_launch_description():
     nav2_params = PathJoinSubstitution([FindPackageShare("slam"), "config", "nav2.yaml"])
     terrain_params = PathJoinSubstitution(
         [FindPackageShare("quadruped_perception"), "config", "terrain.yaml"]
+    )
+    vision_params = PathJoinSubstitution(
+        [FindPackageShare("quadruped_perception"), "config", "vision.yaml"]
+    )
+    yolo_params = PathJoinSubstitution(
+        [FindPackageShare("quadruped_perception"), "config", "yolo.yaml"]
     )
     crossing_params = PathJoinSubstitution(
         [FindPackageShare("quadruped_planning"), "config", "crossing.yaml"]
@@ -44,6 +53,21 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("rviz", default_value="true"),
+            DeclareLaunchArgument(
+                "vision",
+                default_value="true",
+                description="Start the OpenCV color-feature front end.",
+            ),
+            DeclareLaunchArgument(
+                "yolo",
+                default_value="false",
+                description="Start optional YOLO ONNX inference (off by default).",
+            ),
+            DeclareLaunchArgument(
+                "yolo_model",
+                default_value="",
+                description="Absolute path to a YOLO ONNX model.",
+            ),
             DeclareLaunchArgument(
                 "competition",
                 default_value="false",
@@ -82,6 +106,27 @@ def generate_launch_description():
                 package="quadruped_perception",
                 executable="terrain_analyzer",
                 parameters=[terrain_params, {"use_sim_time": use_sim_time}],
+                output="screen",
+            ),
+            Node(
+                package="quadruped_perception",
+                executable="vision_obstacle_detector",
+                parameters=[vision_params, {"use_sim_time": use_sim_time}],
+                condition=IfCondition(vision),
+                output="screen",
+            ),
+            Node(
+                package="quadruped_perception",
+                executable="yolo_obstacle_detector",
+                parameters=[
+                    yolo_params,
+                    {
+                        "enabled": ParameterValue(yolo, value_type=bool),
+                        "model_path": yolo_model,
+                        "use_sim_time": use_sim_time,
+                    },
+                ],
+                condition=IfCondition(yolo),
                 output="screen",
             ),
             Node(
