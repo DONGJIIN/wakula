@@ -19,6 +19,7 @@ setup(
     maintainer_email="developer@example.com",
     description="Obstacle-crossing behavior decision layer.",
     license="Apache-2.0",
+    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "obstacle_crossing_manager = "
