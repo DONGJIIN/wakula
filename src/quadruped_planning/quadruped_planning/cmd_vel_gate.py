@@ -14,6 +14,7 @@ def gated_twist(
 ) -> Twist:
     """Return a scaled command only when both independent heartbeats are fresh."""
     output = Twist()
+    # 两条独立心跳任一失效都输出默认构造的零 Twist。
     if not command_fresh or not decision_fresh or scale <= 0.0:
         return output
     output.linear.x = source.linear.x * scale
@@ -71,6 +72,7 @@ class CmdVelGate(Node):
         now = self.get_clock().now()
         command_age = (now - self.last_cmd_time).nanoseconds / 1e9
         decision_age = (now - self.last_decision_time).nanoseconds / 1e9
+        # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
             self.latest_cmd,
             self.speed_scale,
@@ -88,7 +90,10 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         rclpy.try_shutdown()
 
 

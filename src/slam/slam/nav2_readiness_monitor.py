@@ -21,6 +21,7 @@ class Nav2ReadinessMonitor(Node):
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("odom_topic", "/odom")
+        self.declare_parameter("sensor_timeout", 1.0)
         self.declare_parameter(
             "lifecycle_service",
             "/lifecycle_manager_navigation/manage_nodes",
@@ -30,9 +31,14 @@ class Nav2ReadinessMonitor(Node):
         scan_topic = str(self.get_parameter("scan_topic").value)
         odom_topic = str(self.get_parameter("odom_topic").value)
         service_name = str(self.get_parameter("lifecycle_service").value)
+        self.sensor_timeout = max(
+            0.1, float(self.get_parameter("sensor_timeout").value)
+        )
 
         self.scan_received = False
         self.odom_received = False
+        self.last_scan_time = None
+        self.last_odom_time = None
         self.startup_requested = False
         self.startup_complete = False
         self.tf_buffer = Buffer()
@@ -60,25 +66,36 @@ class Nav2ReadinessMonitor(Node):
 
     def _scan_callback(self, _msg: LaserScan) -> None:
         self.scan_received = True
+        self.last_scan_time = self.get_clock().now()
 
     def _odom_callback(self, _msg: Odometry) -> None:
         self.odom_received = True
+        self.last_odom_time = self.get_clock().now()
+
+    def _sensor_is_fresh(self, stamp) -> bool:
+        if stamp is None:
+            return False
+        age = (self.get_clock().now() - stamp).nanoseconds / 1e9
+        return 0.0 <= age <= self.sensor_timeout
 
     def _check_readiness(self) -> None:
         if self.startup_requested:
             return
+        # 不只检查“曾经收到”，还检查传感器正在持续更新。
+        scan_ready = self._sensor_is_fresh(self.last_scan_time)
+        odom_ready = self._sensor_is_fresh(self.last_odom_time)
         tf_ready = self.tf_buffer.can_transform(
             self.global_frame,
             self.base_frame,
             Time(),
             timeout=Duration(seconds=0.05),
         )
-        if not (self.scan_received and self.odom_received and tf_ready):
+        if not (scan_ready and odom_ready and tf_ready):
             missing = []
-            if not self.scan_received:
-                missing.append("scan")
-            if not self.odom_received:
-                missing.append("odom")
+            if not scan_ready:
+                missing.append("fresh scan")
+            if not odom_ready:
+                missing.append("fresh odom")
             if not tf_ready:
                 missing.append(f"{self.global_frame}->{self.base_frame} TF")
             self.get_logger().info(
@@ -92,6 +109,7 @@ class Nav2ReadinessMonitor(Node):
                 throttle_duration_sec=5.0,
             )
             return
+        # 由 lifecycle manager 按固定顺序配置和激活全部 Nav2 节点。
         self.startup_requested = True
         request = ManageLifecycleNodes.Request()
         request.command = ManageLifecycleNodes.Request.STARTUP

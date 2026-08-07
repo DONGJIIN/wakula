@@ -9,6 +9,7 @@ from quadruped_planning.competition_obstacle_manager import CompetitionObstacleM
 from quadruped_planning.obstacle_crossing_manager import (
     apply_visual_assist,
     select_terrain_decision,
+    validate_height_thresholds,
     visual_evidence_in_path,
 )
 
@@ -53,6 +54,12 @@ def test_visual_target_requires_confidence_and_center():
 def test_invalid_visual_data_is_ignored():
     assert not visual_evidence_in_path([], 0.55, 0.20)
     assert not visual_evidence_in_path([float("nan")] * 6, 0.55, 0.20)
+    assert not visual_evidence_in_path([9.0, 0.9, 0.5, 0.5, 0.2, 0.2], 0.55, 0.20)
+
+
+def test_invalid_height_thresholds_use_safe_defaults():
+    assert validate_height_thresholds(0.08, 0.18, 0.32) == (0.08, 0.18, 0.32)
+    assert validate_height_thresholds(0.30, 0.10, 0.20) == (0.08, 0.18, 0.32)
 
 
 def test_visual_assist_only_slows_clear_terrain():
