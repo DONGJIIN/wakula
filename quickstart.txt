@@ -1,0 +1,501 @@
+Wakula 后续开发快速上手指南
+===========================
+
+用途
+----
+
+本文件面向第一次接手 Wakula 的开发者，目标是在十分钟内完成环境确认、编译测试、
+启动软件，并快速了解当前成果、未完成部分和推荐开发顺序。
+
+配套文档：
+
+  README.md        安装、启动和总体架构
+  instruction.txt 模块职责、算法原理和调试方法
+  connect.txt     Topic、Action、Service、TF、QoS 和接口字段
+  quickstart.txt  本文件，快速接手、当前进度和后续路线
+
+
+一、项目当前定位
+----------------
+
+系统环境：
+
+  Ubuntu 24.04
+  ROS 2 Jazzy
+  Python 3
+  目标计算平台 RK3588
+  通用 12 自由度四足模型
+
+核心软件：
+
+  SLAM Toolbox              陌生环境二维建图与定位
+  Nav2                      全局路径和局部避障
+  OpenCV                    颜色、边缘和轮廓障碍提示
+  PointCloud2               高度、坡度、粗糙度和近场立体障碍
+  obstacle crossing manager 越障模式与速度倍率决策
+  Collision Monitor         最终速度碰撞保护
+
+当前已经形成完整的上层链路：
+
+  建图定位
+    -> 路径规划
+    -> RGB 障碍提示
+    -> 深度点云测高
+    -> WALK/STEP/CLIMB/STOP
+    -> 速度心跳保护
+    -> /cmd_vel
+
+尚未包含具体品牌机器狗 SDK、真实电机控制、MPC/WBC、完整落脚点规划和经过真机标定
+的传感器参数。因此当前工程适合软件联调、算法验证和 SDK 接入开发，不能直接用于
+未经保护的高速实机。
+
+
+二、第一次接手的十分钟流程
+--------------------------
+
+1. 进入工作空间：
+
+  cd ~/wakula
+
+2. 查看 Git 状态和最近提交：
+
+  git status -sb
+  git log --oneline -5
+
+正常情况下应位于 main，且没有未提交文件。
+
+3. 加载 ROS 2：
+
+  source /opt/ros/jazzy/setup.bash
+
+4. 首次运行时安装依赖：
+
+  ./scripts/bootstrap.sh
+
+5. 编译全部 6 个 ROS 包：
+
+  ./scripts/build.sh
+
+6. 加载本工作空间：
+
+  source install/setup.bash
+
+每次打开新终端都需要重新 source ROS 2 和 install/setup.bash。
+
+7. 运行测试：
+
+  colcon test --event-handlers console_direct+
+  colcon test-result --verbose
+
+当前基准为 17 项测试、0 error、0 failure。
+
+8. 查看机器人模型：
+
+  ros2 launch quadruped_description display.launch.py
+
+9. 无传感器启动完整软件：
+
+  ros2 launch slam slam.launch.py rviz:=false
+
+没有 /scan、/odom 和 map -> base_link 时，Nav2 应保持未激活并输出等待信息。这是安全
+设计，不是错误。按一次 Ctrl+C，所有节点应正常退出。
+
+10. 根据任务阅读文档：
+
+  要启动系统或了解目录：README.md
+  要修改算法：instruction.txt
+  要接相机、雷达、SDK 或新节点：connect.txt
+  要选择下一项开发任务：quickstart.txt
+
+
+三、目录速查
+------------
+
+src/quadruped_description
+  urdf/quadruped.urdf.xacro
+    机身、12 个运动关节、四只脚、IMU、雷达和相机坐标系。
+  launch/display.launch.py
+    RViz 模型显示入口。
+
+src/quadruped_control
+  config/controllers.yaml
+    joint_state_broadcaster 和 12 关节轨迹控制器。
+  config/joint_limits.yaml
+    关节限制。
+
+src/quadruped_bringup
+  launch/bringup.launch.py
+    机器人模型、控制、感知、越障决策和速度门的唯一公共入口。
+
+src/quadruped_perception
+  vision_obstacle_detector.py
+    OpenCV HSV、Canny、轮廓和多帧投票。
+  terrain_analyzer.py
+    点云 TF、ROI、地形统计和 Nav2 障碍点云。
+  topic_selection.py
+    多个默认传感器话题的锁定和超时切换。
+  config/vision.yaml、terrain.yaml
+    感知参数。
+
+src/quadruped_planning
+  obstacle_crossing_manager.py
+    普通越障视觉—点云融合决策。
+  cmd_vel_gate.py
+    导航速度和决策倍率双心跳保护。
+  competition_obstacle_manager.py
+    Robocon 计时、障碍、接触规则和计分状态机。
+  course_waypoint_navigator.py
+    比赛障碍接近点与 Nav2 Action 桥接。
+
+src/slam
+  config/slam.yaml
+    SLAM Toolbox 参数。
+  config/nav2.yaml
+    Nav2、代价地图、速度平滑和碰撞监控。
+  launch/slam.launch.py
+    完整系统启动入口。
+  launch/navigation.launch.py
+    精简 Nav2 入口。
+  nav2_readiness_monitor.py
+    传感器和 TF 就绪后自动激活 Nav2。
+
+scripts
+  bootstrap.sh  使用 rosdep 安装依赖。
+  build.sh      使用统一参数执行 colcon build。
+
+
+四、常用启动命令
+----------------
+
+每个新终端先执行：
+
+  source /opt/ros/jazzy/setup.bash
+  cd ~/wakula
+  source install/setup.bash
+
+只查看 URDF：
+
+  ros2 launch quadruped_description display.launch.py
+
+启动感知、越障决策和速度门，不启动 SLAM/Nav2：
+
+  ros2 launch quadruped_bringup bringup.launch.py use_control:=false
+
+启动完整自主链路：
+
+  ros2 launch slam slam.launch.py
+
+不启动 RViz：
+
+  ros2 launch slam slam.launch.py rviz:=false
+
+没有 RGB 相机时关闭 OpenCV：
+
+  ros2 launch slam slam.launch.py vision:=false
+
+指定非默认相机话题：
+
+  ros2 launch slam slam.launch.py \
+    camera_topic:=/my_camera/image_raw \
+    point_cloud_topic:=/my_camera/points
+
+加载 Nav2 但不自动激活：
+
+  ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
+
+Robocon 比赛模式：
+
+  ros2 launch slam slam.launch.py competition:=true
+
+启用 mock ros2_control：
+
+  ros2 launch quadruped_bringup bringup.launch.py use_control:=true
+
+
+五、真机启动前必须提供的数据
+----------------------------
+
+基础导航：
+
+  /scan                  sensor_msgs/msg/LaserScan
+  /odom                  nav_msgs/msg/Odometry
+  odom -> base_link      状态估计器 TF
+  base_link -> lidar     URDF 或驱动静态 TF
+
+SLAM Toolbox 根据 /scan、/odom 和 TF 产生 map -> odom。
+
+视觉辅助：
+
+  /camera/image_raw，或 connect.txt 中记录的其他候选 Image 话题。
+
+点云地形：
+
+  /camera/depth/points，或其他候选 PointCloud2 话题；
+  点云 header.frame_id 到 base_link 的 TF。
+
+机器狗执行层：
+
+  订阅 /cmd_vel
+  订阅 /crossing/mode
+  订阅 /crossing/action
+  在驱动侧实现命令超时、急停、姿态保护和关节限位
+
+缺少点云时普通越障管理器保持 STOP，缺少导航传感器时 Nav2 保持未激活，均属于预期
+的失效安全行为。
+
+
+六、已经完成的工作
+------------------
+
+机器人模型和控制：
+
+1. 通用 12 自由度四足 URDF/Xacro。
+2. IMU、2D 雷达、RGB-D 相机坐标系。
+3. mock ros2_control、关节状态和轨迹控制器。
+4. RViz 模型调试入口。
+
+SLAM 和 Nav2：
+
+1. SLAM Toolbox 在线异步建图。
+2. Nav2 全局规划、DWB 局部控制、恢复行为和行为树导航。
+3. 精简启动文件，删除未使用的路由和停靠节点。
+4. 固定速度链：cmd_vel_nav -> smoothed -> terrain_safe -> cmd_vel。
+5. Collision Monitor 是 /cmd_vel 唯一最终发布者。
+6. 雷达、里程计和定位 TF 就绪后才激活 Nav2。
+7. 无传感器启动和关闭不再触发 Nav2 生命周期崩溃。
+
+OpenCV：
+
+1. HSV 橙色/蓝色分割。
+2. Gaussian Blur、Canny 和轮廓几何识别。
+3. poles、height_bar、wall、colored_obstacle 四类证据。
+4. 最近 5 帧至少 3 帧一致的稳定判断。
+5. 默认 8 Hz、最大 640 像素宽，适合 RK3588。
+6. 默认图像话题锁定，源失联后自动切换。
+
+点云：
+
+1. 自动接入常见 PointCloud2 话题。
+2. 按消息时间戳转换到 base_link。
+3. NumPy 有限值过滤、ROI 裁剪和有界降采样。
+4. 分位数地面/障碍高度估计。
+5. 最小二乘坡度、粗糙度和可通行度估计。
+6. 同一份 ROI 点云进入 Nav2 local_costmap。
+7. 点云源锁定和失联自动切换。
+
+融合和安全：
+
+1. 点云决定 WALK、STEP、CLIMB、STOP。
+2. OpenCV 只让 WALK 减速并等待深度确认。
+3. 高度阈值和视觉证据合法性检查。
+4. 导航命令和越障决策双心跳速度保护。
+5. Python 节点重复 SIGINT 清理保护。
+6. 合成 RGB + PointCloud2 端到端融合验证。
+
+比赛框架：
+
+1. Robocon V1.0 的 210 秒状态机。
+2. 障碍提示、完成、失败、重试、计分和返回启动区。
+3. 足端接触、有效距离、T 字台阶进度检查。
+4. 障碍接近点到 NavigateToPose 的 Action 桥接。
+
+工程状态：
+
+  6 个 ROS 2 包可编译。
+  当前 17 项测试全部通过。
+  README、算法原理、通信合同和快速上手文档齐全。
+
+
+七、目前未完成的部分
+--------------------
+
+1. 尚未接入具体机器狗厂商 SDK。
+2. 尚未实现真实电机、编码器、IMU 和足端力传感器硬件插件。
+3. STEP、CLIMB、LOW_PROFILE 仍是动作请求，不是完整关节轨迹。
+4. 尚无 MPC、WBC、逆运动学和动态落脚点规划器。
+5. 尚无完整高程地图、坡面分割和可落脚区域地图。
+6. RGB 包围框尚未与深度 ROI 做时间同步和空间关联。
+7. OpenCV 阈值需要使用比赛现场相机与光照标定。
+8. course_waypoints.yaml 仍是占位坐标。
+9. URDF 尺寸、质量、惯性和传感器外参需要按真机测量。
+10. 缺少 Gazebo/Isaac 完整赛道和自动回归场景。
+11. 缺少 RK3588 长时间 CPU、内存、温度和延迟测试。
+12. 硬件急停、驱动看门狗和系统故障恢复尚未经过实机验证。
+
+
+八、推荐后续开发路线
+--------------------
+
+P0：先安全接入真机
+
+1. 确认机器狗品牌、SDK 版本、控制模式和通信方式。
+2. 选择 SDK 适配节点或 ros2_control hardware plugin。
+3. 发布稳定 /odom 和 odom -> base_link。
+4. 接入真实 /scan、RGB、PointCloud2 和传感器 TF。
+5. 完成时间同步、相机内外参、雷达外参和 IMU 标定。
+6. 在驱动侧实现急停、命令超时、姿态限制和关节限位。
+7. 首次联调只允许架空、保护绳和低速模式。
+
+P1：实现真正的越障动作
+
+1. 将 /crossing/action 字符串升级为可反馈、可取消的 ROS 2 Action。
+2. 分别实现 STEP、CLIMB、LOW_PROFILE 动作状态机。
+3. 接入足端接触和机身姿态反馈。
+4. 越障时锁定普通 /cmd_vel，完成后平滑交还 Nav2。
+5. 为每种障碍定义最大高度、坡度、速度和姿态安全包络。
+
+P2：RGB 与深度精确融合
+
+1. 使用 message_filters 同步 RGB 与深度消息。
+2. 将 OpenCV 包围框投影到深度图或点云。
+3. 估算框内障碍距离、宽度、高度和地面接触位置。
+4. 增加障碍跟踪 ID，避免重复触发。
+5. 使用 rosbag 收集误检和漏检数据并调参。
+
+P3：高程地图与落脚规划
+
+1. 构建机器人周围局部高程栅格。
+2. 区分台阶、坡面、坑洞、边缘和不可见区域。
+3. 根据腿部工作空间生成候选落脚点。
+4. 按高度差、坡度、粗糙度和边缘距离评分。
+5. 将落脚序列交给 MPC/WBC，并用接触反馈修正。
+6. Nav2 管远距离路径，足步规划管最后 1～2 米。
+
+P4：仿真与比赛验证
+
+1. 根据正式场地图纸更新 course_waypoints.yaml。
+2. 创建完整 Gazebo 或 Isaac 障碍赛场景。
+3. 为每类障碍建立成功、失败、超时和恢复测试。
+4. 校验比赛计分、接触规则和返回启动区逻辑。
+5. 录制 rosbag 并建立离线回归测试。
+6. 在 RK3588 长期运行并记录资源与延迟。
+
+
+九、常用调试命令
+----------------
+
+节点与接口：
+
+  ros2 node list
+  ros2 topic list -t
+  ros2 action list -t
+  ros2 service list -t
+
+传感器频率：
+
+  ros2 topic hz /scan
+  ros2 topic hz /odom
+  ros2 topic hz /camera/image_raw
+  ros2 topic hz /camera/depth/points
+
+融合结果：
+
+  ros2 topic echo /vision/obstacle_evidence
+  ros2 topic echo /terrain/features
+  ros2 topic echo /crossing/mode
+  ros2 topic echo /crossing/action
+  ros2 topic echo /crossing/speed_scale
+
+TF：
+
+  ros2 run tf2_ros tf2_echo map base_link
+  ros2 run tf2_ros tf2_echo odom base_link
+  ros2 run tf2_ros tf2_echo base_link camera_link
+
+速度发布者：
+
+  ros2 topic info /cmd_vel --verbose
+
+期望只有 collision_monitor 发布 /cmd_vel。
+
+Nav2 生命周期：
+
+  ros2 lifecycle get /controller_server
+  ros2 lifecycle get /planner_server
+
+OpenCV 调试：
+
+1. 将 vision.yaml 的 publish_debug_mask 设置为 true。
+2. 执行：
+
+  ros2 run rqt_image_view rqt_image_view /vision/debug_mask
+
+
+十、常见问题
+------------
+
+Nav2 一直未激活：
+  检查 /scan、/odom 是否持续发布，map -> base_link 是否存在；查看
+  nav2_readiness_monitor 日志中的 missing 项。
+
+terrain_analyzer 等待 TF：
+  检查点云 header.frame_id、该 frame 到 base_link 的 TF 和时间同步。
+
+OpenCV 没有识别：
+  检查活动图像话题、编码、HSV、Canny、min_area_px；开启 debug_mask。
+
+视觉识别到了但没有 STEP/CLIMB：
+  这是设计行为。危险动作必须由点云几何确认。
+
+机器人一直 STOP：
+  检查 /terrain/features、有效点数、/crossing/speed_scale 和
+  /cmd_vel_smoothed 是否持续发布。
+
+多个相机话题选错：
+  使用 camera_topic 或 point_cloud_topic 显式指定；也可等待当前源超时后自动切换。
+
+关闭时出现崩溃：
+  使用最新代码，正常按一次 Ctrl+C 并等待清理，不要使用 kill -9。
+
+
+十一、每次修改后的标准流程
+--------------------------
+
+1. 修改代码、配置和测试。
+
+2. 同步检查四份根目录文档：
+
+  README.md        使用、安装、目录和启动方式
+  instruction.txt 模块职责、算法与调试原理
+  connect.txt     Topic、Action、Service、TF、字段、QoS 和超时
+  quickstart.txt  已完成工作、已知限制和后续路线
+
+3. 编译测试：
+
+  source /opt/ros/jazzy/setup.bash
+  ./scripts/build.sh
+  source install/setup.bash
+  colcon test --event-handlers console_direct+
+  colcon test-result --verbose
+
+4. 检查差异：
+
+  git status -sb
+  git diff --check
+  git diff --stat
+
+5. 直接提交并推送 main：
+
+  git switch main
+  git pull --ff-only origin main
+  git add 明确的文件列表
+  git commit -m "简洁描述本次修改"
+  git push origin main
+
+禁止使用 git push --force 覆盖 main。推送前必须确认没有无关文件、构建测试通过，且
+四份文档与代码处于同一版本。
+
+
+十二、新开发者接手完成标准
+--------------------------
+
+1. 能独立编译 6 个包并运行全部测试。
+2. 能解释 map、odom、base_link 和传感器 frame 的关系。
+3. 能说明 /scan、/odom、RGB 和 PointCloud2 被哪些节点使用。
+4. 能解释 OpenCV 为什么不能单独触发 CLIMB。
+5. 能说明 /cmd_vel 的完整链路和各层安全职责。
+6. 能使用 rosbag 或合成消息验证 vision、terrain 和 crossing 输出。
+7. 能找到主要 YAML 参数并进行现场标定。
+8. 能根据 connect.txt 编写机器狗 SDK 适配器。
+9. 修改接口后能同步更新四份根目录文档。
+10. 验证完成后能够安全地直接推送 main。

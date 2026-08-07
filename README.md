@@ -284,7 +284,7 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 | `quadruped_planning/config/crossing.yaml` | 越障阈值、视觉融合、速度门超时 |
 | `quadruped_planning/config/competition.yaml` | 比赛时间、计分和约束 |
 | `quadruped_planning/config/course_waypoints.yaml` | 障碍接近点 |
-| `slam/config/slam_toolbox.yaml` | SLAM Toolbox |
+| `slam/config/slam.yaml` | SLAM Toolbox |
 | `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
 
 公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
@@ -309,9 +309,9 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 
 - `README.md`：安装、启动、总体架构和使用入口。
 - `instruction.txt`：各模块作用、算法原理和现场调试顺序。
-- `com.txt`：全部节点、话题、消息类型、字段、Action、Service、TF、QoS 和超时合同。
-- `DEVELOPMENT_GUIDE.txt`：新开发者快速上手、当前进度、常见问题和后续开发路线。
+- `connect.txt`：全部节点、话题、消息类型、字段、Action、Service、TF、QoS 和超时合同。
+- `quickstart.txt`：启动命令、当前成果、常见问题和后续开发路线。
 
-后续每次修改代码时都应同步检查这四份文档；接口变化必须更新 `com.txt`，算法或职责
-变化必须更新 `instruction.txt`，启动和使用方式变化必须更新 `README.md`，项目进度和
-路线变化必须更新 `DEVELOPMENT_GUIDE.txt`。验证通过后直接提交并推送 `main`。
+后续每次完成修改都同步检查这四份文档：接口变化更新 `connect.txt`，算法或职责变化
+更新 `instruction.txt`，启动和使用方式变化更新 `README.md`，完成进度与后续计划变化
+更新 `quickstart.txt`。验证通过后直接提交并推送 `main`，不使用强制推送。

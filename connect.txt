@@ -1,4 +1,4 @@
-Wakula ROS 2 通信接口说明
+Wakula ROS 2 通信接口说明（connect.txt）
 ========================
 
 文档用途
@@ -611,10 +611,10 @@ SDK 或状态估计器至少发布：
 
   README.md        面向使用者的安装、启动和总体架构说明
   instruction.txt 面向开发者的模块作用、算法原理和调试步骤
-  com.txt         面向集成工作的节点、话题、类型、字段、QoS 和超时合同
-  DEVELOPMENT_GUIDE.txt 面向接手开发者的快速启动、当前进度和后续路线
+  connect.txt     面向集成工作的节点、话题、类型、字段、QoS 和超时合同
+  quickstart.txt  面向接手开发者的启动命令、当前进度、问题和后续路线
 
 新增、删除或重命名任何 Topic、Action、Service、TF、节点、参数或字段协议时，必须同步
-更新 com.txt；改变算法或模块职责时更新 instruction.txt；改变安装、启动、目录结构或
-主要功能时更新 README.md；改变完成进度、限制或后续计划时更新 DEVELOPMENT_GUIDE.txt。
-完成代码修改后应运行构建和测试，再直接提交并推送 main。
+更新 connect.txt；改变算法或模块职责时更新 instruction.txt；改变安装、启动、目录结构
+或主要功能时更新 README.md；改变完成进度、限制或后续计划时更新 quickstart.txt。
+完成代码修改后应运行构建和测试，再直接提交并推送 main，禁止强制推送。
