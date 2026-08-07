@@ -84,33 +84,49 @@ Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
 点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
 
-## 4. 默认传感器接口
+## 4. 可替换传感器接口
 
-最低导航输入：
+算法内部保持 ROS 导航通用合同。更换硬件时优先让驱动发布标准消息；话题不同只修改
+完整启动命令的参数，不修改 SLAM、Nav2 或感知源码：
 
-```text
-/scan                 sensor_msgs/LaserScan
-/odom                 nav_msgs/Odometry
-odom -> base_link     TF
-```
+| 数据 | 内部默认 | 消息类型 | 完整启动参数 |
+|---|---|---|---|
+| 2D 激光 | `/scan` | `sensor_msgs/msg/LaserScan` | `scan_topic` |
+| 里程计 | `/odom` | `nav_msgs/msg/Odometry` | `odom_topic` |
+| RGB | 自动选择，见下表 | `sensor_msgs/msg/Image` | `camera_topic` |
+| 深度/3D 点云 | 自动选择，见下表 | `sensor_msgs/msg/PointCloud2` | `point_cloud_topic` |
 
-节点使用传感器 QoS，并自动监听常见相机默认话题：
+`scan_topic` 会同时传给 SLAM Toolbox、Nav2 两张代价地图、Collision Monitor、就绪监视器
+和 RViz；`odom_topic` 会同时传给 Nav2、就绪监视器与比赛状态机，避免换设备时漏改某个
+节点。默认值仍是 ROS 常用的 `/scan`、`/odom`。
+
+图像和点云使用 Sensor Data QoS，并自动监听常见驱动话题：
 
 ```text
 RGB:
   /camera/image_raw
   /camera/color/image_raw
+  /camera/rgb/image_raw
+  /camera/camera/color/image_raw
   /image_raw
 
 PointCloud2:
   /camera/depth/points
   /camera/depth/color/points
+  /camera/camera/depth/color/points
+  /camera/depth_registered/points
   /camera/points
   /points
+  /velodyne_points
+  /ouster/points
+  /livox/lidar
 ```
 
-接入任意相机的原则是保持 ROS 标准消息并发布相机坐标系到 `base_link` 的 TF。若驱动
-话题不同，无需改 Python，启动时覆盖 `camera_topic` 或 `point_cloud_topic` 即可。
+自动模式只锁定第一个持续发布的数据源，失联超过 2 秒才切换。接入任意相机或雷达的
+原则是保持上表消息类型，并让消息 `header.frame_id` 到 `base_link` 的 TF 存在。若驱动
+只发布压缩图像或厂商私有点云，先用 `image_transport`、厂商转换器或
+`pointcloud_to_laserscan` 转成标准消息。相机标定建议同时保留标准
+`sensor_msgs/msg/CameraInfo`，当前二维 OpenCV 识别不依赖它，但后续三维投影会使用。
 
 ## 5. 安装、编译与测试
 
@@ -162,12 +178,20 @@ ros2 launch slam slam.launch.py rviz:=false
 ros2 launch slam slam.launch.py vision:=false
 ```
 
-覆盖非默认相机话题：
+覆盖任意雷达、里程计、相机和点云话题：
 
 ```bash
 ros2 launch slam slam.launch.py \
+  scan_topic:=/my_lidar/scan \
+  odom_topic:=/robot/odom \
   camera_topic:=/my_camera/image_raw \
   point_cloud_topic:=/my_camera/points
+```
+
+只更换符合 `LaserScan` 标准的 2D 雷达时通常只需：
+
+```bash
+ros2 launch slam slam.launch.py scan_topic:=/new_lidar/scan
 ```
 
 只启动模型、控制、感知和安全门，不启用 SLAM/Nav2：

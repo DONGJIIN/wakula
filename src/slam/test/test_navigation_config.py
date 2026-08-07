@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import rclpy
+from launch.actions import DeclareLaunchArgument
 import yaml
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
@@ -12,6 +13,15 @@ from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
+
+
+def launch_argument_names(description):
+    """Return public argument names from one launch description."""
+    return {
+        entity.name
+        for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument)
+    }
 
 
 def test_local_costmap_fuses_scan_and_depth_points():
@@ -29,13 +39,26 @@ def test_local_costmap_fuses_scan_and_depth_points():
 
 
 def test_navigation_launch_description_is_constructible():
-    """The reduced Nav2 launch entry must remain importable."""
+    """Nav2 exposes one consistent lidar and odometry adaptation point."""
     path = PACKAGE_ROOT / "launch" / "navigation.launch.py"
     spec = importlib.util.spec_from_file_location("navigation_launch", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
     assert len(description.entities) >= 2
+    assert {"scan_topic", "odom_topic"} <= launch_argument_names(description)
+
+
+def test_full_slam_launch_exposes_sensor_topic_overrides():
+    """The public full-system entry forwards replaceable sensor topics."""
+    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
+    spec = importlib.util.spec_from_file_location("slam_launch", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    description = module.generate_launch_description()
+    assert {"scan_topic", "odom_topic", "camera_topic", "point_cloud_topic"} <= (
+        launch_argument_names(description)
+    )
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

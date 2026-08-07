@@ -23,6 +23,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     use_control = LaunchConfiguration("use_control")
     vision = LaunchConfiguration("vision")
+    odom_topic = LaunchConfiguration("odom_topic")
     camera_topic = LaunchConfiguration("camera_topic")
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
     competition = LaunchConfiguration("competition")
@@ -59,6 +60,11 @@ def generate_launch_description():
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("use_control", default_value="true"),
             DeclareLaunchArgument("vision", default_value="true"),
+            DeclareLaunchArgument(
+                "odom_topic",
+                default_value="/odom",
+                description="Odometry source remapped to the internal /odom contract.",
+            ),
             DeclareLaunchArgument(
                 "camera_topic",
                 default_value="",
@@ -145,6 +151,7 @@ def generate_launch_description():
                 executable="competition_obstacle_manager",
                 output="screen",
                 parameters=[competition_file, common_time],
+                remappings=[("/odom", odom_topic)],
                 condition=IfCondition(competition),
             ),
             Node(

@@ -27,7 +27,16 @@ def generate_launch_description():
     autostart = LaunchConfiguration("autostart")
     params_file = LaunchConfiguration("params_file")
     log_level = LaunchConfiguration("log_level")
-    tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    scan_topic = LaunchConfiguration("scan_topic")
+    odom_topic = LaunchConfiguration("odom_topic")
+    # All consumers keep canonical names in nav2.yaml. These two launch-level
+    # remaps are the only changes needed for a different lidar or odometry source.
+    sensor_remaps = [("/scan", scan_topic), ("/odom", odom_topic)]
+    tf_remaps = [
+        ("/tf", "tf"),
+        ("/tf_static", "tf_static"),
+        *sensor_remaps,
+    ]
     cmd_remaps = tf_remaps + [("cmd_vel", "cmd_vel_nav")]
     lifecycle_nodes = [
         "controller_server",
@@ -121,7 +130,13 @@ def generate_launch_description():
             package="slam",
             executable="nav2_readiness_monitor",
             output="screen",
-            parameters=[{"use_sim_time": use_sim_time}],
+            parameters=[
+                {
+                    "use_sim_time": use_sim_time,
+                    "scan_topic": scan_topic,
+                    "odom_topic": odom_topic,
+                }
+            ],
             condition=IfCondition(autostart),
         ),
     ]
@@ -132,6 +147,16 @@ def generate_launch_description():
             DeclareLaunchArgument("autostart", default_value="true"),
             DeclareLaunchArgument("params_file"),
             DeclareLaunchArgument("log_level", default_value="info"),
+            DeclareLaunchArgument(
+                "scan_topic",
+                default_value="/scan",
+                description="LaserScan source remapped to the Nav2 /scan contract.",
+            ),
+            DeclareLaunchArgument(
+                "odom_topic",
+                default_value="/odom",
+                description="Odometry source remapped to the Nav2 /odom contract.",
+            ),
             GroupAction(actions=[SetParameter("use_sim_time", use_sim_time), *nodes]),
         ]
     )

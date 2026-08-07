@@ -2,7 +2,12 @@ vision_obstacle_detector:
   ros__parameters:
     # Empty means automatically subscribe to the common ROS camera defaults.
     image_topic: ""
-    image_topic_candidates: [/camera/image_raw, /camera/color/image_raw, /image_raw]
+    image_topic_candidates:
+      - /camera/image_raw
+      - /camera/color/image_raw
+      - /camera/rgb/image_raw
+      - /camera/camera/color/image_raw
+      - /image_raw
     debug_mask_topic: /vision/debug_mask
     publish_debug_mask: false
     processing_hz: 8.0

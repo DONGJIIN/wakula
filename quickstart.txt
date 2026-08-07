@@ -87,7 +87,7 @@ Wakula 后续开发快速上手指南
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-当前基准为 17 项测试、0 error、0 failure。
+当前基准为 19 项测试、0 error、0 failure。
 
 8. 查看机器人模型：
 
@@ -265,6 +265,7 @@ bootstrap.sh 会读取 6 个 package.xml，并用 rosdep 补齐遗漏依赖，�
   2D 雷达       发布 /scan，sensor_msgs/msg/LaserScan
   状态估计器    发布 /odom 和 odom -> base_link
   RGB 相机       发布标准 sensor_msgs/msg/Image
+  相机标定       建议发布同命名空间 sensor_msgs/msg/CameraInfo，供后续三维融合
   深度/3D 雷达  发布含 x/y/z 的 sensor_msgs/msg/PointCloud2
   传感器外参    发布传感器 frame -> base_link TF
   SDK 适配器    订阅 /cmd_vel、/crossing/mode、/crossing/action
@@ -275,6 +276,38 @@ bootstrap.sh 会读取 6 个 package.xml，并用 rosdep 补齐遗漏依赖，�
 
 然后注销并重新登录，并安装厂商提供的 udev 规则。相机内参、雷达/相机外参、关节零位、
 IMU、里程计尺度和时间同步参数必须在真机重新标定，不能照搬另一台机器的数值。
+
+更换设备的最快流程：
+
+1. 启动新驱动，用 ros2 topic list -t 找到实际话题和消息类型。
+2. 确认 2D 雷达为 LaserScan、RGB 为 Image、点云为 PointCloud2、里程计为 Odometry。
+3. 用 ros2 topic echo <话题> --once 检查 header.frame_id 和时间戳。
+4. 发布该传感器 frame 到 base_link 的 TF；不要在算法里写死厂商 frame。
+5. 只在完整启动命令中指定不同名称：
+
+  ros2 launch slam slam.launch.py \
+    scan_topic:=/new_lidar/scan \
+    odom_topic:=/new_robot/odom \
+    camera_topic:=/new_camera/image_raw \
+    point_cloud_topic:=/new_camera/points
+
+6. 在 RViz 检查新激光/点云与机器人重合，再低速测试。
+
+如果相机已经发布以下常见 Image 话题，camera_topic 留空即可自动选择：
+
+  /camera/image_raw
+  /camera/color/image_raw
+  /camera/rgb/image_raw
+  /camera/camera/color/image_raw
+  /image_raw
+
+常见 RGB-D、Velodyne、Ouster、Livox PointCloud2 名称已加入自动候选；同时连接多个设备
+或厂商命名不同，建议显式指定 point_cloud_topic，避免自动模式选到非目标数据源。
+
+若相机只发布 CompressedImage，可安装 ros-jazzy-image-transport-plugins 并用
+image_transport republish 成 Image。若只有 3D 点云但需要 2D SLAM，可安装
+ros-jazzy-pointcloud-to-laserscan，将点云转换为 LaserScan，再把输出传给 scan_topic。
+厂商自定义消息必须先由厂商转换节点变成上述 ROS 标准消息。
 
 3.8 两台电脑或开发电脑 + RK3588 联机
 
@@ -397,9 +430,11 @@ scripts
 
   ros2 launch slam slam.launch.py vision:=false
 
-指定非默认相机话题：
+指定非默认雷达、里程计、相机和点云话题：
 
   ros2 launch slam slam.launch.py \
+    scan_topic:=/my_lidar/scan \
+    odom_topic:=/robot/odom \
     camera_topic:=/my_camera/image_raw \
     point_cloud_topic:=/my_camera/points
 
@@ -476,6 +511,7 @@ OpenCV：
 4. 最近 5 帧至少 3 帧一致的稳定判断。
 5. 默认 8 Hz、最大 640 像素宽，适合 RK3588。
 6. 默认图像话题锁定，源失联后自动切换。
+7. 覆盖通用、RGB、RealSense 风格命名，未知话题可由 camera_topic 指定。
 
 点云：
 
@@ -486,6 +522,7 @@ OpenCV：
 5. 最小二乘坡度、粗糙度和可通行度估计。
 6. 同一份 ROI 点云进入 Nav2 local_costmap。
 7. 点云源锁定和失联自动切换。
+8. 覆盖 RGB-D、Velodyne、Ouster、Livox 常见 PointCloud2 名称。
 
 融合和安全：
 
@@ -506,7 +543,9 @@ OpenCV：
 工程状态：
 
   6 个 ROS 2 包可编译。
-  当前 17 项测试全部通过。
+  scan_topic、odom_topic 可一次性适配 SLAM、Nav2、碰撞保护和比赛节点。
+  camera_topic、point_cloud_topic 支持自动候选或显式单源锁定。
+  当前 19 项测试全部通过。
   README、算法原理、通信合同和快速上手文档齐全。
 
 
@@ -629,8 +668,16 @@ OpenCV 调试：
 --------------
 
 Nav2 一直未激活：
-  检查 /scan、/odom 是否持续发布，map -> base_link 是否存在；查看
+  检查实际 scan_topic、odom_topic 是否持续发布，map -> base_link 是否存在；查看
   nav2_readiness_monitor 日志中的 missing 项。
+
+更换雷达后 SLAM 或 Collision Monitor 没数据：
+  不要分别修改多个 YAML；从 slam.launch.py 启动并设置一次 scan_topic。确认新话题类型
+  是 sensor_msgs/msg/LaserScan，3D PointCloud2 需先转换为 LaserScan。
+
+更换相机后没有图像：
+  检查消息必须为 sensor_msgs/msg/Image，而不是 CompressedImage 或厂商私有类型；不在
+  自动候选列表时设置 camera_topic，压缩图像先用 image_transport 转换。
 
 terrain_analyzer 等待 TF：
   检查点云 header.frame_id、该 frame 到 base_link 的 TF 和时间同步。

@@ -23,8 +23,13 @@ TerrainResult = Tuple[list, int]
 DEFAULT_POINT_CLOUD_TOPICS = [
     "/camera/depth/points",
     "/camera/depth/color/points",
+    "/camera/camera/depth/color/points",
+    "/camera/depth_registered/points",
     "/camera/points",
     "/points",
+    "/velodyne_points",
+    "/ouster/points",
+    "/livox/lidar",
 ]
 
 
