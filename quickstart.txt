@@ -108,7 +108,211 @@ Wakula 后续开发快速上手指南
   要选择下一项开发任务：quickstart.txt
 
 
-三、目录速查
+三、在另一台电脑完整复现
+------------------------
+
+以下步骤用于全新电脑或重新安装后的 RK3588。推荐严格使用 Ubuntu 24.04 LTS 64 位和
+ROS 2 Jazzy；支持 amd64 与 arm64。不要复制 build、install、log，应克隆源码并在目标
+电脑重新编译。建议至少 4 核 CPU、8 GB 内存和 20 GB 可用空间；无界面运行时可不启动 RViz。
+
+3.1 需要准备的全部类别
+
+必需：
+
+  Ubuntu 24.04 LTS 64 位（UTF-8 locale）
+  ROS 2 Jazzy Desktop、ros-dev-tools、rosdep、colcon
+  Git、C/C++ 编译工具、CMake、Python 3.12
+  Nav2、SLAM Toolbox、ros2_control、OpenCV、cv_bridge
+  本仓库源码和各 package.xml 声明的 ROS/Python 依赖
+
+开发电脑推荐：
+
+  Visual Studio Code
+  Python、Pylance、CMake Tools、C/C++、Remote SSH、XML 六个插件
+  RViz、rqt_image_view、tf2_tools 等可视化调试工具
+
+真机另需：
+
+  2D 雷达、相机、机器狗 SDK 对应的 ROS 2 Jazzy 驱动或适配节点
+  对应设备的 udev 规则、USB/串口权限和标定文件
+  /scan、/odom、TF、标准 Image/PointCloud2 以及 /cmd_vel SDK 桥接
+  多机运行时一致的 ROS_DOMAIN_ID、网络组播条件和系统时钟
+
+本项目不需要 PyTorch、CUDA、TensorRT、神经网络模型或其他推理运行时。
+
+3.2 安装 Ubuntu 基础工具并配置 ROS 软件源
+
+先确认系统：
+
+  lsb_release -a
+  uname -m
+  locale
+
+按 ROS 2 官方方式配置 UTF-8、Universe 和 ROS apt 软件源：
+
+  sudo apt update
+  sudo apt install -y locales software-properties-common curl
+  sudo locale-gen en_US en_US.UTF-8
+  sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+  export LANG=en_US.UTF-8
+  sudo add-apt-repository universe
+  export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F'"' '{print $4}')
+  curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo ${UBUNTU_CODENAME:-${VERSION_CODENAME}})_all.deb"
+  sudo dpkg -i /tmp/ros2-apt-source.deb
+  sudo apt update
+
+官方参考：
+  https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html
+
+3.3 安装 ROS 2、编译工具和项目运行依赖
+
+  sudo apt install -y \
+    ros-jazzy-desktop ros-dev-tools \
+    git build-essential cmake \
+    python3-pip python3-venv python3-rosdep \
+    python3-colcon-common-extensions python3-yaml \
+    python3-numpy python3-opencv \
+    ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
+    ros-jazzy-slam-toolbox \
+    ros-jazzy-ros2-control ros-jazzy-ros2-controllers \
+    ros-jazzy-joint-state-publisher-gui \
+    ros-jazzy-robot-state-publisher ros-jazzy-xacro \
+    ros-jazzy-cv-bridge ros-jazzy-sensor-msgs-py \
+    ros-jazzy-tf2-sensor-msgs ros-jazzy-tf2-tools \
+    ros-jazzy-rqt-image-view
+
+每台电脑只需初始化 rosdep 一次；若提示已初始化可继续：
+
+  sudo rosdep init
+  rosdep update
+
+不要用 Conda 的 Python 运行 apt 安装的 ROS 2；本项目统一使用 /usr/bin/python3，避免
+cv_bridge 与 ROS 二进制包 ABI 不匹配。第三方 Python 库应优先写入 package.xml 并由
+rosdep 安装，不要随意 sudo pip install。
+
+3.4 安装 VS Code 和仓库推荐插件
+
+从 https://code.visualstudio.com/download 下载 Ubuntu 对应的 .deb（amd64 或 arm64），
+在下载目录执行：
+
+  sudo apt install ./code_*.deb
+
+确认 code --version 可用后，安装本仓库全部推荐插件：
+
+  code --install-extension ms-python.python
+  code --install-extension ms-python.vscode-pylance
+  code --install-extension ms-vscode.cmake-tools
+  code --install-extension ms-vscode.cpptools
+  code --install-extension ms-vscode-remote.remote-ssh
+  code --install-extension redhat.vscode-xml
+
+克隆后用 code ~/wakula 打开根目录，VS Code 也会读取 .vscode/extensions.json 提示安装。
+.vscode/settings.json 使用 ${workspaceFolder}，因此用户名或克隆位置不同也无需改路径。
+Remote SSH 仅在开发电脑远程连接 RK3588 时需要；其余插件用于 Python/C++、CMake 和
+URDF/Xacro 编辑。VS Code 不是机器人运行时依赖。
+
+3.5 配置 Git、克隆代码并锁定版本
+
+  git config --global user.name "你的名字"
+  git config --global user.email "你的邮箱"
+  git clone https://github.com/DONGJIIN/wakula.git ~/wakula
+  cd ~/wakula
+  git switch main
+  git pull --ff-only origin main
+
+要精确复现实验版本，应在原电脑记录 git rev-parse HEAD，在新电脑执行：
+
+  git checkout <记录的提交哈希>
+
+只拉取公开仓库不需要 GitHub 登录。提交或推送需要配置 GitHub HTTPS token、SSH key
+或 GitHub CLI 登录；这不是运行工程的必要条件。
+
+3.6 解析源码依赖、编译和测试
+
+  cd ~/wakula
+  source /opt/ros/jazzy/setup.bash
+  ./scripts/bootstrap.sh
+  ./scripts/build.sh
+  source install/setup.bash
+  colcon test --event-handlers console_direct+
+  colcon test-result --verbose
+
+bootstrap.sh 会读取 6 个 package.xml，并用 rosdep 补齐遗漏依赖，因此 package.xml 是
+最终依赖清单，上面的 apt 列表是可直接安装的完整基线。检查：
+
+  ros2 pkg prefix quadruped_description
+  ros2 pkg prefix quadruped_perception
+  ros2 pkg prefix quadruped_planning
+  ros2 pkg prefix slam
+  python3 -c "import cv2, numpy; print(cv2.__version__)"
+
+每个新终端都执行：
+
+  source /opt/ros/jazzy/setup.bash
+  cd ~/wakula
+  source install/setup.bash
+
+可选地把 source 写入 ~/.bashrc，但同时维护多个 ROS 发行版时不建议自动 source。
+
+3.7 相机、雷达和机器狗硬件依赖
+
+不存在适用于所有硬件的通用驱动。必须按设备厂商说明安装与 ROS 2 Jazzy、CPU 架构
+匹配的驱动；若厂商只提供源码，将驱动放在单独工作空间编译，再先 source 驱动工作空间，
+最后 source ~/wakula/install/setup.bash。不要把厂商 SDK 二进制和密钥提交到本仓库。
+
+接入时至少满足：
+
+  2D 雷达       发布 /scan，sensor_msgs/msg/LaserScan
+  状态估计器    发布 /odom 和 odom -> base_link
+  RGB 相机       发布标准 sensor_msgs/msg/Image
+  深度/3D 雷达  发布含 x/y/z 的 sensor_msgs/msg/PointCloud2
+  传感器外参    发布传感器 frame -> base_link TF
+  SDK 适配器    订阅 /cmd_vel、/crossing/mode、/crossing/action
+
+串口或 USB 设备常见权限配置：
+
+  sudo usermod -aG dialout $USER
+
+然后注销并重新登录，并安装厂商提供的 udev 规则。相机内参、雷达/相机外参、关节零位、
+IMU、里程计尺度和时间同步参数必须在真机重新标定，不能照搬另一台机器的数值。
+
+3.8 两台电脑或开发电脑 + RK3588 联机
+
+两端必须使用同一 ROS 2 发行版、相同 ROS_DOMAIN_ID，并允许 DDS UDP/组播通过网络：
+
+  export ROS_DOMAIN_ID=24
+  export ROS_LOCALHOST_ONLY=0
+
+两端使用 chrony、NTP 或局域网时钟源同步系统时间。默认 RMW 为 Fast DDS；若修改
+RMW_IMPLEMENTATION，两端应安装并使用相同实现。校园网、访客 Wi-Fi、VPN 和防火墙
+常会阻止组播，优先使用同一路由器或有线局域网。用以下命令验收：
+
+  ros2 node list
+  ros2 topic list -t
+  ros2 topic hz /scan
+  ros2 topic echo /odom --once
+
+3.9 无硬件复现和最终验收
+
+没有传感器也能验证安装、模型和安全等待行为：
+
+  ros2 launch quadruped_description display.launch.py
+  ros2 launch slam slam.launch.py rviz:=false
+
+第二条命令在没有 /scan、/odom、map -> base_link 时应等待而不激活 Nav2。最终验收：
+
+  [ ] git status -sb 显示目标提交且工作区干净
+  [ ] ./scripts/build.sh 成功
+  [ ] colcon test-result --verbose 为 0 error、0 failure
+  [ ] URDF 能在 RViz 打开
+  [ ] 无传感器时 Nav2 安全等待，Ctrl+C 正常退出
+  [ ] 真机 /scan、/odom、Image、PointCloud2 和 TF 频率稳定
+  [ ] RViz 中点云、激光、机器人模型坐标重合
+  [ ] /cmd_vel 只有 Collision Monitor 一个最终发布者
+  [ ] 断传感器或决策超时后输出零速度
+
+
+四、目录速查
 ------------
 
 src/quadruped_description
@@ -164,7 +368,7 @@ scripts
   build.sh      使用统一参数执行 colcon build。
 
 
-四、常用启动命令
+五、常用启动命令
 ----------------
 
 每个新终端先执行：
@@ -212,7 +416,7 @@ Robocon 比赛模式：
   ros2 launch quadruped_bringup bringup.launch.py use_control:=true
 
 
-五、真机启动前必须提供的数据
+六、真机启动前必须提供的数据
 ----------------------------
 
 基础导航：
@@ -244,7 +448,7 @@ SLAM Toolbox 根据 /scan、/odom 和 TF 产生 map -> odom。
 的失效安全行为。
 
 
-六、已经完成的工作
+七、已经完成的工作
 ------------------
 
 机器人模型和控制：
@@ -306,7 +510,7 @@ OpenCV：
   README、算法原理、通信合同和快速上手文档齐全。
 
 
-七、目前未完成的部分
+八、目前未完成的部分
 --------------------
 
 1. 尚未接入具体机器狗厂商 SDK。
@@ -323,7 +527,7 @@ OpenCV：
 12. 硬件急停、驱动看门狗和系统故障恢复尚未经过实机验证。
 
 
-八、推荐后续开发路线
+九、推荐后续开发路线
 --------------------
 
 P0：先安全接入真机
@@ -371,7 +575,7 @@ P4：仿真与比赛验证
 6. 在 RK3588 长期运行并记录资源与延迟。
 
 
-九、常用调试命令
+十、常用调试命令
 ----------------
 
 节点与接口：
@@ -421,8 +625,8 @@ OpenCV 调试：
   ros2 run rqt_image_view rqt_image_view /vision/debug_mask
 
 
-十、常见问题
-------------
+十一、常见问题
+--------------
 
 Nav2 一直未激活：
   检查 /scan、/odom 是否持续发布，map -> base_link 是否存在；查看
@@ -448,7 +652,7 @@ OpenCV 没有识别：
   使用最新代码，正常按一次 Ctrl+C 并等待清理，不要使用 kill -9。
 
 
-十一、每次修改后的标准流程
+十二、每次修改后的标准流程
 --------------------------
 
 1. 修改代码、配置和测试。
@@ -486,7 +690,7 @@ OpenCV 没有识别：
 四份文档与代码处于同一版本。
 
 
-十二、新开发者接手完成标准
+十三、新开发者接手完成标准
 --------------------------
 
 1. 能独立编译 6 个包并运行全部测试。

@@ -105,6 +105,10 @@ PointCloud2:
 
 ## 5. 安装、编译与测试
 
+全新 Ubuntu 24.04 电脑的 ROS 2 软件源、完整 apt/rosdep 依赖、VS Code 安装与六个推荐
+插件、Git 克隆、硬件驱动、双机 DDS 网络和逐项验收说明见 `quickstart.txt` 第三节。
+仓库的 `.vscode/settings.json` 使用 `${workspaceFolder}` 相对路径，可放在任意用户目录。
+
 ```bash
 cd ~/wakula
 source /opt/ros/jazzy/setup.bash
@@ -310,7 +314,7 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 - `README.md`：安装、启动、总体架构和使用入口。
 - `instruction.txt`：各模块作用、算法原理和现场调试顺序。
 - `connect.txt`：全部节点、话题、消息类型、字段、Action、Service、TF、QoS 和超时合同。
-- `quickstart.txt`：启动命令、当前成果、常见问题和后续开发路线。
+- `quickstart.txt`：跨电脑完整复现、启动命令、当前成果、常见问题和后续开发路线。
 
 后续每次完成修改都同步检查这四份文档：接口变化更新 `connect.txt`，算法或职责变化
 更新 `instruction.txt`，启动和使用方式变化更新 `README.md`，完成进度与后续计划变化

@@ -509,6 +509,15 @@ ros2 service list -t | grep controller_manager 查询。
 7. 特殊硬件尽量使用启动参数或 remap，不直接修改核心默认名称。
 8. 同一个话题只能有明确的职责所有者，尤其 /cmd_vel 必须只有 Collision Monitor 发布。
 
+多电脑 DDS 通信约定：
+
+1. 开发电脑与 RK3588 使用相同 ROS 2 Jazzy、ROS_DOMAIN_ID 和 RMW_IMPLEMENTATION。
+2. ROS_LOCALHOST_ONLY 必须为 0；局域网应允许 DDS 使用的 UDP 和组播流量。
+3. 所有电脑通过 NTP、chrony 或同一局域网时间源同步，避免传感器时间戳与 TF 不匹配。
+4. 推荐同一路由器或有线局域网；校园访客网络、VPN 和严格防火墙可能阻断节点发现。
+5. 先用 ros2 node list 和 ros2 topic list -t 验证发现，再检查 /scan、/odom 的频率。
+6. 单机和多机的 Topic、Action、Service、TF 名称完全相同，不因主机名改变接口。
+
 
 十一、失效与超时通信
 --------------------
