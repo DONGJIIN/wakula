@@ -1,106 +1,164 @@
+"""Start the shared robot, perception, planning, and safety pipeline."""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration
+from launch.conditions import IfCondition, UnlessCondition
+from launch.substitutions import (
+    Command,
+    FindExecutable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
-from launch.substitutions import PathJoinSubstitution
+
+
+def package_file(package: str, folder: str, filename: str):
+    """Build a package share path without repeating launch boilerplate."""
+    return PathJoinSubstitution([FindPackageShare(package), folder, filename])
 
 
 def generate_launch_description():
+    use_sim_time = LaunchConfiguration("use_sim_time")
     use_control = LaunchConfiguration("use_control")
-    yolo = LaunchConfiguration("yolo")
-    yolo_model = LaunchConfiguration("yolo_model")
-    description_file = PathJoinSubstitution([
-        FindPackageShare("quadruped_description"), "urdf", "quadruped.urdf.xacro"
-    ])
-    controllers_file = PathJoinSubstitution([
-        FindPackageShare("quadruped_control"), "config", "controllers.yaml"
-    ])
-    terrain_file = PathJoinSubstitution([
-        FindPackageShare("quadruped_perception"), "config", "terrain.yaml"
-    ])
-    vision_file = PathJoinSubstitution([
-        FindPackageShare("quadruped_perception"), "config", "vision.yaml"
-    ])
-    yolo_file = PathJoinSubstitution([
-        FindPackageShare("quadruped_perception"), "config", "yolo.yaml"
-    ])
-    crossing_file = PathJoinSubstitution([
-        FindPackageShare("quadruped_planning"), "config", "crossing.yaml"
-    ])
-    robot_description = {
-        "robot_description": Command([FindExecutable(name="xacro"), " ", description_file])
-    }
+    vision = LaunchConfiguration("vision")
+    camera_topic = LaunchConfiguration("camera_topic")
+    point_cloud_topic = LaunchConfiguration("point_cloud_topic")
+    competition = LaunchConfiguration("competition")
 
-    return LaunchDescription([
-        DeclareLaunchArgument("use_control", default_value="true"),
-        DeclareLaunchArgument(
-            "yolo",
-            default_value="false",
-            description="Start optional YOLO ONNX inference (off by default).",
-        ),
-        DeclareLaunchArgument(
-            "yolo_model",
-            default_value="",
-            description="Absolute path to a YOLO ONNX model.",
-        ),
-        Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            output="screen",
-            parameters=[robot_description],
-        ),
-        Node(
-            package="controller_manager",
-            executable="ros2_control_node",
-            output="screen",
-            condition=IfCondition(use_control),
-            parameters=[robot_description, controllers_file],
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
-            condition=IfCondition(use_control),
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["leg_controller", "--controller-manager", "/controller_manager"],
-            condition=IfCondition(use_control),
-        ),
-        Node(
-            package="quadruped_perception",
-            executable="terrain_analyzer",
-            name="terrain_analyzer",
-            output="screen",
-            parameters=[terrain_file],
-        ),
-        Node(
-            package="quadruped_perception",
-            executable="vision_obstacle_detector",
-            output="screen",
-            parameters=[vision_file],
-        ),
-        Node(
-            package="quadruped_perception",
-            executable="yolo_obstacle_detector",
-            output="screen",
-            parameters=[
-                yolo_file,
-                {
-                    "enabled": ParameterValue(yolo, value_type=bool),
-                    "model_path": yolo_model,
-                },
-            ],
-            condition=IfCondition(yolo),
-        ),
-        Node(
-            package="quadruped_planning",
-            executable="obstacle_crossing_manager",
-            output="screen",
-            parameters=[crossing_file],
-        ),
-    ])
+    description_file = package_file(
+        "quadruped_description", "urdf", "quadruped.urdf.xacro"
+    )
+    controllers_file = package_file(
+        "quadruped_control", "config", "controllers.yaml"
+    )
+    terrain_file = package_file(
+        "quadruped_perception", "config", "terrain.yaml"
+    )
+    vision_file = package_file(
+        "quadruped_perception", "config", "vision.yaml"
+    )
+    crossing_file = package_file(
+        "quadruped_planning", "config", "crossing.yaml"
+    )
+    competition_file = package_file(
+        "quadruped_planning", "config", "competition.yaml"
+    )
+    waypoint_file = package_file(
+        "quadruped_planning", "config", "course_waypoints.yaml"
+    )
+    robot_description = ParameterValue(
+        Command([FindExecutable(name="xacro"), " ", description_file]),
+        value_type=str,
+    )
+
+    common_time = {"use_sim_time": use_sim_time}
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument("use_sim_time", default_value="false"),
+            DeclareLaunchArgument("use_control", default_value="true"),
+            DeclareLaunchArgument("vision", default_value="true"),
+            DeclareLaunchArgument(
+                "camera_topic",
+                default_value="",
+                description="RGB topic override; empty auto-detects common defaults.",
+            ),
+            DeclareLaunchArgument(
+                "point_cloud_topic",
+                default_value="",
+                description="Point-cloud override; empty auto-detects common defaults.",
+            ),
+            DeclareLaunchArgument("competition", default_value="false"),
+            Node(
+                package="robot_state_publisher",
+                executable="robot_state_publisher",
+                output="screen",
+                parameters=[
+                    {
+                        "robot_description": robot_description,
+                        "use_sim_time": use_sim_time,
+                    }
+                ],
+            ),
+            Node(
+                package="controller_manager",
+                executable="ros2_control_node",
+                output="screen",
+                condition=IfCondition(use_control),
+                parameters=[
+                    {"robot_description": robot_description},
+                    controllers_file,
+                    common_time,
+                ],
+            ),
+            Node(
+                package="controller_manager",
+                executable="spawner",
+                arguments=[
+                    "joint_state_broadcaster",
+                    "--controller-manager",
+                    "/controller_manager",
+                ],
+                condition=IfCondition(use_control),
+            ),
+            Node(
+                package="controller_manager",
+                executable="spawner",
+                arguments=[
+                    "leg_controller",
+                    "--controller-manager",
+                    "/controller_manager",
+                ],
+                condition=IfCondition(use_control),
+            ),
+            Node(
+                package="quadruped_perception",
+                executable="terrain_analyzer",
+                output="screen",
+                parameters=[
+                    terrain_file,
+                    {"input_topic": point_cloud_topic},
+                    common_time,
+                ],
+            ),
+            Node(
+                package="quadruped_perception",
+                executable="vision_obstacle_detector",
+                output="screen",
+                parameters=[
+                    vision_file,
+                    {"image_topic": camera_topic},
+                    common_time,
+                ],
+                condition=IfCondition(vision),
+            ),
+            Node(
+                package="quadruped_planning",
+                executable="obstacle_crossing_manager",
+                output="screen",
+                parameters=[crossing_file, common_time],
+                condition=UnlessCondition(competition),
+            ),
+            Node(
+                package="quadruped_planning",
+                executable="competition_obstacle_manager",
+                output="screen",
+                parameters=[competition_file, common_time],
+                condition=IfCondition(competition),
+            ),
+            Node(
+                package="quadruped_planning",
+                executable="course_waypoint_navigator",
+                output="screen",
+                parameters=[waypoint_file, common_time],
+                condition=IfCondition(competition),
+            ),
+            Node(
+                package="quadruped_planning",
+                executable="cmd_vel_gate",
+                output="screen",
+                parameters=[crossing_file, common_time],
+            ),
+        ]
+    )

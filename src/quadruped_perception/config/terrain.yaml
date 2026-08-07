@@ -1,7 +1,13 @@
 terrain_analyzer:
   ros__parameters:
-    input_topic: /camera/depth/color/points
+    input_topic: ""
+    input_topic_candidates: [/camera/depth/points, /camera/depth/color/points, /camera/points, /points]
+    target_frame: base_link
+    processing_hz: 10.0
+    transform_timeout: 0.05
     max_points: 30000
+    # Downsampled base_link cloud used by the Nav2 local obstacle layer.
+    nav2_cloud_max_points: 5000
     front_x_min: 0.10
     front_x_max: 1.50
     lateral_half_width: 0.45

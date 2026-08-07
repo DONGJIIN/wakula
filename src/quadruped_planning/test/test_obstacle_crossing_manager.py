@@ -1,9 +1,15 @@
 """Unit tests for terrain and OpenCV evidence fusion."""
 
+import rclpy
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Bool, String
+
+from quadruped_planning.cmd_vel_gate import gated_twist
+from quadruped_planning.competition_obstacle_manager import CompetitionObstacleManager
 from quadruped_planning.obstacle_crossing_manager import (
     apply_visual_assist,
     select_terrain_decision,
-    visual_target_in_path,
+    visual_evidence_in_path,
 )
 
 
@@ -34,19 +40,19 @@ def test_geometry_owns_crossing_mode():
     assert decide(height=0.35)[0] == "STOP"
 
 
-def test_visual_target_requires_area_and_center():
-    centered_orange = [0.05, 0.50, 0.50, 0.2, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0]
-    edge_orange = [0.05, 0.05, 0.50, 0.2, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0]
-    tiny_blue = [0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.50, 0.50, 0.1, 0.1]
+def test_visual_target_requires_confidence_and_center():
+    centered_poles = [1.0, 0.75, 0.50, 0.50, 0.20, 0.60]
+    edge_poles = [1.0, 0.75, 0.05, 0.50, 0.20, 0.60]
+    uncertain_bar = [2.0, 0.30, 0.50, 0.50, 0.70, 0.10]
 
-    assert visual_target_in_path(centered_orange, 0.03, 0.20)
-    assert not visual_target_in_path(edge_orange, 0.03, 0.20)
-    assert not visual_target_in_path(tiny_blue, 0.03, 0.20)
+    assert visual_evidence_in_path(centered_poles, 0.55, 0.20)
+    assert not visual_evidence_in_path(edge_poles, 0.55, 0.20)
+    assert not visual_evidence_in_path(uncertain_bar, 0.55, 0.20)
 
 
 def test_invalid_visual_data_is_ignored():
-    assert not visual_target_in_path([], 0.03, 0.20)
-    assert not visual_target_in_path([float("nan")] * 10, 0.03, 0.20)
+    assert not visual_evidence_in_path([], 0.55, 0.20)
+    assert not visual_evidence_in_path([float("nan")] * 6, 0.55, 0.20)
 
 
 def test_visual_assist_only_slows_clear_terrain():
@@ -60,3 +66,32 @@ def test_visual_assist_only_slows_clear_terrain():
     )
     assert apply_visual_assist(walk, False, 0.35) == walk
     assert apply_visual_assist(step, True, 0.35) == step
+
+
+def test_velocity_gate_requires_both_fresh_inputs():
+    """A stale planner or decision heartbeat always produces a zero command."""
+    command = Twist()
+    command.linear.x = 1.0
+    command.angular.z = 0.5
+    output = gated_twist(command, 0.4, True, True)
+    assert abs(output.linear.x - 0.4) < 1e-6
+    assert abs(output.angular.z - 0.2) < 1e-6
+    assert gated_twist(command, 1.0, False, True).linear.x == 0.0
+    assert gated_twist(command, 1.0, True, False).linear.x == 0.0
+    assert gated_twist(command, 0.0, True, True).linear.x == 0.0
+
+
+def test_competition_tracks_out_of_order_active_obstacle():
+    """Completing a hinted obstacle must not score the first configured one."""
+    rclpy.init()
+    node = CompetitionObstacleManager()
+    try:
+        node.hint_callback(String(data="bridge_b"))
+        assert node.current_obstacle == "bridge_b"
+        node.complete_callback(Bool(data=True))
+        assert "bridge_b" in node.completed
+        assert "straight_poles" not in node.completed
+        assert node.current_obstacle == "straight_poles"
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

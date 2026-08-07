@@ -11,12 +11,13 @@ obstacle_crossing_manager:
     # remains the authority for STEP/CLIMB/STOP decisions.
     vision_assist_enabled: true
     vision_timeout: 0.6
-    vision_min_area_ratio: 0.03
+    vision_min_confidence: 0.55
     vision_center_margin: 0.20
     vision_speed_scale: 0.35
 cmd_vel_gate:
   ros__parameters:
-    input_topic: /cmd_vel_nav
-    output_topic: /cmd_vel
+    input_topic: /cmd_vel_smoothed
+    output_topic: /cmd_vel_terrain_safe
     command_timeout: 0.5
-    default_speed_scale: 1.0
+    decision_timeout: 0.7
+    default_speed_scale: 0.0

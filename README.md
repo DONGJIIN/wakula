@@ -1,80 +1,109 @@
-# Wakula 四足机器人自主越障工作空间
+# Wakula 四足机器人自主导航与越障
 
-Wakula 是一个基于 ROS 2 Jazzy 的四足机器人自主导航与越障原型。工程按
-“机器人描述 → 状态/控制 → 感知 → 规划 → 系统启动”的层次组织，支持 RViz
-调试、SLAM + Nav2 导航和 Robocon 障碍赛规则状态机。
+Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试工作空间。
+当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示**
+构成轻量融合链路，不包含深度学习推理框架或神经网络模型。
+
+工程目前提供完整的软件雏形和安全接口；真正的抬腿、攀爬、跳跃仍需由机器狗厂商
+SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用于高速实机。
 
 ## 1. 目录结构
 
 ```text
 wakula/
-├── src/                                  # 所有 ROS 2 源码包
-│   ├── quadruped_description/             # URDF/Xacro、RViz模型显示
-│   ├── quadruped_bringup/                  # 基础硬件、感知和越障节点启动
-│   ├── quadruped_control/                 # ros2_control控制器和关节限制
-│   ├── quadruped_perception/              # 点云地形与OpenCV视觉特征提取
-│   ├── quadruped_planning/                # 越障状态机、速度安全门、比赛管理
-│   └── slam/                              # SLAM Toolbox、Nav2配置和启动文件
+├── src/
+│   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
+│   ├── quadruped_control/      # ros2_control 控制器及关节限制
+│   ├── quadruped_bringup/      # 机器人、感知、规划和安全节点统一入口
+│   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
+│   ├── quadruped_planning/     # 越障决策、速度门、比赛状态机
+│   └── slam/                   # SLAM Toolbox、Nav2 参数与自主启动
 ├── scripts/
-│   ├── bootstrap.sh                        # 安装ROS依赖
-│   └── build.sh                            # 编译整个工作空间
-├── .colcon/defaults.yaml                   # colcon默认构建参数
-├── .vscode/settings.json                   # VS Code工作区设置
+│   ├── bootstrap.sh            # rosdep 安装依赖
+│   └── build.sh                # 统一编译
+├── .colcon/defaults.yaml
+├── .vscode/settings.json
 └── README.md
 ```
 
-`build/`、`install/`、`log/` 和 Python 缓存均为可重建产物，不纳入版本控制。
+`build/`、`install/`、`log/` 与 Python 缓存都是可重建产物，不提交到 Git。
 
-## 2. ROS 包职责
+## 2. 各模块职责
 
-| 包 | 类型 | 作用 | 主要入口 |
-|---|---|---|---|
-| `quadruped_description` | CMake | 12自由度四足模型、传感器TF、mock ros2_control | `display.launch.py` |
-| `quadruped_bringup` | Python | 启动模型、控制、感知和普通越障节点 | `bringup.launch.py` |
-| `quadruped_control` | CMake | 控制器列表和关节限位 | `config/controllers.yaml` |
-| `quadruped_perception` | Python | 点云、OpenCV颜色检测、可选YOLO接口 | `terrain_analyzer`、`vision_obstacle_detector` |
-| `quadruped_planning` | Python | 普通越障模式、比赛规则FSM、Nav2速度安全门 | 见下方节点表 |
-| `slam` | Python | SLAM Toolbox、Nav2参数和完整自主启动 | `slam.launch.py` |
+| 包 | 主要职责 | 关键入口 |
+|---|---|---|
+| `quadruped_description` | 机器人模型、关节、雷达/相机坐标系 | `display.launch.py` |
+| `quadruped_control` | ros2_control 控制器和关节限制 | `controllers.yaml` |
+| `quadruped_bringup` | 公共启动入口，避免重复节点 | `bringup.launch.py` |
+| `quadruped_perception` | 图像障碍证据、点云地形几何、Nav2 障碍点云 | 两个分析节点 |
+| `quadruped_planning` | `WALK/STEP/CLIMB/STOP`、速度安全门、比赛 FSM | 四个规划节点 |
+| `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
 
-### 主要节点
+主要节点：
 
-- `terrain_analyzer`：订阅点云，发布 `/terrain/features`。
-- `vision_obstacle_detector`：使用 OpenCV 提取橙色/蓝色区域，发布视觉辅助特征和调试掩膜。
-- `yolo_obstacle_detector`：可选的轻量 YOLO ONNX 检测节点，默认不启动。
-- `obstacle_crossing_manager`：普通模式下发布 `WALK/STEP/CLIMB/STOP`。
-- `competition_obstacle_manager`：比赛限时、障碍完成、重试和计分。
-- `cmd_vel_gate`：对 Nav2 速度进行缩放和超时/危险停止。
-- `course_waypoint_navigator`：比赛模式下调用 Nav2 到达障碍接近点。
+- `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并做多帧确认。
+- `terrain_analyzer`：将深度点云转换到 `base_link`，分析高度、坡度和粗糙度。
+- `obstacle_crossing_manager`：融合视觉证据和点云几何，生成越障模式与速度倍率。
+- `cmd_vel_gate`：检查导航命令及决策心跳并缩放速度，任何一项超时立即输出零速。
+- `competition_obstacle_manager`：Robocon 障碍进度、计时、接触约束和计分。
+- `course_waypoint_navigator`：比赛模式下向 Nav2 发送障碍接近点。
 
-## 3. 数据流
-
-```text
-3D雷达/深度相机 ─> terrain_analyzer ─> terrain/features ─┐
-RGB相机 ─> OpenCV视觉节点 ─> vision/color_features ──────┤
-       └─> YOLO（默认关闭，后期RKNN/NPU）─> yolo/detections
-2D雷达 /scan ─> SLAM Toolbox ─> map/odom ─> Nav2         ├─> crossing manager
-                                                │        │
-                                                └─> cmd_vel_nav ─> cmd_vel_gate ─> 机器狗SDK
-```
-
-真实硬件必须提供：
+## 3. SLAM、Nav2、OpenCV 与点云如何协同
 
 ```text
-/scan                         sensor_msgs/LaserScan
-/camera/depth/color/points   sensor_msgs/PointCloud2
-/camera/color/image_raw      sensor_msgs/Image
-/odom                         nav_msgs/Odometry
-odom -> base_link             TF
+2D 雷达 /scan ──> SLAM Toolbox ──> /map + map→odom
+       │                                  │
+       └──────────────────────────────────> Nav2 全局/局部规划
+
+RGB 相机 ──> OpenCV ──> /vision/obstacle_evidence ─┐
+                                                  ├─> crossing manager
+深度点云 ──> TF(base_link) ──> /terrain/features ─┘       │
+       └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
+
+Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
+     ─> collision_monitor ─> /cmd_vel ─> 厂商 SDK / 自研步态控制器
 ```
 
-机器狗驱动负责订阅 `/cmd_vel`，并将速度或越障动作转换为厂商 SDK、步态控制器
-或自研 MPC/WBC 的接口。
+职责边界如下：
 
-## 4. 安装与编译
+1. **SLAM** 用 `/scan` 在陌生环境生成地图和定位，不负责跨越动作。
+2. **Nav2** 根据地图规划路线；激光和深度点云共同写入局部代价地图用于绕障。
+3. **OpenCV** 识别杆、限高横杆、墙面和大面积有色障碍，用于提前减速和提示。
+4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据。
+5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
 
-系统要求：Ubuntu 24.04、ROS 2 Jazzy、Python 3、colcon。视觉节点依赖
-`python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，均由安装脚本根据
-`package.xml` 安装。
+OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
+点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
+
+## 4. 默认传感器接口
+
+最低导航输入：
+
+```text
+/scan                 sensor_msgs/LaserScan
+/odom                 nav_msgs/Odometry
+odom -> base_link     TF
+```
+
+节点使用传感器 QoS，并自动监听常见相机默认话题：
+
+```text
+RGB:
+  /camera/image_raw
+  /camera/color/image_raw
+  /image_raw
+
+PointCloud2:
+  /camera/depth/points
+  /camera/depth/color/points
+  /camera/points
+  /points
+```
+
+接入任意相机的原则是保持 ROS 标准消息并发布相机坐标系到 `base_link` 的 TF。若驱动
+话题不同，无需改 Python，启动时覆盖 `camera_topic` 或 `point_cloud_topic` 即可。
+
+## 5. 安装、编译与测试
 
 ```bash
 cd ~/wakula
@@ -84,161 +113,145 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
-手动构建等价命令：
+视觉仅依赖 `python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
+默认 8 Hz、最大 640 像素宽；点云默认 10 Hz 且限制采样数量，适合 RK3588 起步调试。
+
+运行单元测试：
 
 ```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+colcon test --event-handlers console_direct+
+colcon test-result --verbose
 ```
 
-## 5. 调试启动
+## 6. 启动方式
 
-只查看机器人模型：
+只查看模型：
 
 ```bash
 ros2 launch quadruped_description display.launch.py
 ```
 
-启动 SLAM + Nav2 + 普通越障链路：
+完整启动 SLAM + Nav2 + 感知 + 越障安全链路：
 
 ```bash
 ros2 launch slam slam.launch.py
 ```
 
-无图形界面测试：
+无图形界面：
 
 ```bash
 ros2 launch slam slam.launch.py rviz:=false
 ```
 
-没有 RGB 相机时可关闭 OpenCV 节点：
+没有 RGB 相机时：
 
 ```bash
 ros2 launch slam slam.launch.py vision:=false
 ```
 
-启动 Robocon 障碍赛模式：
+覆盖非默认相机话题：
+
+```bash
+ros2 launch slam slam.launch.py \
+  camera_topic:=/my_camera/image_raw \
+  point_cloud_topic:=/my_camera/points
+```
+
+只启动模型、控制、感知和安全门，不启用 SLAM/Nav2：
+
+```bash
+ros2 launch quadruped_bringup bringup.launch.py
+```
+
+Robocon 比赛模式：
 
 ```bash
 ros2 launch slam slam.launch.py competition:=true
 ```
 
-YOLO 默认关闭。只有准备好兼容的 ONNX 模型后才用于开发机验证：
+启动前必须已有传感器、里程计和 TF；否则 Nav2 等待 `odom -> base_link`、地形节点等待
+相机外参属于正常安全行为。
 
-```bash
-ros2 launch slam slam.launch.py \
-  yolo:=true \
-  yolo_model:=/绝对路径/obstacles_nano.onnx
-```
+## 7. OpenCV 障碍识别
 
-启动前请确认传感器、里程计和 TF 已经发布；否则 Nav2 会等待 `odom → base_link`，
-这是预期行为。
+节点同时使用两类轻量特征：
 
-## 6. 地形特征接口
+- HSV 橙色/蓝色区域：对比赛场地中颜色明显的杆和横杆优先识别。
+- 灰度 Canny 轮廓：颜色不可靠时，利用细长双立柱、宽横条和大矩形补充判断。
 
-`/terrain/features` 为 `std_msgs/Float32MultiArray`，数组字段固定为：
+每帧先做形态学去噪和轮廓几何筛选，再在最近 5 帧中要求至少 3 帧类型一致。因此单帧
+反光或运动模糊不会直接触发减速。输出接口：
 
 ```text
-[ground_z,
- high_z,
- obstacle_height,
- valid_points,
- slope,
- roughness,
- frontal_obstacle_height,
- lookahead,
- traversability]
+/vision/obstacle_evidence  std_msgs/Float32MultiArray
+/vision/obstacle_hint      std_msgs/String
+/vision/color_features     std_msgs/Float32MultiArray  # 标定/兼容接口
+/vision/debug_mask         sensor_msgs/Image           # 默认关闭
 ```
 
-地形数据不足或超过传感器超时后，越障管理器和速度门默认进入 `STOP`，这是安全设计。
-
-## 7. OpenCV 视觉接口
-
-`vision_obstacle_detector` 订阅 `/camera/color/image_raw`，在 HSV 色彩空间提取橙色和
-蓝色区域，并发布：
+`/vision/obstacle_evidence` 是越障决策使用的原子结果：
 
 ```text
-/vision/color_features   std_msgs/Float32MultiArray
-/vision/color_mask       sensor_msgs/Image
+[type_code, confidence, center_x, center_y, width, height]
+
+type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
+其余字段均归一化到 0.0～1.0
 ```
 
-`/vision/color_features` 的字段固定为：
+只有证据置信度达到 `vision_min_confidence`、目标位于行进方向中央且结果未超时，才会
+将正常 `WALK` 降速为 `VERIFY_VISUAL_OBSTACLE_WITH_DEPTH`。视觉不会覆盖已经由点云
+给出的 `STEP`、`CLIMB` 或 `STOP`。
+
+现场必须按真实相机和光照标定 `vision.yaml` 中的 HSV、Canny、最小轮廓和多帧参数。
+可临时开启 `publish_debug_mask`，在 `/vision/debug_mask` 检查分割与边缘效果；标定完成后
+关闭，以减少图像复制。
+
+## 8. 点云地形与 Nav2 融合
+
+`terrain_analyzer` 只保留最新一帧，将点云按消息时间戳转换到 `base_link`，裁剪机器人
+正前方 ROI 并发布：
 
 ```text
-[orange_area_ratio, orange_cx, orange_cy, orange_width_ratio, orange_height_ratio,
- blue_area_ratio,   blue_cx,   blue_cy,   blue_width_ratio,   blue_height_ratio]
+/terrain/features              std_msgs/Float32MultiArray
+/perception/obstacle_points    sensor_msgs/PointCloud2
+/diagnostics                   diagnostic_msgs/DiagnosticArray
 ```
 
-坐标和尺寸均已归一化到 `0.0～1.0`；未检测到对应颜色时，该颜色的五个字段为零。
-HSV 阈值、最小区域面积、形态学滤波尺寸和相机话题位于
-`src/quadruped_perception/config/vision.yaml`。比赛现场光照变化较大，必须用实际相机
-重新标定 HSV 范围。颜色结果只作为障碍提示，不代替点云测高、可通行性分析和足端
-接触判断。
-
-普通越障模式已经加入视觉—点云安全融合：当橙色或蓝色区域面积超过阈值且位于
-图像中央，而点云仍判断可以正常行走时，系统保持 `WALK`，但将动作改为
-`VERIFY_VISUAL_OBSTACLE_WITH_DEPTH` 并按 `vision_speed_scale` 减速。只有点云几何
-信息能够触发 `STEP` 或 `CLIMB`；无效或超时的点云仍触发 `STOP`。视觉结果超时后
-自动退出辅助状态，因此没有 RGB 相机也不会阻塞点云越障链路。
-
-融合状态可通过 `/crossing/visual_assist_active`（`std_msgs/Bool`）观察。相关参数位于
-`src/quadruped_planning/config/crossing.yaml`：
+`/terrain/features` 字段：
 
 ```text
-vision_assist_enabled      是否启用视觉辅助
-vision_timeout             视觉结果有效时间（秒）
-vision_min_area_ratio      触发减速的最小画面面积比例
-vision_center_margin       忽略图像两侧区域的比例
-vision_speed_scale         等待深度确认时的速度倍率
+[ground_z, high_z, obstacle_height, valid_points, slope, roughness,
+ frontal_obstacle_height, lookahead, traversability]
 ```
 
-## 8. 可选 YOLO 后期方案
+判定默认值：高度 `0.08 m` 起进入 `STEP`，`0.18 m` 起进入 `CLIMB`，`0.32 m` 起停止并
+重规划；坡度、粗糙度也会使模式升级。阈值必须依据机器狗的实际腿长、质心、步态能力
+和相机安装误差重新标定。
 
-YOLO 节点已经接入工程，但 `slam.launch.py` 和 `bringup.launch.py` 中的 `yolo` 参数
-默认均为 `false`。默认启动时不会创建 YOLO 进程、不会读取模型，也不会订阅相机，
-因此不会给 RK3588 增加运行压力。工程也没有安装 PyTorch、Ultralytics 或 ONNX
-Runtime；桌面验证直接复用现有 OpenCV DNN。
+同一 ROI 被降采样后发布为 `/perception/obstacle_points`，Nav2 的 local costmap 以
+`PointCloud2` 障碍源进行 marking，2D 雷达继续负责 marking + clearing。点云层不主动
+clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗口会移除离开视野的旧区域。
 
-资源限制位于 `src/quadruped_perception/config/yolo.yaml`：
+## 9. 速度与失效安全
+
+速度链路固定为：
 
 ```text
-input_width/input_height  320×320
-inference_hz              5 Hz，上限限制为10 Hz
-opencv_threads            2，上限限制为4
-max_detections            每帧最多20个目标
-publish_debug_image       false，避免额外图像拷贝
+/cmd_vel_nav -> /cmd_vel_smoothed -> /cmd_vel_terrain_safe -> /cmd_vel
 ```
 
-输出接口：
+- Nav2 controller 只发布 `/cmd_vel_nav`。
+- Velocity Smoother 限制加速度并发布 `/cmd_vel_smoothed`。
+- `cmd_vel_gate` 应用 `/crossing/speed_scale`，同时检查命令和决策心跳。
+- Collision Monitor 读取 `/scan`，并作为 `/cmd_vel` 唯一发布者。
 
-```text
-/vision/yolo/detections    vision_msgs/Detection2DArray
-/vision/yolo/inference_ms  std_msgs/Float32
-/vision/yolo/debug_image   sensor_msgs/Image  # 仅显式开启调试图时发布
-```
+规划命令或越障决策任意一项超时，速度门都发布零速度。机器狗 SDK 还应实现独立的通信
+看门狗、急停和姿态保护，不能仅依赖 ROS 进程。
 
-节点兼容常见 YOLOv8/YOLO11 ONNX 输出；使用带 objectness 的 YOLOv5 导出模型时，将
-`output_has_objectness` 设为 `true`。标签文件为每行一个类别名，通过 `labels_path`
-指定。模型文件较大且与硬件相关，`.onnx`、`.rknn` 和 `.pt` 已排除在 Git 之外。
+## 10. Robocon 障碍赛模式
 
-RK3588 正式部署建议训练 `nano` 级自定义障碍模型，将其量化转换为 RKNN，并使用
-RK3588 NPU 推理。当前 OpenCV DNN 后端仅用于功能验证；在真机上启用前必须实测
-`/vision/yolo/inference_ms`、CPU 占用、温度和导航延迟。YOLO 检测结果目前不参与
-越障动作决策，后续也应先与深度/点云匹配，不能直接触发攀爬或跳跃。
-
-## 9. Robocon 障碍赛模式
-
-比赛规则状态机按照提供的 V1.0 规则实现：
-
-- 比赛限时 210 秒。
-- 支持直角绕杆、砂砾碎木坑、限高杆、斜坡、木桥 A、木桥 B、T 字台阶和高墙。
-- 障碍可以不按固定顺序完成，重复完成不重复计分。
-- 自动模式每个完整障碍 150 分，遥控模式按 100 分计算。
-- T 字台阶只完成单向计 75 分，完成上下两个方向计 150 分。
-- 全部障碍完成并返回选定启动区，额外增加 100 分。
-- 砂砾坑、T 台阶、斜坡和木桥越障时，最多允许一个足端接触地面。
-- 斜坡有效行走距离至少 1 米；T 台阶要求每级顶面有足端接触。
-
-比赛事件接口：
+当前比赛状态机按提供的 V1.0 规则建立了 210 秒计时、障碍完成/重试、足端接触限制、
+T 字台阶双向计分和返回启动区奖励。事件接口：
 
 ```text
 /competition/obstacle_hint          std_msgs/String
@@ -247,35 +260,41 @@ RK3588 NPU 推理。当前 OpenCV DNN 后端仅用于功能验证；在真机上
 /competition/retry                  std_msgs/Bool
 /competition/returned_to_start      std_msgs/Bool
 /competition/stair_levels_touched   std_msgs/Int32
-/competition/stair_sides_completed  std_msgs/Int32  # 0/1/2
+/competition/stair_sides_completed  std_msgs/Int32
 /foot_contacts                      std_msgs/UInt8MultiArray
 ```
 
-比赛路线接近点位于 `src/quadruped_planning/config/course_waypoints.yaml`，目前是
-调试占位值。赛前获得正式场地尺寸、障碍位置和方向后，只修改这个配置文件，不要把
-场地坐标硬编码到 Python 节点中。
+`course_waypoints.yaml` 仍是调试坐标。获得正式场地测量结果后只修改 YAML，不要将点位
+硬编码到节点。规则状态机管理流程，不代替实际足端接触检测和越障动作控制器。
 
-## 10. 配置文件归属
+## 11. 配置文件索引
 
-- 机器人尺寸、质量、惯性、关节名称：`quadruped_description/urdf/`。
-- 控制器和关节限位：`quadruped_control/config/`。
-- 点云ROI和地形阈值：`quadruped_perception/config/terrain.yaml`。
-- OpenCV相机话题、HSV颜色范围和滤波参数：`quadruped_perception/config/vision.yaml`。
-- 可选YOLO模型接口和资源限制：`quadruped_perception/config/yolo.yaml`。
-- 普通越障阈值和速度门：`quadruped_planning/config/crossing.yaml`。
-- 比赛时间、障碍顺序和计分：`quadruped_planning/config/competition.yaml`。
-- 比赛障碍接近点：`quadruped_planning/config/course_waypoints.yaml`。
-- SLAM和Nav2：`slam/config/`。
+| 配置 | 内容 |
+|---|---|
+| `quadruped_description/urdf/` | 尺寸、惯性、关节、传感器坐标系 |
+| `quadruped_control/config/controllers.yaml` | ros2_control 控制器 |
+| `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
+| `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
+| `quadruped_planning/config/crossing.yaml` | 越障阈值、视觉融合、速度门超时 |
+| `quadruped_planning/config/competition.yaml` | 比赛时间、计分和约束 |
+| `quadruped_planning/config/course_waypoints.yaml` | 障碍接近点 |
+| `slam/config/slam_toolbox.yaml` | SLAM Toolbox |
+| `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
 
-## 11. 接入真实机器狗前检查
+公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
+`slam/launch/slam.launch.py` 在其上增加 SLAM、Nav2 与 RViz，避免重复维护节点。
 
-1. 用实测数据替换 URDF 中的尺寸、质量和惯性。
-2. 将 mock ros2_control 替换为厂商硬件插件。
-3. 标定关节零位、IMU、雷达、相机外参和 TF 时间戳。
-4. 确认 `/odom` 和 `odom → base_link` 的方向、频率和协方差。
-5. 将点云坐标统一为前方 `x`、侧向 `y`、上方 `z`。
-6. 用低电流单腿测试，再开启全身控制。
-7. 在仿真和空载场景验证急停、速度超时和 `STOP` 行为。
-8. 最后接入真实越障动作、足端接触检测和落脚规划器。
+## 12. 实机接入清单
 
-当前工程是自主越障软件框架，不包含具体机器狗厂商 SDK，也不应直接用于未经验证的实机高速运行。
+1. 用实测值替换 URDF 尺寸、质量和惯性。
+2. 将 mock ros2_control 替换为厂商硬件接口或自研控制器。
+3. 标定关节零位、IMU、雷达、RGB/深度相机内外参和时间同步。
+4. 检查 `/odom`、`odom -> base_link`、传感器 TF 的方向、频率和协方差。
+5. 录制 rosbag，在离线数据上标定 HSV、点云 ROI、高度和坡度阈值。
+6. 检查 local costmap 中激光与 `/perception/obstacle_points` 是否准确重合。
+7. 空载验证断相机、断雷达、断里程计、决策超时、急停和恢复行为。
+8. 先低速单障碍测试，再接入真实跨越动作和足端接触反馈。
+
+目前的 OpenCV 是可解释的规则识别，适合起步、比赛固定障碍和 RK3588 低负载运行，
+但准确率取决于视角、光照与标定。需要更强泛化时，应先采集误检/漏检数据，再决定是否
+增加学习模型，而不是直接让视觉模型控制机器狗动作。

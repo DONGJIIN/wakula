@@ -20,9 +20,5 @@ setup(
     maintainer_email="developer@example.com",
     description="SLAM and navigation configuration for the quadruped robot.",
     license="Apache-2.0",
-    entry_points={
-        "console_scripts": [
-            "navigation_node = slam.navigation_node:main",
-        ],
-    },
+    tests_require=["pytest"],
 )

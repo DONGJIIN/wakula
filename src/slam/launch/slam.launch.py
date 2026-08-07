@@ -1,160 +1,73 @@
-"""Bring up the simulation-ready SLAM + Nav2 + terrain-crossing skeleton.
-
-Required external topics/transforms:
-  /scan (sensor_msgs/LaserScan), /odom (nav_msgs/Odometry), and
-  /camera/depth/color/points (sensor_msgs/PointCloud2). A hardware driver must
-  provide odom -> base_link and replace the mock ros2_control system.
-"""
+"""Add SLAM Toolbox, Nav2, and RViz to the shared quadruped bringup."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def package_file(package: str, folder: str, filename: str):
+    """Build a package share path."""
+    return PathJoinSubstitution([FindPackageShare(package), folder, filename])
 
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
+    use_control = LaunchConfiguration("use_control")
     rviz = LaunchConfiguration("rviz")
     vision = LaunchConfiguration("vision")
-    yolo = LaunchConfiguration("yolo")
-    yolo_model = LaunchConfiguration("yolo_model")
+    camera_topic = LaunchConfiguration("camera_topic")
+    point_cloud_topic = LaunchConfiguration("point_cloud_topic")
     competition = LaunchConfiguration("competition")
-    model = PathJoinSubstitution(
-        [FindPackageShare("quadruped_description"), "urdf", "quadruped.urdf.xacro"]
+
+    bringup_launch = package_file(
+        "quadruped_bringup", "launch", "bringup.launch.py"
     )
-    slam_params = PathJoinSubstitution([FindPackageShare("slam"), "config", "slam.yaml"])
-    nav2_params = PathJoinSubstitution([FindPackageShare("slam"), "config", "nav2.yaml"])
-    terrain_params = PathJoinSubstitution(
-        [FindPackageShare("quadruped_perception"), "config", "terrain.yaml"]
+    slam_launch = package_file(
+        "slam_toolbox", "launch", "online_async_launch.py"
     )
-    vision_params = PathJoinSubstitution(
-        [FindPackageShare("quadruped_perception"), "config", "vision.yaml"]
-    )
-    yolo_params = PathJoinSubstitution(
-        [FindPackageShare("quadruped_perception"), "config", "yolo.yaml"]
-    )
-    crossing_params = PathJoinSubstitution(
-        [FindPackageShare("quadruped_planning"), "config", "crossing.yaml"]
-    )
-    competition_params = PathJoinSubstitution(
-        [FindPackageShare("quadruped_planning"), "config", "competition.yaml"]
-    )
-    waypoint_params = PathJoinSubstitution(
-        [FindPackageShare("quadruped_planning"), "config", "course_waypoints.yaml"]
-    )
-    rviz_config = PathJoinSubstitution([FindPackageShare("slam"), "rviz", "slam.rviz"])
-    robot_description = ParameterValue(Command([FindExecutable(name="xacro"), " ", model]), value_type=str)
+    nav2_launch = package_file("slam", "launch", "navigation.launch.py")
+    slam_params = package_file("slam", "config", "slam.yaml")
+    nav2_params = package_file("slam", "config", "nav2.yaml")
+    rviz_config = package_file("slam", "rviz", "slam.rviz")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            DeclareLaunchArgument("use_control", default_value="false"),
             DeclareLaunchArgument("rviz", default_value="true"),
-            DeclareLaunchArgument(
-                "vision",
-                default_value="true",
-                description="Start the OpenCV color-feature front end.",
-            ),
-            DeclareLaunchArgument(
-                "yolo",
-                default_value="false",
-                description="Start optional YOLO ONNX inference (off by default).",
-            ),
-            DeclareLaunchArgument(
-                "yolo_model",
-                default_value="",
-                description="Absolute path to a YOLO ONNX model.",
-            ),
-            DeclareLaunchArgument(
-                "competition",
-                default_value="false",
-                description="Use Robocon obstacle-course scoring/state machine.",
-            ),
-            Node(
-                package="robot_state_publisher",
-                executable="robot_state_publisher",
-                parameters=[{"robot_description": robot_description, "use_sim_time": use_sim_time}],
-                output="screen",
+            DeclareLaunchArgument("vision", default_value="true"),
+            DeclareLaunchArgument("camera_topic", default_value=""),
+            DeclareLaunchArgument("point_cloud_topic", default_value=""),
+            DeclareLaunchArgument("competition", default_value="false"),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(bringup_launch),
+                launch_arguments={
+                    "use_sim_time": use_sim_time,
+                    "use_control": use_control,
+                    "vision": vision,
+                    "camera_topic": camera_topic,
+                    "point_cloud_topic": point_cloud_topic,
+                    "competition": competition,
+                }.items(),
             ),
             IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution(
-                        [FindPackageShare("slam_toolbox"), "launch", "online_async_launch.py"]
-                    )
-                ),
+                PythonLaunchDescriptionSource(slam_launch),
                 launch_arguments={
                     "use_sim_time": use_sim_time,
                     "slam_params_file": slam_params,
                 }.items(),
             ),
             IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution(
-                        [FindPackageShare("nav2_bringup"), "launch", "navigation_launch.py"]
-                    )
-                ),
+                PythonLaunchDescriptionSource(nav2_launch),
                 launch_arguments={
                     "use_sim_time": use_sim_time,
                     "params_file": nav2_params,
                     "autostart": "True",
                 }.items(),
-            ),
-            Node(
-                package="quadruped_perception",
-                executable="terrain_analyzer",
-                parameters=[terrain_params, {"use_sim_time": use_sim_time}],
-                output="screen",
-            ),
-            Node(
-                package="quadruped_perception",
-                executable="vision_obstacle_detector",
-                parameters=[vision_params, {"use_sim_time": use_sim_time}],
-                condition=IfCondition(vision),
-                output="screen",
-            ),
-            Node(
-                package="quadruped_perception",
-                executable="yolo_obstacle_detector",
-                parameters=[
-                    yolo_params,
-                    {
-                        "enabled": ParameterValue(yolo, value_type=bool),
-                        "model_path": yolo_model,
-                        "use_sim_time": use_sim_time,
-                    },
-                ],
-                condition=IfCondition(yolo),
-                output="screen",
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="obstacle_crossing_manager",
-                parameters=[crossing_params, {"use_sim_time": use_sim_time}],
-                condition=UnlessCondition(competition),
-                output="screen",
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="cmd_vel_gate",
-                parameters=[crossing_params, {"use_sim_time": use_sim_time}],
-                output="screen",
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="competition_obstacle_manager",
-                parameters=[competition_params, {"use_sim_time": use_sim_time}],
-                condition=IfCondition(competition),
-                output="screen",
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="course_waypoint_navigator",
-                parameters=[waypoint_params, {"use_sim_time": use_sim_time}],
-                condition=IfCondition(competition),
-                output="screen",
             ),
             Node(
                 package="rviz2",
