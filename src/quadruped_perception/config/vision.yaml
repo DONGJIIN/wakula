@@ -13,6 +13,8 @@ vision_obstacle_detector:
     edge_high_threshold: 160
     history_size: 5
     confirmation_frames: 3
+    # Lock one default topic; fail over only when it has stopped publishing.
+    source_switch_timeout: 2.0
     # OpenCV HSV ranges; recalibrate under venue lighting before competition.
     orange_hsv_lower: [5, 80, 70]
     orange_hsv_upper: [25, 255, 255]

@@ -14,6 +14,8 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, String
 
+from quadruped_perception.topic_selection import should_accept_source
+
 
 DEFAULT_IMAGE_TOPICS = [
     "/camera/image_raw",
@@ -119,6 +121,7 @@ def detect_obstacle_evidence(
     orange_boxes = contour_boxes(orange_mask, min_area)
     blue_boxes = contour_boxes(blue_mask, min_area)
 
+    # 优先使用颜色特征：比赛标志色比普通场景边缘更稳定。
     horizontal_blue = [
         box
         for box in blue_boxes
@@ -143,6 +146,7 @@ def detect_obstacle_evidence(
             "poles", confidence, tall_orange, image_width, image_height
         )
 
+    # 当颜色受光照影响时，再使用 Canny 轮廓作为保守的几何补充。
     edge_boxes = contour_boxes(edge_mask, min_area)
     tall_edges = [
         box
@@ -199,6 +203,7 @@ def stabilize_evidence(
     history: Sequence[ObstacleEvidence], minimum_matches: int
 ) -> ObstacleEvidence:
     """Accept only a non-empty hint repeated across multiple recent frames."""
+    # 多帧投票抑制反光、运动模糊和单帧噪声。
     hints = [item.hint for item in history if item.hint != "none"]
     if not hints:
         return ObstacleEvidence()
@@ -237,6 +242,7 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("edge_high_threshold", 160)
         self.declare_parameter("history_size", 5)
         self.declare_parameter("confirmation_frames", 3)
+        self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("orange_hsv_lower", [5, 80, 70])
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
         self.declare_parameter("blue_hsv_lower", [90, 70, 50])
@@ -260,6 +266,9 @@ class VisionObstacleDetector(Node):
             history_size,
             max(1, int(self.get_parameter("confirmation_frames").value)),
         )
+        self.source_switch_timeout = max(
+            0.1, float(self.get_parameter("source_switch_timeout").value)
+        )
         self.evidence_history = deque(maxlen=history_size)
         kernel_size = max(1, int(self.get_parameter("morphology_size").value))
         kernel_size += 1 if kernel_size % 2 == 0 else 0
@@ -275,6 +284,7 @@ class VisionObstacleDetector(Node):
         self.latest_frame = None
         self.last_processed_stamp = None
         self.active_topic = None
+        self.last_active_image_time = None
         self.feature_pub = self.create_publisher(
             Float32MultiArray, "/vision/color_features", 10
         )
@@ -312,10 +322,27 @@ class VisionObstacleDetector(Node):
 
     def image_callback(self, msg: Image, source: str) -> None:
         """Keep one newest frame so camera rate cannot create a backlog."""
-        self.latest_frame = (msg, source)
+        now = self.get_clock().now()
+        active_age = (
+            float("inf")
+            if self.last_active_image_time is None
+            else (now - self.last_active_image_time).nanoseconds / 1e9
+        )
+        if not should_accept_source(
+            self.active_topic,
+            source,
+            active_age,
+            self.source_switch_timeout,
+        ):
+            return
+        # 同时存在多个默认图像话题时只选一个，失联后再自动切换。
         if source != self.active_topic:
+            self.evidence_history.clear()
+            self.last_processed_stamp = None
             self.active_topic = source
             self.get_logger().info(f"Using camera topic {source}")
+        self.last_active_image_time = now
+        self.latest_frame = (msg, source)
 
     def processing_callback(self) -> None:
         """Process one unseen frame and publish stable obstacle evidence."""
@@ -341,6 +368,7 @@ class VisionObstacleDetector(Node):
                 interpolation=cv2.INTER_AREA,
             )
 
+        # HSV 负责颜色，灰度 Canny 负责轮廓；两者不做神经网络推理。
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         orange_mask = self._clean_mask(
             cv2.inRange(hsv, self.orange_lower, self.orange_upper)
@@ -370,6 +398,7 @@ class VisionObstacleDetector(Node):
         raw_evidence = detect_obstacle_evidence(
             orange_mask, blue_mask, edge_mask, self.min_area
         )
+        # 只把稳定后的原子证据交给规划层，避免读取到不同帧的混合字段。
         self.evidence_history.append(raw_evidence)
         evidence = stabilize_evidence(
             self.evidence_history, self.confirmation_frames
@@ -397,7 +426,11 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        # launch 与终端可能同时发送 SIGINT，清理阶段再次中断也应正常退出。
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         rclpy.try_shutdown()
 
 

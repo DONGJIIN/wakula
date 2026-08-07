@@ -16,6 +16,8 @@ from std_msgs.msg import Float32MultiArray
 from tf2_ros import Buffer, TransformException, TransformListener
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
+from quadruped_perception.topic_selection import should_accept_source
+
 
 TerrainResult = Tuple[list, int]
 DEFAULT_POINT_CLOUD_TOPICS = [
@@ -35,6 +37,7 @@ def filter_roi_points(
 ) -> np.ndarray:
     """Return finite, bounded and deterministically downsampled ROI points."""
     points = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
+    # ROI 只保留机器人正前方区域，既减少计算量，也避免腿部点云干扰。
     valid = np.isfinite(points).all(axis=1)
     valid &= (points[:, 0] >= x_min) & (points[:, 0] <= x_max)
     valid &= np.abs(points[:, 1]) <= y_half
@@ -64,9 +67,11 @@ def compute_terrain_features(
 
     x_values = points[:, 0].astype(np.float64)
     z_values = points[:, 2].astype(np.float64)
+    # 分位数比最大/最小值更不容易受飞点影响。
     ground = float(np.quantile(z_values, np.clip(ground_percentile, 0.0, 1.0)))
     high = float(np.quantile(z_values, 0.98))
     obstacle_height = max(0.0, high - ground)
+    # 最小二乘拟合 z = slope*x + intercept，残差均方根表示粗糙度。
     centered_x = x_values - np.mean(x_values)
     denominator = float(np.dot(centered_x, centered_x))
     slope = (
@@ -121,10 +126,15 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("max_slope", 0.45)
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_valid_points", 30)
+        self.declare_parameter("source_switch_timeout", 2.0)
 
         override_topic = str(self.get_parameter("input_topic").value)
         candidates = list(self.get_parameter("input_topic_candidates").value)
-        self.topics = [override_topic] if override_topic else list(dict.fromkeys(candidates))
+        self.topics = (
+            [override_topic]
+            if override_topic
+            else list(dict.fromkeys(candidates))
+        )
         self.target_frame = str(self.get_parameter("target_frame").value)
         self.transform_timeout = max(
             0.0, float(self.get_parameter("transform_timeout").value)
@@ -148,11 +158,21 @@ class TerrainAnalyzer(Node):
         self.min_points = max(
             1, int(self.get_parameter("min_valid_points").value)
         )
+        self.source_switch_timeout = max(
+            0.1, float(self.get_parameter("source_switch_timeout").value)
+        )
+        if self.x_max <= self.x_min:
+            self.get_logger().warning(
+                "front_x_max must exceed front_x_min; using a 0.10 m ROI"
+            )
+            self.x_max = self.x_min + 0.10
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.latest_cloud = None
         self.last_processed_stamp = None
+        self.active_topic = None
+        self.last_active_cloud_time = None
         self.features_pub = self.create_publisher(
             Float32MultiArray, "/terrain/features", 10
         )
@@ -164,7 +184,10 @@ class TerrainAnalyzer(Node):
         )
         self._cloud_subscriptions = [
             self.create_subscription(
-                PointCloud2, topic, self.cloud_callback, qos_profile_sensor_data
+                PointCloud2,
+                topic,
+                lambda msg, source=topic: self.cloud_callback(msg, source),
+                qos_profile_sensor_data,
             )
             for topic in self.topics
         ]
@@ -177,8 +200,27 @@ class TerrainAnalyzer(Node):
             f"{processing_hz:.1f} Hz"
         )
 
-    def cloud_callback(self, msg: PointCloud2) -> None:
+    def cloud_callback(self, msg: PointCloud2, source: str) -> None:
         """Keep only the newest cloud to avoid processing backlog."""
+        now = self.get_clock().now()
+        active_age = (
+            float("inf")
+            if self.last_active_cloud_time is None
+            else (now - self.last_active_cloud_time).nanoseconds / 1e9
+        )
+        if not should_accept_source(
+            self.active_topic,
+            source,
+            active_age,
+            self.source_switch_timeout,
+        ):
+            return
+        # 锁定首个有效点云源；当前源超时后允许其他默认话题接管。
+        if source != self.active_topic:
+            self.active_topic = source
+            self.last_processed_stamp = None
+            self.get_logger().info(f"Using point-cloud topic {source}")
+        self.last_active_cloud_time = now
         self.latest_cloud = msg
 
     def processing_callback(self) -> None:
@@ -200,6 +242,7 @@ class TerrainAnalyzer(Node):
         except (AssertionError, ValueError) as exc:
             self.get_logger().warning(f"Invalid PointCloud2 layout: {exc}")
             return
+        # 同一份已转换点云同时供 Nav2 标障和越障几何计算，避免重复 TF。
         nav2_points = filter_roi_points(
             xyz,
             self.x_min,
@@ -224,7 +267,10 @@ class TerrainAnalyzer(Node):
         )
         if result is None:
             self._publish_diagnostic(
-                DiagnosticStatus.WARN, "Insufficient terrain points", 0, {}
+                DiagnosticStatus.WARN,
+                "Insufficient terrain points",
+                len(nav2_points),
+                {},
             )
             return
         features, valid_points = result
@@ -294,7 +340,11 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        # 避免 launch 转发的第二次 SIGINT 在资源销毁阶段打印 traceback。
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         rclpy.try_shutdown()
 
 

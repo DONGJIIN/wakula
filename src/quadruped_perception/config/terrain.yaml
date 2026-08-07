@@ -17,3 +17,4 @@ terrain_analyzer:
     max_slope: 0.45
     max_roughness: 0.06
     min_valid_points: 30
+    source_switch_timeout: 2.0

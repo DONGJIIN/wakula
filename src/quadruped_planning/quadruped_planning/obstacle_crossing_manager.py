@@ -11,6 +11,16 @@ from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 Decision = Tuple[str, str, float]
 
 
+def validate_height_thresholds(
+    step: float, climb: float, stop: float
+) -> Tuple[float, float, float]:
+    """Return ordered non-negative thresholds or conservative defaults."""
+    values = (step, climb, stop)
+    if all(isfinite(value) for value in values) and 0.0 <= step < climb < stop:
+        return values
+    return 0.08, 0.18, 0.32
+
+
 def select_terrain_decision(
     obstacle_height: float,
     points: float,
@@ -25,8 +35,10 @@ def select_terrain_decision(
 ) -> Decision:
     """Return the conservative motion recommendation for terrain geometry."""
     values = (obstacle_height, points, slope, roughness)
+    # 无效或稀疏点云必须停机，不能把“没看见”当作“可以通过”。
     if not all(isfinite(value) for value in values) or points < min_points:
         return "STOP", "WAIT_FOR_TERRAIN", 0.0
+    # 从最危险条件向下判断，确保高墙不会被较低的 STEP 阈值截获。
     if obstacle_height >= stop_threshold or slope >= max_slope * 1.5:
         return "STOP", "REPLAN_OR_REQUEST_FOOTSTEPS", 0.0
     if obstacle_height >= climb_threshold or slope >= max_slope:
@@ -46,8 +58,10 @@ def visual_evidence_in_path(
         return False
     type_code, confidence, center_x, _, width, height = map(float, evidence[:6])
     margin = max(0.0, min(0.49, center_margin))
+    rounded_code = round(type_code)
+    known_type = 1 <= rounded_code <= 4 and abs(type_code - rounded_code) < 1e-3
     return (
-        type_code > 0.0
+        known_type
         and confidence >= min_confidence
         and margin <= center_x <= 1.0 - margin
         and width > 0.0
@@ -82,9 +96,24 @@ class ObstacleCrossingManager(Node):
         self.declare_parameter("vision_min_confidence", 0.55)
         self.declare_parameter("vision_center_margin", 0.20)
         self.declare_parameter("vision_speed_scale", 0.35)
-        self.step_threshold = float(self.get_parameter("step_threshold").value)
-        self.climb_threshold = float(self.get_parameter("climb_threshold").value)
-        self.stop_threshold = float(self.get_parameter("stop_threshold").value)
+        configured_thresholds = (
+            float(self.get_parameter("step_threshold").value),
+            float(self.get_parameter("climb_threshold").value),
+            float(self.get_parameter("stop_threshold").value),
+        )
+        (
+            self.step_threshold,
+            self.climb_threshold,
+            self.stop_threshold,
+        ) = validate_height_thresholds(*configured_thresholds)
+        if configured_thresholds != (
+            self.step_threshold,
+            self.climb_threshold,
+            self.stop_threshold,
+        ):
+            self.get_logger().warning(
+                "Invalid height thresholds; restored 0.08/0.18/0.32 m"
+            )
         self.max_slope = float(self.get_parameter("max_slope").value)
         self.max_roughness = float(self.get_parameter("max_roughness").value)
         self.min_points = int(self.get_parameter("min_points").value)
@@ -141,6 +170,7 @@ class ObstacleCrossingManager(Node):
         slope = abs(float(msg.data[4])) if len(msg.data) > 4 else 0.0
         roughness = float(msg.data[5]) if len(msg.data) > 5 else 0.0
 
+        # 点云决定动作等级，视觉仅能在 WALK 状态要求减速复核。
         decision = select_terrain_decision(
             obstacle_height,
             points,
@@ -205,7 +235,10 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         rclpy.try_shutdown()
 
 

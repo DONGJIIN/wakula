@@ -49,6 +49,8 @@ def test_readiness_monitor_does_not_start_without_localization_tf():
         assert node.scan_received
         assert node.odom_received
         assert not node.startup_requested
+        assert node._sensor_is_fresh(node.last_scan_time)
+        assert node._sensor_is_fresh(node.last_odom_time)
     finally:
         node.destroy_node()
         rclpy.shutdown()

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from quadruped_perception.terrain_analyzer import compute_terrain_features
+from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
     ObstacleEvidence,
     detect_obstacle_evidence,
@@ -77,3 +78,17 @@ def test_numpy_terrain_features_and_minimum_points():
         points[:10], 0.1, 1.5, 0.45, 30000, 0.1, 0.28, 0.45, 0.06, 30
     )
     assert sparse is None
+
+
+def test_sensor_topic_selection_locks_and_fails_over():
+    """A second default topic is ignored until the active source is stale."""
+    assert should_accept_source(None, "/camera/image_raw", 0.0, 2.0)
+    assert should_accept_source(
+        "/camera/image_raw", "/camera/image_raw", 0.1, 2.0
+    )
+    assert not should_accept_source(
+        "/camera/image_raw", "/image_raw", 0.5, 2.0
+    )
+    assert should_accept_source(
+        "/camera/image_raw", "/image_raw", 2.1, 2.0
+    )
