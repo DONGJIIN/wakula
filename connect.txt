@@ -612,6 +612,19 @@ SDK 或状态估计器至少发布：
 5. STOP：立即停止推进并保持稳定站立。
 6. ROS 命令超过驱动侧超时时间：无条件停止，不能保持最后速度。
 
+后续整机建议保留的 ROS 2 标准接口（计划项，当前尚未全部实现）：
+
+  /imu/data              sensor_msgs/msg/Imu          原始或滤波后的机身 IMU
+  /joint_states          sensor_msgs/msg/JointState   12 关节位置、速度和力矩
+  /battery_state         sensor_msgs/msg/BatteryState 电压、电流、电量和健康状态
+  /diagnostics           diagnostic_msgs/msg/DiagnosticArray 驱动、传感器和温度故障
+  /odom                  nav_msgs/msg/Odometry        融合后的机身里程计
+  odom -> base_link      TF                            连续局部位姿
+
+站起、趴下、步态切换和 STEP/CLIMB/LOW_PROFILE 后续应使用带反馈、取消和结果的 ROS 2
+Action，而不是继续扩展 String 命令。Action 的自定义类型和最终名称必须在运动控制器实现
+前统一设计；确定前本文件不把占位名称声明为已实现接口。
+
 
 十三、通信调试命令
 ------------------

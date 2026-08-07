@@ -12,6 +12,19 @@ Wakula 四足机器人自主导航与越障工程说明
 /cmd_vel、/crossing/mode 和 /crossing/action 需要由厂商 SDK、MPC/WBC 控制器或
 自研步态控制器转换为真正的腿部动作。
 
+后续整机软件建议按职责新增独立包，避免把底层控制继续堆入现有导航节点：
+
+  quadruped_hardware          SDK/ros2_control、关节和设备诊断
+  quadruped_state_estimation 编码器、IMU、足端接触和里程计融合
+  quadruped_kinematics       正逆运动学、雅可比和动力学模型
+  quadruped_locomotion       站立、步态、落脚、MPC/WBC 和越障 Action
+  quadruped_safety           急停状态、姿态/关节/电源保护和故障仲裁
+  quadruped_simulation       Gazebo/Isaac 整机、传感器和比赛场景
+
+这些名称是后续模块边界，不代表当前已经实现。每个包应先定义输入、输出、超时、错误
+状态和验收测试，再开始写控制算法；整机阶段交付物及通过条件见 README 顶部和
+quickstart.txt 第八、九节。
+
 
 二、总体数据流
 --------------
