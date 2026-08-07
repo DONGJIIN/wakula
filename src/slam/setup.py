@@ -21,4 +21,9 @@ setup(
     description="SLAM and navigation configuration for the quadruped robot.",
     license="Apache-2.0",
     tests_require=["pytest"],
+    entry_points={
+        "console_scripts": [
+            "nav2_readiness_monitor = slam.nav2_readiness_monitor:main",
+        ],
+    },
 )
