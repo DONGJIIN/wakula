@@ -1,16 +1,7 @@
 terrain_analyzer:
   ros__parameters:
     input_topic: ""
-    input_topic_candidates:
-      - /camera/depth/points
-      - /camera/depth/color/points
-      - /camera/camera/depth/color/points
-      - /camera/depth_registered/points
-      - /camera/points
-      - /points
-      - /velodyne_points
-      - /ouster/points
-      - /livox/lidar
+    input_topic_candidates: [/camera/depth/points, /camera/depth/color/points, /camera/points, /points]
     target_frame: base_link
     processing_hz: 10.0
     transform_timeout: 0.05

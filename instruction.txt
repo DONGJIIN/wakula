@@ -74,6 +74,8 @@ Wakula 四足机器人自主导航与越障工程说明
   nav2.yaml：Nav2 规划器、控制器、代价地图、速度平滑和碰撞监控参数。
   navigation.launch.py：最小化 Nav2 节点启动入口。
   slam.launch.py：完整自主系统启动入口。
+  sensor_compat.launch.py：常见/自定义传感器的集中适配入口。
+  sensor_profiles.yaml：雷达和相机常用话题组合，不包含算法参数。
   nav2_readiness_monitor.py：传感器和 TF 就绪后才自动激活 Nav2。
 
 
@@ -84,8 +86,6 @@ Wakula 四足机器人自主导航与越障工程说明
 
   /camera/image_raw
   /camera/color/image_raw
-  /camera/rgb/image_raw
-  /camera/camera/color/image_raw
   /image_raw
 
 如果启动参数 camera_topic 不为空，则只订阅指定话题。自动模式下会锁定最先持续
@@ -185,20 +185,6 @@ source_switch_timeout 后，其他话题可以自动接管。
 点云数据少于 min_points、包含非法数值或超过 sensor_timeout 没有更新时，一律
 STOP。该原则是“没有看到地形不等于地形安全”。
 
-默认点云候选覆盖通用 RGB-D 和常见 3D 雷达命名：
-
-  /camera/depth/points
-  /camera/depth/color/points
-  /camera/camera/depth/color/points
-  /camera/depth_registered/points
-  /camera/points
-  /points
-  /velodyne_points
-  /ouster/points
-  /livox/lidar
-
-不在列表内时通过 point_cloud_topic 显式指定，算法源码无需修改。
-
 视觉证据必须同时满足：
 
 1. 类型码是 1～4 的已知类型。
@@ -218,22 +204,26 @@ SLAM Toolbox 使用激光扫描和里程计不断估计机器人位姿，同时�
 它产生 map -> odom；底盘状态估计产生 odom -> base_link。两段 TF 连接后，Nav2 才能
 知道机器人在地图中的位置。
 
-硬件替换通过完整入口 slam.launch.py 的四个参数完成：
+传感器兼容采用“两层入口”：
 
-  scan_topic         外部 LaserScan；默认 /scan
-  odom_topic         外部 Odometry；默认 /odom
-  camera_topic       外部 Image；空值表示自动选择候选话题
-  point_cloud_topic  外部 PointCloud2；空值表示自动选择候选话题
+  slam.launch.py
+    只使用 /scan、/odom、标准 Image/PointCloud2 和 TF，保持算法配置稳定。
 
-scan_topic 的单次配置会作用到 SLAM、Nav2 局部/全局代价地图、Collision Monitor、
-就绪监视器和 RViz；odom_topic 会作用到 Nav2、就绪监视器和比赛状态机。nav2.yaml 和
-slam.yaml 仍保留 /scan、/odom 作为内部标准合同，由 launch 层统一 remap，防止配置
-分散。消息类型、单位和 TF 合同不因厂商改变。
+  sensor_compat.launch.py
+    读取 sensor_profiles.yaml，在包含标准入口之前集中 remap /scan、/odom，并把图像、
+    点云源作为参数传给感知节点。换硬件不需要逐个修改 slam.yaml、nav2.yaml 或源码。
 
-2D 雷达可直接提供 LaserScan。3D 雷达点云可直接供 terrain_analyzer 使用；若还要用于
-二维 SLAM，需先通过 pointcloud_to_laserscan 或厂商节点生成 LaserScan。压缩相机图像
-需先通过 image_transport 转成 sensor_msgs/Image。CameraInfo 当前为后续三维投影预留，
-OpenCV 的二维轮廓识别暂不读取它。
+sensor_profile 预置 RPLIDAR、YDLIDAR、LDLiDAR、Hokuyo、RealSense D400、Orbbec
+Gemini 2、ZED2、OAK-D、Velodyne、Ouster、Livox、Hesai、RoboSense 和 LSLIDAR 的常见
+话题。驱动版本或命名空间不同，以 ros2 topic list -t 的实际结果为准，再用
+scan_topic、odom_topic、camera_topic、point_cloud_topic 覆盖。非空显式参数优先于
+profile；不指定时使用 ros_default。
+
+2D 雷达可直接给 SLAM Toolbox 提供 LaserScan。3D 雷达的 PointCloud2 可直接给地形分析
+和局部代价地图使用，但当前二维 SLAM 仍需要独立 LaserScan；可以用
+pointcloud_to_laserscan 转换。相机必须提供 cv_bridge 支持的 Image，CompressedImage
+先用 image_transport 转换。CameraInfo 当前不参与二维 OpenCV 判断，但应保留以便后续
+完成畸变校正和检测框—深度投影。
 
 Nav2 主要组成：
 
@@ -307,11 +297,20 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 
   ros2 launch slam slam.launch.py vision:=false
 
-指定所有非默认传感器话题：
+指定相机话题：
 
-  ros2 launch slam slam.launch.py scan_topic:=/my_lidar/scan \
-    odom_topic:=/robot/odom camera_topic:=/my_camera/image_raw \
+  ros2 launch slam slam.launch.py camera_topic:=/my_camera/image_raw \
     point_cloud_topic:=/my_camera/points
+
+使用常见传感器 profile：
+
+  ros2 launch slam sensor_compat.launch.py sensor_profile:=realsense_d400
+
+适配任意自定义话题：
+
+  ros2 launch slam sensor_compat.launch.py scan_topic:=/front/scan \
+    odom_topic:=/robot/odometry camera_topic:=/rgb/image_raw \
+    point_cloud_topic:=/depth/points
 
 只加载 Nav2 节点但不自动激活：
 

@@ -1,0 +1,86 @@
+# Hardware names are convenience presets only. The algorithm-side contract stays
+# /scan, /odom, sensor_msgs/Image and sensor_msgs/PointCloud2.
+profiles:
+  ros_default:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: ""
+
+  # Most ROS 2 drivers for these 2D lidars already publish the standard /scan.
+  rplidar:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: ""
+  ydlidar:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: ""
+  ldlidar:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: ""
+  hokuyo:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: ""
+
+  # Camera namespaces vary with driver launch arguments. Explicit launch
+  # overrides always take priority over these common starting points.
+  realsense_d400:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: /camera/camera/color/image_raw
+    point_cloud_topic: /camera/camera/depth/color/points
+  orbbec_gemini2:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: /camera/color/image_raw
+    point_cloud_topic: /camera/depth/points
+  zed2:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: /zed/zed_node/rgb/color/rect/image
+    point_cloud_topic: /zed/zed_node/point_cloud/cloud_registered
+  oak_d:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: /oak/rgb/image_raw
+    point_cloud_topic: /oak/stereo/points
+
+  # A 3D lidar profile feeds the terrain/local-costmap PointCloud2 input. A
+  # separate LaserScan is still required for the current 2D SLAM pipeline.
+  velodyne:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: /velodyne_points
+  ouster:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: /ouster/points
+  livox:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: /livox/lidar
+  hesai:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: /lidar_points
+  robosense:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: /rslidar_points
+  lslidar:
+    scan_topic: /scan
+    odom_topic: /odom
+    camera_topic: ""
+    point_cloud_topic: /lslidar_point_cloud

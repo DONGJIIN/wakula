@@ -84,49 +84,48 @@ Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
 点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
 
-## 4. 可替换传感器接口
+## 4. 默认与可替换传感器接口
 
-算法内部保持 ROS 导航通用合同。更换硬件时优先让驱动发布标准消息；话题不同只修改
-完整启动命令的参数，不修改 SLAM、Nav2 或感知源码：
+算法内部始终保持 ROS 2 标准合同，不写死厂商品牌：
 
-| 数据 | 内部默认 | 消息类型 | 完整启动参数 |
+| 数据 | 内部默认 | 消息类型 | 兼容入口覆盖参数 |
 |---|---|---|---|
 | 2D 激光 | `/scan` | `sensor_msgs/msg/LaserScan` | `scan_topic` |
 | 里程计 | `/odom` | `nav_msgs/msg/Odometry` | `odom_topic` |
-| RGB | 自动选择，见下表 | `sensor_msgs/msg/Image` | `camera_topic` |
-| 深度/3D 点云 | 自动选择，见下表 | `sensor_msgs/msg/PointCloud2` | `point_cloud_topic` |
+| RGB | 自动选择 | `sensor_msgs/msg/Image` | `camera_topic` |
+| 深度/3D 点云 | 自动选择 | `sensor_msgs/msg/PointCloud2` | `point_cloud_topic` |
 
-`scan_topic` 会同时传给 SLAM Toolbox、Nav2 两张代价地图、Collision Monitor、就绪监视器
-和 RViz；`odom_topic` 会同时传给 Nav2、就绪监视器与比赛状态机，避免换设备时漏改某个
-节点。默认值仍是 ROS 常用的 `/scan`、`/odom`。
+`slam.launch.py` 是纯默认入口；`sensor_compat.launch.py` 是硬件兼容入口。后者通过一层
+集中 remap/参数转发适配驱动，SLAM、Nav2、碰撞保护和感知源码都不用修改。预置 profile：
 
-图像和点云使用 Sensor Data QoS，并自动监听常见驱动话题：
+```text
+2D 雷达：ros_default、rplidar、ydlidar、ldlidar、hokuyo
+RGB-D：  realsense_d400、orbbec_gemini2、zed2、oak_d
+3D 雷达：velodyne、ouster、livox、hesai、robosense、lslidar
+```
+
+profile 是常见驱动命名的起点，不绑定具体驱动版本；实际名称不同时用四个参数覆盖。
+配置集中在 `slam/config/sensor_profiles.yaml`，以后新增型号只需复制一个 YAML 段。
+
+图像和点云使用 Sensor Data QoS；不指定 profile/显式话题时自动监听 ROS 常用默认话题：
 
 ```text
 RGB:
   /camera/image_raw
   /camera/color/image_raw
-  /camera/rgb/image_raw
-  /camera/camera/color/image_raw
   /image_raw
 
 PointCloud2:
   /camera/depth/points
   /camera/depth/color/points
-  /camera/camera/depth/color/points
-  /camera/depth_registered/points
   /camera/points
   /points
-  /velodyne_points
-  /ouster/points
-  /livox/lidar
 ```
 
-自动模式只锁定第一个持续发布的数据源，失联超过 2 秒才切换。接入任意相机或雷达的
-原则是保持上表消息类型，并让消息 `header.frame_id` 到 `base_link` 的 TF 存在。若驱动
-只发布压缩图像或厂商私有点云，先用 `image_transport`、厂商转换器或
-`pointcloud_to_laserscan` 转成标准消息。相机标定建议同时保留标准
-`sensor_msgs/msg/CameraInfo`，当前二维 OpenCV 识别不依赖它，但后续三维投影会使用。
+所有消息必须有有效时间戳和 `header.frame_id`，并存在传感器 frame 到 `base_link` 的 TF。
+相机建议同时发布同命名空间 `sensor_msgs/msg/CameraInfo`，为后续图像—深度投影预留。
+只有 3D 点云而没有 `LaserScan` 时，需要用 `pointcloud_to_laserscan` 或厂商转换节点生成
+二维扫描；压缩图像需先经 `image_transport` 转为标准 `Image`。
 
 ## 5. 安装、编译与测试
 
@@ -178,20 +177,28 @@ ros2 launch slam slam.launch.py rviz:=false
 ros2 launch slam slam.launch.py vision:=false
 ```
 
-覆盖任意雷达、里程计、相机和点云话题：
+覆盖非默认相机话题：
 
 ```bash
 ros2 launch slam slam.launch.py \
-  scan_topic:=/my_lidar/scan \
-  odom_topic:=/robot/odom \
   camera_topic:=/my_camera/image_raw \
   point_cloud_topic:=/my_camera/points
 ```
 
-只更换符合 `LaserScan` 标准的 2D 雷达时通常只需：
+用常见硬件 profile 启动（示例为 RealSense D400）：
 
 ```bash
-ros2 launch slam slam.launch.py scan_topic:=/new_lidar/scan
+ros2 launch slam sensor_compat.launch.py sensor_profile:=realsense_d400
+```
+
+任意未知设备无需新增代码，直接覆盖实际话题：
+
+```bash
+ros2 launch slam sensor_compat.launch.py \
+  scan_topic:=/front_lidar/scan \
+  odom_topic:=/robot/odometry \
+  camera_topic:=/rgb/image_raw \
+  point_cloud_topic:=/depth/points
 ```
 
 只启动模型、控制、感知和安全门，不启用 SLAM/Nav2：
@@ -323,9 +330,11 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 | `quadruped_planning/config/course_waypoints.yaml` | 障碍接近点 |
 | `slam/config/slam.yaml` | SLAM Toolbox |
 | `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
+| `slam/config/sensor_profiles.yaml` | 常见雷达/相机话题 profile，可直接扩展 |
 
 公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
 `slam/launch/slam.launch.py` 在其上增加 SLAM、Nav2 与 RViz，避免重复维护节点。
+`slam/launch/sensor_compat.launch.py` 只负责硬件名称适配，并包含上述标准入口。
 
 ## 12. 实机接入清单
 

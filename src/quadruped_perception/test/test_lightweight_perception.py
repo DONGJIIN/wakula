@@ -3,16 +3,12 @@
 import cv2
 import numpy as np
 
-from quadruped_perception.terrain_analyzer import (
-    compute_terrain_features,
-    DEFAULT_POINT_CLOUD_TOPICS,
-)
+from quadruped_perception.terrain_analyzer import compute_terrain_features
 from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
-    DEFAULT_IMAGE_TOPICS,
+    ObstacleEvidence,
     detect_obstacle_evidence,
     largest_color_feature,
-    ObstacleEvidence,
     stabilize_evidence,
 )
 
@@ -96,13 +92,3 @@ def test_sensor_topic_selection_locks_and_fails_over():
     assert should_accept_source(
         "/camera/image_raw", "/image_raw", 2.1, 2.0
     )
-
-
-def test_common_camera_and_3d_lidar_topics_are_supported():
-    """Default candidates cover ROS conventions and common vendor namespaces."""
-    assert "/image_raw" in DEFAULT_IMAGE_TOPICS
-    assert "/camera/camera/color/image_raw" in DEFAULT_IMAGE_TOPICS
-    assert "/camera/depth/points" in DEFAULT_POINT_CLOUD_TOPICS
-    assert "/velodyne_points" in DEFAULT_POINT_CLOUD_TOPICS
-    assert "/ouster/points" in DEFAULT_POINT_CLOUD_TOPICS
-    assert "/livox/lidar" in DEFAULT_POINT_CLOUD_TOPICS

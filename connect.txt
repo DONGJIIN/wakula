@@ -64,10 +64,22 @@ nav2_readiness_monitor
 二、外部传感器输入
 ------------------
 
-公共适配原则：内部合同保持 /scan、/odom 和 ROS 标准消息。完整入口 slam.launch.py
-提供 scan_topic、odom_topic、camera_topic、point_cloud_topic 四个参数，所有相关节点
-由 launch 层统一 remap 或传参。换设备时只改启动命令，不逐个修改 nav2.yaml、slam.yaml
-或 Python 源码。
+公共适配原则：`slam.launch.py` 保持 /scan、/odom 和 ROS 标准消息；需要更换硬件时使用
+`sensor_compat.launch.py`。该入口读取 `sensor_profiles.yaml`，把厂商话题集中映射到内部
+合同，避免分别修改 SLAM、Nav2、Collision Monitor、RViz 和感知节点。
+
+兼容入口参数：
+
+  sensor_profile        默认 ros_default；选择一个 YAML 预置组合
+  sensor_profiles_file  默认使用本包配置；可指向现场自定义 YAML
+  scan_topic            非空时覆盖 profile 的 LaserScan 来源
+  odom_topic            非空时覆盖 profile 的 Odometry 来源
+  camera_topic          非空时覆盖 profile 的 Image 来源
+  point_cloud_topic     非空时覆盖 profile 的 PointCloud2 来源
+
+显式参数优先于 profile。当前 profile 包括 rplidar、ydlidar、ldlidar、hokuyo、
+realsense_d400、orbbec_gemini2、zed2、oak_d、velodyne、ouster、livox、hesai、
+robosense 和 lslidar；名字只代表常见话题默认值，消息类型与 TF 合同不会改变。
 
 1. 二维激光雷达
 
@@ -85,8 +97,7 @@ nav2_readiness_monitor
   ranges             每束激光距离
 QoS：传感器数据 QoS，通常 Best Effort、Volatile、较小队列。
 要求：frame_id 到 base_link 的 TF 必须存在；频率和时间戳必须连续。
-覆盖方式：scan_topic:=/厂商雷达话题。该参数同时覆盖 SLAM Toolbox、Nav2 局部/全局
-          代价地图、Collision Monitor、nav2_readiness_monitor 和 RViz 的激光输入。
+适配方式：兼容入口的 scan_topic 将外部来源统一 remap 给所有 /scan 消费者。
 
 2. 里程计
 
@@ -102,16 +113,13 @@ QoS：传感器数据 QoS，通常 Best Effort、Volatile、较小队列。
   twist.twist              机器人估计速度
   pose/twist covariance    定位与速度不确定度
 配套 TF：状态估计器必须持续发布 odom -> base_link。
-覆盖方式：odom_topic:=/厂商里程计话题。该参数同时覆盖 Nav2、速度平滑器、
-          nav2_readiness_monitor 和 competition_obstacle_manager 的里程计输入。
+适配方式：兼容入口的 odom_topic 将外部来源统一 remap 给所有 /odom 消费者。
 
 3. RGB 图像自动兼容输入
 
 候选名称：
   /camera/image_raw
   /camera/color/image_raw
-  /camera/rgb/image_raw
-  /camera/camera/color/image_raw
   /image_raw
 类型：sensor_msgs/msg/Image
 发送方：任意 ROS 2 RGB/深度相机驱动
@@ -128,13 +136,8 @@ QoS：Sensor Data QoS。
 候选名称：
   /camera/depth/points
   /camera/depth/color/points
-  /camera/camera/depth/color/points
-  /camera/depth_registered/points
   /camera/points
   /points
-  /velodyne_points
-  /ouster/points
-  /livox/lidar
 类型：sensor_msgs/msg/PointCloud2
 发送方：RGB-D 相机、双目深度、3D 雷达或点云转换节点
 接收方：terrain_analyzer
@@ -144,16 +147,16 @@ TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
 选择机制：与 RGB 图像相同，锁定一个来源，超时后自动切换。
 覆盖方式：启动参数 point_cloud_topic:=/自定义点云话题。
 
-5. 相机标定信息（预留接口）
+5. 相机标定信息（预留标准接口）
 
 推荐名称：与图像同命名空间的 camera_info，例如 /camera/camera_info 或
           /camera/color/camera_info
 类型：sensor_msgs/msg/CameraInfo
 发送方：相机驱动或 camera_info_manager
-当前接收方：无。当前 OpenCV 只做二维图像特征，不要求内参。
-预留用途：将图像检测框与深度/点云投影融合、尺寸估计和相机畸变校正。
-要求：header.frame_id、时间戳和图像流保持一致。后续使用时优先遵循相机驱动原命名空间，
-      通过参数或 remap 接入，不重新定义私有标定消息。
+当前接收方：无；当前 OpenCV 只做归一化二维轮廓，不依赖内参。
+预留用途：图像去畸变、检测框与深度/点云投影、实际尺寸和距离估计。
+要求：时间戳和 frame_id 与对应 Image 一致。后续消费者应使用参数或 remap 适配，不定义
+      厂商私有标定消息。
 
 6. 足端接触
 
@@ -535,9 +538,9 @@ ros2 service list -t | grep controller_manager 查询。
 6. 全局接口使用以 / 开头的绝对名称；Nav2 内部 remap 最终仍解析到根命名空间。
 7. 特殊硬件尽量使用启动参数或 remap，不直接修改核心默认名称。
 8. 同一个话题只能有明确的职责所有者，尤其 /cmd_vel 必须只有 Collision Monitor 发布。
-9. scan_topic 和 odom_topic 默认分别为 /scan、/odom；非默认值由 launch 一次性传递给
-   所有消费者，不直接改 Nav2 或 SLAM 配置中的标准名称。
-10. camera_topic、point_cloud_topic 为空时自动选择候选源；非空时只订阅指定源。
+9. 核心入口只保留 /scan、/odom；设备 profile 和覆盖参数只存在于兼容入口。
+10. profile 不改变消息类型、单位、QoS 或 TF，只选择来源名称；显式非空参数优先。
+11. camera_topic、point_cloud_topic 为空时由感知节点自动选择 ROS 常用候选源。
 
 多电脑 DDS 通信约定：
 

@@ -3,13 +3,14 @@
 import importlib.util
 from pathlib import Path
 
-import rclpy
 from launch.actions import DeclareLaunchArgument
+import rclpy
 import yaml
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
 from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
+from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -26,11 +27,11 @@ def launch_argument_names(description):
 
 def test_local_costmap_fuses_scan_and_depth_points():
     """The local planner must receive both lidar and transformed depth data."""
-    with (PACKAGE_ROOT / "config" / "nav2.yaml").open(encoding="utf-8") as stream:
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
-    obstacle_layer = config["local_costmap"]["local_costmap"]["ros__parameters"][
-        "obstacle_layer"
-    ]
+    costmap = config["local_costmap"]["local_costmap"]["ros__parameters"]
+    obstacle_layer = costmap["obstacle_layer"]
     assert obstacle_layer["observation_sources"] == "scan terrain_points"
     assert obstacle_layer["terrain_points"]["topic"] == (
         "/perception/obstacle_points"
@@ -39,26 +40,60 @@ def test_local_costmap_fuses_scan_and_depth_points():
 
 
 def test_navigation_launch_description_is_constructible():
-    """Nav2 exposes one consistent lidar and odometry adaptation point."""
+    """The reduced Nav2 launch entry must remain importable."""
     path = PACKAGE_ROOT / "launch" / "navigation.launch.py"
     spec = importlib.util.spec_from_file_location("navigation_launch", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
     assert len(description.entities) >= 2
-    assert {"scan_topic", "odom_topic"} <= launch_argument_names(description)
 
 
-def test_full_slam_launch_exposes_sensor_topic_overrides():
-    """The public full-system entry forwards replaceable sensor topics."""
-    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
-    spec = importlib.util.spec_from_file_location("slam_launch", path)
+def test_sensor_profiles_cover_common_devices_and_allow_overrides():
+    """Profiles are data-driven and an unknown device needs no source edit."""
+    profiles = load_sensor_profiles(
+        str(PACKAGE_ROOT / "config" / "sensor_profiles.yaml")
+    )
+    expected = {
+        "ros_default",
+        "rplidar",
+        "ydlidar",
+        "realsense_d400",
+        "orbbec_gemini2",
+        "zed2",
+        "oak_d",
+        "velodyne",
+        "ouster",
+        "livox",
+        "hesai",
+        "robosense",
+        "lslidar",
+    }
+    assert expected <= profiles.keys()
+    resolved = resolve_sensor_topics(
+        profiles,
+        "realsense_d400",
+        {"scan_topic": "/front/scan", "camera_topic": ""},
+    )
+    assert resolved["scan_topic"] == "/front/scan"
+    assert resolved["camera_topic"] == "/camera/camera/color/image_raw"
+
+
+def test_sensor_compat_launch_exposes_one_hardware_adaptation_point():
+    """The compatibility entry publishes all replaceable source arguments."""
+    path = PACKAGE_ROOT / "launch" / "sensor_compat.launch.py"
+    spec = importlib.util.spec_from_file_location("sensor_compat_launch", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
-    assert {"scan_topic", "odom_topic", "camera_topic", "point_cloud_topic"} <= (
-        launch_argument_names(description)
-    )
+    assert {
+        "sensor_profile",
+        "sensor_profiles_file",
+        "scan_topic",
+        "odom_topic",
+        "camera_topic",
+        "point_cloud_topic",
+    } <= launch_argument_names(description)
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

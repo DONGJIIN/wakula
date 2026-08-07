@@ -20,8 +20,6 @@ from quadruped_perception.topic_selection import should_accept_source
 DEFAULT_IMAGE_TOPICS = [
     "/camera/image_raw",
     "/camera/color/image_raw",
-    "/camera/rgb/image_raw",
-    "/camera/camera/color/image_raw",
     "/image_raw",
 ]
 ColorFeature = Tuple[float, float, float, float, float]
