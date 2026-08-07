@@ -580,6 +580,10 @@ Collision Monitor 数据超时：
 十二、接入厂商 SDK 的最小合同
 ----------------------------
 
+本节只是上层 ROS 2 与真机之间的最小软件边界，不代表整机接口已经完成。机械、电气、
+电源、执行器、实时总线、状态估计、步态/MPC/WBC、硬件急停和故障管理仍需分别设计，
+并最终由 SDK 适配器或 ros2_control hardware plugin 汇总到以下 ROS 2 合同。
+
 SDK 适配器至少订阅：
 
   /cmd_vel                 geometry_msgs/msg/Twist
