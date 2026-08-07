@@ -9,10 +9,10 @@ Wakula 后续开发快速上手指南
 
 配套文档：
 
-  README.md        安装、启动和总体架构
+  README.md        项目首页、四份文档导航、安装、启动和总体架构
   instruction.txt 模块职责、算法原理和调试方法
-  connect.txt     Topic、Action、Service、TF、QoS 和接口字段
-  quickstart.txt  本文件，快速接手、当前进度和后续路线
+  connect.txt      Topic、Action、Service、TF、QoS 和接口字段
+  quickstart.txt   本文件，跨电脑复现、快速接手、当前进度和后续路线
 
 
 一、项目当前定位

@@ -339,7 +339,8 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 十三、配套文档和维护规则
 ------------------------
 
-根目录 README.md 用于安装、启动和总体架构；instruction.txt（本文件）用于算法原理、
+根目录 README.md 顶部提供四份文档导航，并说明安装、启动和总体架构；
+instruction.txt（本文件）用于算法原理、
 模块职责和调试步骤；connect.txt 用于完整记录 Topic、Action、Service、TF、消息字段、
 QoS 及通信超时；quickstart.txt 用于跨电脑完整复现、依赖和插件清单、快速启动、当前
 成果、已知限制和后续路线。复现时以 package.xml 和 rosdep 为最终依赖来源，显式 apt
