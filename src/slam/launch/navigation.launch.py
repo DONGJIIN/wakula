@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, SetEnvironmentVariable
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
 from launch_ros.descriptions import ParameterFile
@@ -110,9 +111,18 @@ def generate_launch_description():
             name="lifecycle_manager_navigation",
             output="screen",
             parameters=[
-                {"autostart": autostart},
+                # Activation is requested by the readiness monitor only after
+                # scan, odometry and localization TF are available.
+                {"autostart": False},
                 {"node_names": lifecycle_nodes},
             ],
+        ),
+        Node(
+            package="slam",
+            executable="nav2_readiness_monitor",
+            output="screen",
+            parameters=[{"use_sim_time": use_sim_time}],
+            condition=IfCondition(autostart),
         ),
     ]
     return LaunchDescription(

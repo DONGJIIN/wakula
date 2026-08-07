@@ -22,6 +22,7 @@ def generate_launch_description():
     camera_topic = LaunchConfiguration("camera_topic")
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
     competition = LaunchConfiguration("competition")
+    nav2_autostart = LaunchConfiguration("nav2_autostart")
 
     bringup_launch = package_file(
         "quadruped_bringup", "launch", "bringup.launch.py"
@@ -43,6 +44,7 @@ def generate_launch_description():
             DeclareLaunchArgument("camera_topic", default_value=""),
             DeclareLaunchArgument("point_cloud_topic", default_value=""),
             DeclareLaunchArgument("competition", default_value="false"),
+            DeclareLaunchArgument("nav2_autostart", default_value="true"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(bringup_launch),
                 launch_arguments={
@@ -66,7 +68,7 @@ def generate_launch_description():
                 launch_arguments={
                     "use_sim_time": use_sim_time,
                     "params_file": nav2_params,
-                    "autostart": "True",
+                    "autostart": nav2_autostart,
                 }.items(),
             ),
             Node(

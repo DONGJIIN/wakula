@@ -3,7 +3,12 @@
 import importlib.util
 from pathlib import Path
 
+import rclpy
 import yaml
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+
+from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -31,3 +36,19 @@ def test_navigation_launch_description_is_constructible():
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
     assert len(description.entities) >= 2
+
+
+def test_readiness_monitor_does_not_start_without_localization_tf():
+    """Sensor messages alone must not activate Nav2 without localization."""
+    rclpy.init()
+    node = Nav2ReadinessMonitor()
+    try:
+        node._scan_callback(LaserScan())
+        node._odom_callback(Odometry())
+        node._check_readiness()
+        assert node.scan_received
+        assert node.odom_received
+        assert not node.startup_requested
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

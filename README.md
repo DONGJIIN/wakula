@@ -169,8 +169,14 @@ Robocon 比赛模式：
 ros2 launch slam slam.launch.py competition:=true
 ```
 
-启动前必须已有传感器、里程计和 TF；否则 Nav2 等待 `odom -> base_link`、地形节点等待
-相机外参属于正常安全行为。
+Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`，并确认
+`map -> base_link` TF 可用后才会自动激活整套导航生命周期；因此没有连接传感器时可
+安全打开和关闭调试环境，不会在等待 TF 的生命周期切换中崩溃。地形节点仍会等待相机
+外参，这是正常安全行为。若只检查参数、不希望自动激活，可使用：
+
+```bash
+ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
+```
 
 ## 7. OpenCV 障碍识别
 
