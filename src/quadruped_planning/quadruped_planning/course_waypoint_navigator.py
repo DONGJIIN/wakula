@@ -33,19 +33,25 @@ class CourseWaypointNavigator(Node):
         }
         self.current_obstacle = None
         self.last_goal_name = None
+        self.goal_name = None
         self.goal_handle = None
-        self.create_subscription(String, "/competition/current_obstacle", self.obstacle_callback, 10)
+        self.create_subscription(
+            String, "/competition/current_obstacle", self.obstacle_callback, 10
+        )
         self.hint_pub = self.create_publisher(String, "/competition/obstacle_hint", 10)
         self.failed_pub = self.create_publisher(Bool, "/competition/obstacle_failed", 10)
         self.client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.timer = self.create_timer(0.2, self.try_send_goal)
-        self.get_logger().info(f"Course waypoint navigator loaded {len(self.poses)} approach poses")
+        self.get_logger().info(
+            f"Course waypoint navigator loaded {len(self.poses)} approach poses"
+        )
 
     def obstacle_callback(self, msg: String) -> None:
         name = msg.data.strip()
         if name in self.poses and name != self.current_obstacle:
             self.current_obstacle = name
             self.last_goal_name = None
+            self.goal_name = None
             self.goal_handle = None
 
     def try_send_goal(self) -> None:
@@ -64,6 +70,7 @@ class CourseWaypointNavigator(Node):
         goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
         self.last_goal_name = name
+        self.goal_name = name
         future = self.client.send_goal_async(goal)
         future.add_done_callback(self.goal_response_callback)
         self.get_logger().info(f"Navigating to {name} approach pose ({x:.2f}, {y:.2f})")
@@ -74,11 +81,13 @@ class CourseWaypointNavigator(Node):
         except Exception as exc:
             self.get_logger().error(f"Could not send Nav2 goal: {exc}")
             self.goal_handle = None
+            self.goal_name = None
             return
         if not handle.accepted:
             self.get_logger().warning("Nav2 rejected approach goal")
             self.failed_pub.publish(Bool(data=True))
             self.goal_handle = None
+            self.goal_name = None
             return
         self.goal_handle = handle
         result_future = handle.get_result_async()
@@ -86,8 +95,9 @@ class CourseWaypointNavigator(Node):
 
     def goal_result_callback(self, future) -> None:
         status = future.result().status
-        name = self.current_obstacle
+        name = self.goal_name
         self.goal_handle = None
+        self.goal_name = None
         if status == GoalStatus.STATUS_SUCCEEDED and name:
             self.hint_pub.publish(String(data=name))
             self.get_logger().info(f"Reached {name} approach pose; starting crossing")

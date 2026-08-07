@@ -19,4 +19,5 @@ setup(
     maintainer_email="developer@example.com",
     description="Unified launch package for quadruped autonomy.",
     license="Apache-2.0",
+    tests_require=["pytest"],
 )

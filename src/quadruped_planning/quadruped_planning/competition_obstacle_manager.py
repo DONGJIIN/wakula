@@ -102,17 +102,26 @@ class CompetitionObstacleManager(Node):
         self.time_pub = self.create_publisher(Float32, "/competition/time_remaining", 10)
 
         self.create_subscription(String, "/competition/obstacle_hint", self.hint_callback, 10)
-        self.create_subscription(Bool, "/competition/obstacle_complete", self.complete_callback, 10)
+        self.create_subscription(
+            Bool, "/competition/obstacle_complete", self.complete_callback, 10
+        )
         self.create_subscription(Bool, "/competition/obstacle_failed", self.failed_callback, 10)
         self.create_subscription(Bool, "/competition/retry", self.retry_callback, 10)
         self.create_subscription(Bool, "/competition/returned_to_start", self.return_callback, 10)
         self.create_subscription(UInt8MultiArray, "/foot_contacts", self.contacts_callback, 10)
-        self.create_subscription(Int32, "/competition/stair_levels_touched", self.stair_callback, 10)
-        self.create_subscription(Int32, "/competition/stair_sides_completed", self.stair_sides_callback, 10)
+        self.create_subscription(
+            Int32, "/competition/stair_levels_touched", self.stair_callback, 10
+        )
+        self.create_subscription(
+            Int32,
+            "/competition/stair_sides_completed",
+            self.stair_sides_callback,
+            10,
+        )
         self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
 
         self.state = "SEARCH"
-        self.index = 0
+        self.active_obstacle = None
         self.completed = set()
         self.score = 0
         self.start_time = self.get_clock().now()
@@ -131,6 +140,8 @@ class CompetitionObstacleManager(Node):
 
     @property
     def current_obstacle(self):
+        if self.active_obstacle is not None:
+            return self.active_obstacle
         remaining = [name for name in self.order if name not in self.completed]
         return remaining[0] if remaining else None
 
@@ -145,19 +156,27 @@ class CompetitionObstacleManager(Node):
             return
         if self.state == "SEARCH" and self.current_obstacle:
             profile = PROFILES[self.current_obstacle]
-            self.publish_outputs("WALK", f"APPROACH_{self.current_obstacle.upper()}", profile["speed"])
+            self.publish_outputs(
+                "WALK",
+                f"APPROACH_{self.current_obstacle.upper()}",
+                profile["speed"],
+            )
         elif self.state == "RETURN":
             self.publish_outputs("WALK", "RETURN_TO_SELECTED_START", 0.35)
+        elif self.state in ("EXECUTE", "RETRY_REQUIRED"):
+            self.publish_outputs(*self.last_command)
 
     def hint_callback(self, msg: String) -> None:
         name = msg.data.strip().lower()
-        if name not in PROFILES or name in self.completed or self.state in ("TIMEOUT", "FINISHED"):
+        invalid_hint = name not in PROFILES or name in self.completed
+        if invalid_hint or self.state != "SEARCH":
             return
-        self.index = self.order.index(name) if name in self.order else self.index
+        self.active_obstacle = name
         self.obstacle_start_pose = None
         self.travel_m = 0.0
         self.stair_levels = 0
         self.stair_sides = 0
+        self.ground_contacts = 0
         self.failure_latched = False
         self.state = "EXECUTE"
         profile = PROFILES[name]
@@ -193,7 +212,10 @@ class CompetitionObstacleManager(Node):
             self.obstacle_start_pose = current
             return
         # Euclidean distance is conservative and independent of obstacle heading.
-        self.travel_m = hypot(current[0] - self.obstacle_start_pose[0], current[1] - self.obstacle_start_pose[1])
+        self.travel_m = hypot(
+            current[0] - self.obstacle_start_pose[0],
+            current[1] - self.obstacle_start_pose[1],
+        )
 
     def complete_callback(self, msg: Bool) -> None:
         if not msg.data or self.state != "EXECUTE" or self.failure_latched:
@@ -206,27 +228,46 @@ class CompetitionObstacleManager(Node):
             self.failed_callback(Bool(data=True))
             return
         if self.travel_m < profile.get("min_travel_m", 0.0):
-            self.publish_outputs("STOP", "CONTINUE_REQUIRED_DISTANCE", profile["speed"])
-            self.get_logger().warning(f"{name} completion rejected: only {self.travel_m:.2f} m traversed")
+            self.publish_outputs(
+                "STOP", "CONTINUE_REQUIRED_DISTANCE", profile["speed"]
+            )
+            self.get_logger().warning(
+                f"{name} completion rejected: only {self.travel_m:.2f} m traversed"
+            )
             return
         if name == "t_stairs" and self.stair_levels < self.stair_levels_required:
-            self.publish_outputs("STOP", "TOUCH_REMAINING_STAIR_TOPS", profile["speed"])
+            self.publish_outputs(
+                "STOP", "TOUCH_REMAINING_STAIR_TOPS", profile["speed"]
+            )
             self.get_logger().warning(
-                f"T stairs completion rejected: {self.stair_levels}/{self.stair_levels_required} levels"
+                "T stairs completion rejected: "
+                f"{self.stair_levels}/{self.stair_levels_required} levels"
             )
             return
         if name == "t_stairs" and self.stair_sides < 1:
             self.publish_outputs("STOP", "REPORT_STAIR_DIRECTION", profile["speed"])
-            self.get_logger().warning("T stairs completion rejected: no up/down direction reported")
+            self.get_logger().warning(
+                "T stairs completion rejected: no up/down direction reported"
+            )
             return
         self.completed.add(name)
-        obstacle_score = profile["score"] if self.autonomous else round(profile["score"] * 2 / 3)
+        obstacle_score = (
+            profile["score"]
+            if self.autonomous
+            else round(profile["score"] * 2 / 3)
+        )
         if name == "t_stairs" and self.stair_sides == 1:
             obstacle_score = obstacle_score // 2
         self.score += int(obstacle_score)
         self.score_pub.publish(Int32(data=self.score))
-        self.state = "SEARCH" if self.current_obstacle else "RETURN"
-        self.publish_outputs("WALK", "SEARCH_NEXT_OBSTACLE" if self.current_obstacle else "RETURN_TO_SELECTED_START", 0.35)
+        self.active_obstacle = None
+        next_obstacle = self.current_obstacle
+        self.state = "SEARCH" if next_obstacle else "RETURN"
+        self.publish_outputs(
+            "WALK",
+            "SEARCH_NEXT_OBSTACLE" if next_obstacle else "RETURN_TO_SELECTED_START",
+            0.35,
+        )
         self.get_logger().info(f"Obstacle complete: {name}; score={self.score}")
 
     def failed_callback(self, msg: Bool) -> None:
@@ -245,6 +286,10 @@ class CompetitionObstacleManager(Node):
             self.obstacle_start_pose = None
             self.state = "EXECUTE"
             name = self.current_obstacle
+            if name is None:
+                self.state = "SEARCH"
+                self.publish_outputs("STOP", "WAIT_FOR_OBSTACLE", 0.0)
+                return
             profile = PROFILES[name]
             self.publish_outputs("STEP", profile["action"], profile["speed"])
 
@@ -254,9 +299,12 @@ class CompetitionObstacleManager(Node):
             self.score_pub.publish(Int32(data=self.score))
             self.state = "FINISHED"
             self.publish_outputs("STOP", "FINISHED_RETURN_BONUS", 0.0)
-            self.get_logger().info(f"Returned to start; +{self.return_bonus} bonus, score={self.score}")
+            self.get_logger().info(
+                f"Returned to start; +{self.return_bonus} bonus, score={self.score}"
+            )
 
     def publish_outputs(self, mode: str, action: str, speed: float) -> None:
+        self.last_command = (mode, action, float(speed))
         self.mode_pub.publish(String(data=mode))
         self.action_pub.publish(String(data=action))
         self.current_pub.publish(String(data=self.current_obstacle or "none"))

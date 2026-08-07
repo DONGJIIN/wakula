@@ -36,19 +36,23 @@ def select_terrain_decision(
     return "WALK", "NAVIGATE", 1.0
 
 
-def visual_target_in_path(
-    features: Sequence[float], min_area_ratio: float, center_margin: float
+def visual_evidence_in_path(
+    evidence: Sequence[float], min_confidence: float, center_margin: float
 ) -> bool:
-    """Check whether either color region is large and centered in the path."""
-    if len(features) < 10 or not all(isfinite(float(value)) for value in features[:10]):
+    """Validate one atomic, temporally confirmed OpenCV obstacle result."""
+    if len(evidence) < 6 or not all(
+        isfinite(float(value)) for value in evidence[:6]
+    ):
         return False
+    type_code, confidence, center_x, _, width, height = map(float, evidence[:6])
     margin = max(0.0, min(0.49, center_margin))
-    for offset in (0, 5):
-        area_ratio = float(features[offset])
-        center_x = float(features[offset + 1])
-        if area_ratio >= min_area_ratio and margin <= center_x <= 1.0 - margin:
-            return True
-    return False
+    return (
+        type_code > 0.0
+        and confidence >= min_confidence
+        and margin <= center_x <= 1.0 - margin
+        and width > 0.0
+        and height > 0.0
+    )
 
 
 def apply_visual_assist(
@@ -75,7 +79,7 @@ class ObstacleCrossingManager(Node):
         self.declare_parameter("sensor_timeout", 0.7)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("vision_timeout", 0.6)
-        self.declare_parameter("vision_min_area_ratio", 0.03)
+        self.declare_parameter("vision_min_confidence", 0.55)
         self.declare_parameter("vision_center_margin", 0.20)
         self.declare_parameter("vision_speed_scale", 0.35)
         self.step_threshold = float(self.get_parameter("step_threshold").value)
@@ -89,8 +93,9 @@ class ObstacleCrossingManager(Node):
         self.vision_timeout = max(
             0.0, float(self.get_parameter("vision_timeout").value)
         )
-        self.vision_min_area = max(
-            0.0, float(self.get_parameter("vision_min_area_ratio").value)
+        self.vision_min_confidence = max(
+            0.0,
+            min(1.0, float(self.get_parameter("vision_min_confidence").value)),
         )
         self.vision_center_margin = float(
             self.get_parameter("vision_center_margin").value
@@ -114,7 +119,7 @@ class ObstacleCrossingManager(Node):
         )
         self.create_subscription(
             Float32MultiArray,
-            "/vision/color_features",
+            "/vision/obstacle_evidence",
             self.vision_callback,
             10,
         )
@@ -157,9 +162,9 @@ class ObstacleCrossingManager(Node):
 
     def vision_callback(self, msg: Float32MultiArray) -> None:
         self.last_vision_time = self.get_clock().now()
-        self.visual_target = visual_target_in_path(
+        self.visual_target = visual_evidence_in_path(
             msg.data,
-            self.vision_min_area,
+            self.vision_min_confidence,
             self.vision_center_margin,
         )
 

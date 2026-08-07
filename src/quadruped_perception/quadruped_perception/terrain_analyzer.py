@@ -1,28 +1,117 @@
-"""Conservative local terrain features for the quadruped crossing prototype.
+"""Bounded-rate point-cloud terrain features in the robot base frame."""
 
-The point cloud is expected to be in a frame whose x axis points forward and
-whose z axis points upward (normally base_link or a calibrated camera frame).
-This is deliberately a lightweight feature extractor, not a replacement for
-an elevation mapper or a footstep planner.
-"""
+from typing import Optional, Tuple
 
-from math import isfinite, sqrt
-
+import numpy as np
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Float32MultiArray
+from tf2_ros import Buffer, TransformException, TransformListener
+from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
+
+
+TerrainResult = Tuple[list, int]
+DEFAULT_POINT_CLOUD_TOPICS = [
+    "/camera/depth/points",
+    "/camera/depth/color/points",
+    "/camera/points",
+    "/points",
+]
+
+
+def filter_roi_points(
+    xyz: np.ndarray,
+    x_min: float,
+    x_max: float,
+    y_half: float,
+    max_points: int,
+) -> np.ndarray:
+    """Return finite, bounded and deterministically downsampled ROI points."""
+    points = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
+    valid = np.isfinite(points).all(axis=1)
+    valid &= (points[:, 0] >= x_min) & (points[:, 0] <= x_max)
+    valid &= np.abs(points[:, 1]) <= y_half
+    points = points[valid]
+    if len(points) > max_points:
+        indices = np.linspace(0, len(points) - 1, max_points, dtype=np.int64)
+        points = points[indices]
+    return points
+
+
+def compute_terrain_features(
+    xyz: np.ndarray,
+    x_min: float,
+    x_max: float,
+    y_half: float,
+    max_points: int,
+    ground_percentile: float,
+    critical_height: float,
+    max_slope: float,
+    max_roughness: float,
+    min_points: int,
+) -> Optional[TerrainResult]:
+    """Compute lightweight terrain features from an Nx3 base-frame array."""
+    points = filter_roi_points(xyz, x_min, x_max, y_half, max_points)
+    if len(points) < min_points:
+        return None
+
+    x_values = points[:, 0].astype(np.float64)
+    z_values = points[:, 2].astype(np.float64)
+    ground = float(np.quantile(z_values, np.clip(ground_percentile, 0.0, 1.0)))
+    high = float(np.quantile(z_values, 0.98))
+    obstacle_height = max(0.0, high - ground)
+    centered_x = x_values - np.mean(x_values)
+    denominator = float(np.dot(centered_x, centered_x))
+    slope = (
+        0.0
+        if denominator < 1e-9
+        else float(np.dot(centered_x, z_values - np.mean(z_values)) / denominator)
+    )
+    intercept = float(np.mean(z_values) - slope * np.mean(x_values))
+    residuals = z_values - (slope * x_values + intercept)
+    roughness = float(np.sqrt(np.mean(np.square(residuals))))
+    height_penalty = obstacle_height / max(critical_height, 1e-3)
+    slope_penalty = abs(slope) / max(max_slope, 1e-3) * 0.35
+    roughness_penalty = roughness / max(max_roughness, 1e-3) * 0.35
+    penalty = height_penalty + slope_penalty + roughness_penalty
+    traversability = float(np.clip(1.0 - penalty, 0.0, 1.0))
+    return (
+        [
+            ground,
+            high,
+            obstacle_height,
+            float(len(points)),
+            slope,
+            roughness,
+            obstacle_height,
+            max(0.0, x_max - x_min),
+            traversability,
+        ],
+        len(points),
+    )
 
 
 class TerrainAnalyzer(Node):
-    """Estimate obstacle height, slope and roughness in a frontal ROI."""
+    """Transform a cloud to base_link and estimate frontal traversability."""
 
     def __init__(self):
         super().__init__("terrain_analyzer")
-        self.declare_parameter("input_topic", "/camera/depth/color/points")
+        self.declare_parameter("input_topic", "")
+        self.declare_parameter(
+            "input_topic_candidates", DEFAULT_POINT_CLOUD_TOPICS
+        )
+        self.declare_parameter("target_frame", "base_link")
+        self.declare_parameter("processing_hz", 10.0)
+        self.declare_parameter("transform_timeout", 0.05)
         self.declare_parameter("max_points", 30000)
+        self.declare_parameter("nav2_cloud_max_points", 5000)
         self.declare_parameter("front_x_min", 0.10)
         self.declare_parameter("front_x_max", 1.50)
         self.declare_parameter("lateral_half_width", 0.45)
@@ -33,103 +122,153 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_valid_points", 30)
 
-        self.topic = str(self.get_parameter("input_topic").value)
-        self.max_points = int(self.get_parameter("max_points").value)
+        override_topic = str(self.get_parameter("input_topic").value)
+        candidates = list(self.get_parameter("input_topic_candidates").value)
+        self.topics = [override_topic] if override_topic else list(dict.fromkeys(candidates))
+        self.target_frame = str(self.get_parameter("target_frame").value)
+        self.transform_timeout = max(
+            0.0, float(self.get_parameter("transform_timeout").value)
+        )
+        self.max_points = max(1, int(self.get_parameter("max_points").value))
+        self.nav2_cloud_max_points = max(
+            1, int(self.get_parameter("nav2_cloud_max_points").value)
+        )
         self.x_min = float(self.get_parameter("front_x_min").value)
         self.x_max = float(self.get_parameter("front_x_max").value)
-        self.y_half = float(self.get_parameter("lateral_half_width").value)
-        self.ground_percentile = float(self.get_parameter("ground_percentile").value)
+        self.y_half = max(
+            0.0, float(self.get_parameter("lateral_half_width").value)
+        )
+        self.ground_percentile = float(
+            self.get_parameter("ground_percentile").value
+        )
         self.warning_height = float(self.get_parameter("warning_height").value)
         self.critical_height = float(self.get_parameter("critical_height").value)
         self.max_slope = float(self.get_parameter("max_slope").value)
         self.max_roughness = float(self.get_parameter("max_roughness").value)
-        self.min_points = int(self.get_parameter("min_valid_points").value)
+        self.min_points = max(
+            1, int(self.get_parameter("min_valid_points").value)
+        )
 
-        self.features_pub = self.create_publisher(Float32MultiArray, "/terrain/features", 10)
-        self.diagnostics_pub = self.create_publisher(DiagnosticArray, "/diagnostics", 10)
-        self.create_subscription(PointCloud2, self.topic, self.cloud_callback, 10)
-        self.get_logger().info(f"Terrain analyzer listening on {self.topic}")
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.latest_cloud = None
+        self.last_processed_stamp = None
+        self.features_pub = self.create_publisher(
+            Float32MultiArray, "/terrain/features", 10
+        )
+        self.obstacle_cloud_pub = self.create_publisher(
+            PointCloud2, "/perception/obstacle_points", qos_profile_sensor_data
+        )
+        self.diagnostics_pub = self.create_publisher(
+            DiagnosticArray, "/diagnostics", 10
+        )
+        self._cloud_subscriptions = [
+            self.create_subscription(
+                PointCloud2, topic, self.cloud_callback, qos_profile_sensor_data
+            )
+            for topic in self.topics
+        ]
+        processing_hz = min(
+            30.0, max(0.5, float(self.get_parameter("processing_hz").value))
+        )
+        self.create_timer(1.0 / processing_hz, self.processing_callback)
+        self.get_logger().info(
+            f"Terrain analyzer: {self.topics} -> {self.target_frame} at "
+            f"{processing_hz:.1f} Hz"
+        )
 
     def cloud_callback(self, msg: PointCloud2) -> None:
-        points = []
-        for point in point_cloud2.read_points(
-            msg, field_names=("x", "y", "z"), skip_nans=True
-        ):
-            x, y, z = (float(point[0]), float(point[1]), float(point[2]))
-            if not all(isfinite(v) for v in (x, y, z)):
-                continue
-            if self.x_min <= x <= self.x_max and abs(y) <= self.y_half:
-                points.append((x, y, z))
-            if len(points) >= self.max_points:
-                break
+        """Keep only the newest cloud to avoid processing backlog."""
+        self.latest_cloud = msg
 
-        if len(points) < self.min_points:
+    def processing_callback(self) -> None:
+        """Transform and process one unseen cloud."""
+        msg = self.latest_cloud
+        if msg is None:
+            return
+        stamp = (msg.header.frame_id, msg.header.stamp.sec, msg.header.stamp.nanosec)
+        if stamp == self.last_processed_stamp:
+            return
+        self.last_processed_stamp = stamp
+        cloud = self._to_target_frame(msg)
+        if cloud is None:
+            return
+        try:
+            xyz = point_cloud2.read_points_numpy(
+                cloud, field_names=["x", "y", "z"], skip_nans=True
+            )
+        except (AssertionError, ValueError) as exc:
+            self.get_logger().warning(f"Invalid PointCloud2 layout: {exc}")
+            return
+        nav2_points = filter_roi_points(
+            xyz,
+            self.x_min,
+            self.x_max,
+            self.y_half,
+            self.nav2_cloud_max_points,
+        )
+        self.obstacle_cloud_pub.publish(
+            point_cloud2.create_cloud_xyz32(cloud.header, nav2_points.tolist())
+        )
+        result = compute_terrain_features(
+            xyz,
+            self.x_min,
+            self.x_max,
+            self.y_half,
+            self.max_points,
+            self.ground_percentile,
+            self.critical_height,
+            self.max_slope,
+            self.max_roughness,
+            self.min_points,
+        )
+        if result is None:
             self._publish_diagnostic(
-                DiagnosticStatus.WARN, "Insufficient terrain points", len(points), {}
+                DiagnosticStatus.WARN, "Insufficient terrain points", 0, {}
             )
             return
-
-        z_values = sorted(p[2] for p in points)
-        ground = self._percentile(z_values, self.ground_percentile)
-        high = self._percentile(z_values, 0.98)
-        obstacle_height = max(0.0, high - ground)
-
-        # Fit z = slope*x + intercept. Residual spread approximates terrain roughness.
-        mean_x = sum(p[0] for p in points) / len(points)
-        mean_z = sum(p[2] for p in points) / len(points)
-        denom = sum((p[0] - mean_x) ** 2 for p in points)
-        slope = 0.0 if denom < 1e-9 else sum(
-            (p[0] - mean_x) * (p[2] - mean_z) for p in points
-        ) / denom
-        intercept = mean_z - slope * mean_x
-        roughness = sqrt(
-            sum((p[2] - (slope * p[0] + intercept)) ** 2 for p in points) / len(points)
-        )
-        traversability = max(
-            0.0,
-            min(
-                1.0,
-                1.0
-                - obstacle_height / max(self.critical_height, 1e-3)
-                - abs(slope) / max(self.max_slope, 1e-3) * 0.35
-                - roughness / max(self.max_roughness, 1e-3) * 0.35,
-            ),
-        )
-
-        # Backward-compatible first four values, followed by richer features.
-        features = Float32MultiArray()
-        features.data = [
-            float(ground),
-            float(high),
-            float(obstacle_height),
-            float(len(points)),
-            float(slope),
-            float(roughness),
-            float(obstacle_height),
-            float(max(0.0, self.x_max - self.x_min)),
-            float(traversability),
-        ]
-        self.features_pub.publish(features)
-
+        features, valid_points = result
+        self.features_pub.publish(Float32MultiArray(data=features))
+        obstacle_height, slope, roughness = features[2], features[4], features[5]
         level = DiagnosticStatus.OK
         message = "Terrain passable"
         if obstacle_height >= self.critical_height or abs(slope) > self.max_slope:
-            level, message = DiagnosticStatus.ERROR, "Critical terrain: stop or use footstep planner"
+            level, message = DiagnosticStatus.ERROR, "Critical terrain"
         elif obstacle_height >= self.warning_height or roughness > self.max_roughness:
             level, message = DiagnosticStatus.WARN, "Step or rough terrain detected"
         self._publish_diagnostic(
             level,
             message,
-            len(points),
-            {"obstacle_height_m": obstacle_height, "slope": slope, "roughness_m": roughness},
+            valid_points,
+            {
+                "obstacle_height_m": obstacle_height,
+                "slope": slope,
+                "roughness_m": roughness,
+            },
         )
 
-    @staticmethod
-    def _percentile(values, fraction: float) -> float:
-        index = int(max(0.0, min(1.0, fraction)) * (len(values) - 1))
-        return values[index]
+    def _to_target_frame(self, msg: PointCloud2) -> Optional[PointCloud2]:
+        if not self.target_frame or msg.header.frame_id == self.target_frame:
+            return msg
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                msg.header.frame_id,
+                Time.from_msg(msg.header.stamp),
+                timeout=Duration(seconds=self.transform_timeout),
+            )
+            return do_transform_cloud(msg, transform)
+        except TransformException as exc:
+            self.get_logger().warning(
+                f"Waiting for point-cloud TF {msg.header.frame_id} -> "
+                f"{self.target_frame}: {exc}",
+                throttle_duration_sec=2.0,
+            )
+            return None
 
-    def _publish_diagnostic(self, level: int, message: str, points: int, values: dict) -> None:
+    def _publish_diagnostic(
+        self, level: int, message: str, points: int, values: dict
+    ) -> None:
         status = DiagnosticStatus()
         status.level = level
         status.name = "quadruped/terrain_analyzer"
@@ -137,7 +276,8 @@ class TerrainAnalyzer(Node):
         status.message = message
         status.values = [KeyValue(key="valid_points", value=str(points))]
         status.values.extend(
-            KeyValue(key=key, value=f"{value:.4f}") for key, value in values.items()
+            KeyValue(key=key, value=f"{value:.4f}")
+            for key, value in values.items()
         )
         array = DiagnosticArray()
         array.header.stamp = self.get_clock().now().to_msg()
@@ -146,11 +286,12 @@ class TerrainAnalyzer(Node):
 
 
 def main(args=None):
+    """Run the bounded-rate terrain analyzer."""
     rclpy.init(args=args)
     node = TerrainAnalyzer()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
