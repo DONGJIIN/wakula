@@ -341,8 +341,10 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 
 根目录 README.md 用于安装、启动和总体架构；instruction.txt（本文件）用于算法原理、
 模块职责和调试步骤；com.txt 用于完整记录 Topic、Action、Service、TF、消息字段、QoS
-及通信超时。
+及通信超时；DEVELOPMENT_GUIDE.txt 用于帮助新开发者快速启动，并记录当前成果、已知
+限制和后续路线。
 
-以后每次完成代码修改都应检查这三份文件：算法和模块职责变化更新 instruction.txt，
-通信名称或字段变化更新 com.txt，安装、启动、目录和用户操作变化更新 README.md。
-验证通过后再进行 Git 提交和推送，保证远端代码与文档处于同一版本。
+以后每次完成代码修改都应检查这四份文件：算法和模块职责变化更新 instruction.txt，
+通信名称或字段变化更新 com.txt，安装、启动、目录和用户操作变化更新 README.md，
+进度与后续计划变化更新 DEVELOPMENT_GUIDE.txt。验证通过后直接提交并推送 main，保证
+远端代码与文档处于同一版本。
