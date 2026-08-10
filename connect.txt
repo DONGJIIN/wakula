@@ -9,54 +9,176 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 
 二、节点信息
 ----------
-terrain_analyzer（quadruped_perception）
-  输入：一个 sensor_msgs/msg/PointCloud2。input_topic 非空时只订阅该话题；为空时按
-  terrain.yaml 的候选列表自动选择首个活跃源，源超时后可切换。
-  TF：消息 frame_id -> base_link，按消息采样时间查询。
-  输出：/terrain/features、/terrain/features_stamped、/perception/obstacle_points、/diagnostics。
+本节记录默认根命名空间下的一键启动节点。格式中的“包/可执行文件”可直接用于
+`ros2 run <包> <可执行文件>`；完整栈仍建议使用 `ros2 launch slam slam.launch.py`。
+普通 QoS 表示 reliable、volatile、depth=10；传感器 QoS 表示 ROS 2
+`qos_profile_sensor_data`（best effort、volatile、小队列）。
 
-vision_obstacle_detector（quadruped_perception）
-  输入：一个 sensor_msgs/msg/Image；image_topic 非空时固定，否则自动选择常见候选话题。
-  输出：/vision/color_features、/vision/obstacle_evidence、/vision/obstacle_stamped、
-  /vision/obstacle_hint；可选 /vision/debug_mask。
+2.1 terrain_analyzer
+  包/可执行文件：quadruped_perception / terrain_analyzer
+  默认节点名：/terrain_analyzer；配置：quadruped_perception/config/terrain.yaml。
+  启动条件：始终启动，不依赖 vision 参数。
+  订阅：候选 PointCloud2 之一，默认 /camera/depth/points、
+  /camera/depth/color/points、/camera/points、/points；传感器 QoS。
+  选源规则：input_topic 非空时只用指定源；否则锁定首个活跃候选源，默认 2.0 s 无消息后
+  允许其他候选源接管。切换源时清除上一源的时间戳状态，不混用两路点云。
+  TF：按 PointCloud2.header.stamp 查询 header.frame_id -> target_frame，默认 target_frame
+  为 base_link、查询超时 0.05 s；frame_id 为空、TF 不存在或变换非法时不发布新地形结果。
+  发布：
+    /terrain/features，std_msgs/msg/Float32MultiArray，普通 QoS，旧 bag 兼容数组；
+    /terrain/features_stamped，quadruped_interfaces/msg/TerrainFeatures，普通 QoS；
+    /perception/obstacle_points，sensor_msgs/msg/PointCloud2，传感器 QoS，base_link 下 ROI 点；
+    /diagnostics，diagnostic_msgs/msg/DiagnosticArray，普通 QoS。
+  关键参数：processing_hz=10、max_points=30000、nav2_cloud_max_points=5000、前向 ROI
+  x=0.10..1.50 m、|y|<=0.45 m、min_valid_points=30、grid_cell_size=0.05 m、
+  ground_height_bin=0.03 m、pit_depth_threshold=0.08 m、wall_height_threshold=0.25 m、
+  bar_min_clearance=0.18 m、min_connected_region_cells=3、
+  min_connected_region_points=12。完整值以 terrain.yaml 为准。
+  时间/算力：只缓存并处理最新帧；同一 frame_id+时间戳只处理一次；先做有界抽样，再复用
+  同一份已变换 ROI 给几何算法与 Nav2，避免积压。
+  失效行为：点数不足、XYZ 布局错误或 TF 失败时不伪造 CLEAR；停止发布后由下游 0.7 s
+  感知超时进入 STOP。/diagnostics 同时报告点数和危险程度。
 
-perception_fusion（quadruped_perception）
-  输入：/terrain/features_stamped、/vision/obstacle_stamped。
-  输出：/perception/fused_obstacle、/diagnostics。
-  同步：在两个有界队列中全局选择 Header 时间差最小的一对，默认最大差 0.10 s；支持
-  回调乱序，每条消息只使用一次，零时间戳或不同步就不发布融合结果。
+2.2 vision_obstacle_detector
+  包/可执行文件：quadruped_perception / vision_obstacle_detector
+  默认节点名：/vision_obstacle_detector；配置：quadruped_perception/config/vision.yaml。
+  启动条件：vision:=true；vision:=false 时节点和全部视觉输出均不存在。
+  订阅：候选 Image 之一，默认 /camera/image_raw、/camera/color/image_raw、/image_raw；
+  传感器 QoS。image_topic 非空时只使用指定话题；自动选源/2.0 s 失联切换规则与点云一致。
+  接受编码：通过 cv_bridge 转为 bgr8；转换失败或空图像不发布新证据。
+  发布：
+    /vision/obstacle_stamped，quadruped_interfaces/msg/VisionObstacle，普通 QoS，首选接口；
+    /vision/obstacle_evidence，std_msgs/msg/Float32MultiArray，普通 QoS，六字段兼容接口；
+    /vision/color_features，std_msgs/msg/Float32MultiArray，普通 QoS，HSV 标定统计；
+    /vision/obstacle_hint，std_msgs/msg/String，普通 QoS，人类调试文本；
+    /vision/debug_mask，sensor_msgs/msg/Image，depth=1，publish_debug_mask=true 时才存在。
+  关键参数：processing_hz=8、resize_width=640、min_image_quality=0.35、CLAHE、原图/增强图
+  双 HSV 掩膜、镜面高光抑制、ROI、橙/蓝 HSV、轮廓面积/填充率，以及 5 帧窗口、3 帧
+  确认、60% 同类比例和最小 IoU=0.20；完整值以 vision.yaml 为准。
+  时间/算力：只缓存最新图像并限频处理；同一来源和时间戳只处理一次；切换来源会清空历史
+  窗口，防止两台相机的框被合并。
+  失效行为：黑场、白场、严重模糊、过曝/欠曝帧以 NONE 进入时序窗口；单帧反光或跳变
+  不能形成稳定输出。视觉只产生归一化提示，没有米制距离，也不能批准抬腿或越障。
 
-terrain_safety_assessor（quadruped_planning）
-  首选输入：/perception/fused_obstacle（vision=true）。
-  兼容输入：/terrain/features、/vision/obstacle_evidence（vision=false 时使用点云路径）。
-  输出：/terrain/navigation_safety（首选原子接口）、/terrain/navigation_mode、
-  /terrain/speed_limit、/terrain/visual_assist_active。
-  注意：这是导航约束节点，不发布动作、Action 或关节命令；STEP/CLIMB 的速度上限为零。
+2.3 perception_fusion
+  包/可执行文件：quadruped_perception / perception_fusion
+  默认节点名：/perception_fusion；当前使用源码默认参数。
+  启动条件：vision:=true；vision:=false 时不启动，规划层直接使用点云兼容路径。
+  订阅：
+    /terrain/features_stamped，quadruped_interfaces/msg/TerrainFeatures，普通 QoS；
+    /vision/obstacle_stamped，quadruped_interfaces/msg/VisionObstacle，普通 QoS。
+  发布：/perception/fused_obstacle，quadruped_interfaces/msg/FusedObstacle，普通 QoS；
+  /diagnostics，diagnostic_msgs/msg/DiagnosticArray，普通 QoS。
+  关键参数：sync_slop=0.10 s、queue_size=10、vision_min_confidence=0.55。
+  同步规则：在两个有界队列中全局选择 Header 时间差最小的一对；相同时间差优先最新观测；
+  支持回调乱序；每条消息最多消费一次并删除更早消息。零时间戳、NaN 时间或超窗不融合。
+  融合规则：点云保持米制尺度和安全优先级；视觉 BAR 必须有点云净空支持，POLE 必须有
+  窄宽度支持；冲突时保留点云类别并降低置信度。类别、物理范围、有限数和视觉框边界会在
+  消费端再次验证。
+  失效行为：没有同步对时不发布旧融合结果，并在 /diagnostics 报告 WARN 和 time_skew_s；
+  下游接收超时后 STOP。非法点云生成 geometry_confirmed=false，非法视觉不能置
+  vision_confirmed=true。
 
-navigation_speed_gate（quadruped_planning）
-  输入：/cmd_vel_smoothed、/terrain/speed_limit、/navigation/healthy。
-  输出：/cmd_vel_terrain_safe。Nav2 命令、决策、导航健康任一为 false 或超时即持续输出
-  零 Twist；require_navigation_health=false 只允许在脱离 Nav2 的隔离调试中使用。
+2.4 terrain_safety_assessor
+  包/可执行文件：quadruped_planning / terrain_safety_assessor
+  默认节点名：/terrain_safety_assessor；配置：quadruped_planning/config/terrain_navigation.yaml。
+  启动条件：始终启动；vision launch 参数自动设置 prefer_fused_obstacle。
+  订阅：
+    首选 /perception/fused_obstacle，quadruped_interfaces/msg/FusedObstacle；
+    兼容 /terrain/features 与 /vision/obstacle_evidence，均为 Float32MultiArray；普通 QoS。
+  发布：
+    /terrain/navigation_safety，quadruped_interfaces/msg/NavigationSafety，普通 QoS，跨团队首选；
+    /terrain/navigation_mode，std_msgs/msg/String，普通 QoS；
+    /terrain/speed_limit，std_msgs/msg/Float32，普通 QoS；
+    /terrain/visual_assist_active，std_msgs/msg/Bool，普通 QoS。
+  关键参数：STEP/CLIMB/STOP 高度阈值 0.08/0.18/0.32 m，max_slope=0.45 rad，
+  max_roughness=0.06 m、min_points=30、fused_min_confidence=0.25、sensor_timeout=0.7 s、
+  future_stamp_tolerance=0.10 s、危险确认 3 帧、安全恢复 5 帧、视觉限速比例 0.35。
+  坡度单位：强类型 FusedObstacle 路径使用 rad；旧 /terrain/features 兼容路径使用 dz/dx。
+  决策规则：STOP 立即生效；STEP/CLIMB 和风险解除经过非对称迟滞。PIT/WALL/BAR 为
+  STOP；POLE 可保持 WALK 但上限不超过 0.35；视觉只限制 WALK 速度。
+  失效行为：点数/置信度不足、物理量非法、旧/未来时间戳或 0.7 s 断流均持续发布 STOP、
+  speed_limit=0、perception_valid=false。节点不发布 Action、关节或足端命令。
 
-nav2_readiness_monitor（slam）
-  输入：/scan、/odom、TF map -> base_link。
-  接口：/lifecycle_manager_navigation/manage_nodes；条件满足后一次性请求 STARTUP。
+2.5 navigation_speed_gate
+  包/可执行文件：quadruped_planning / navigation_speed_gate
+  默认节点名：/navigation_speed_gate；配置：quadruped_planning/config/terrain_navigation.yaml。
+  订阅：/cmd_vel_smoothed（Twist）、/terrain/speed_limit（Float32）、
+  /navigation/healthy（Bool），均为普通 QoS。
+  发布：/cmd_vel_terrain_safe，geometry_msgs/msg/Twist，普通 QoS，固定 20 Hz 心跳。
+  关键参数：command_timeout=0.5 s、assessment_timeout=0.7 s、
+  navigation_health_timeout=0.5 s、default_speed_limit=0、require_navigation_health=true；
+  input_topic/output_topic 可覆盖。
+  计算：所有 Twist 分量按 0..1 上限等比例缩放，不创建新运动意图。
+  失效行为：命令、评估、健康状态任一超时，health=false，上限<=0 或 NaN/Inf 时发布全零
+  Twist。require_navigation_health=false 只用于脱离 Nav2 的隔离调试，不建议真机运行。
 
-navigation_health_monitor（slam）
-  输入：/scan、/odom、TF map -> base_link。
-  输出：/navigation/healthy、/diagnostics。检查断流、scan 有效率、协方差和里程计跳变。
+2.6 nav2_readiness_monitor
+  包/可执行文件：slam / nav2_readiness_monitor
+  默认节点名：/nav2_readiness_monitor；配置：slam/config/nav2.yaml。
+  启动条件：nav2_enabled:=true 且 nav2_autostart:=true。
+  订阅：/scan（LaserScan）与 /odom（Odometry），传感器 QoS；查询 TF map -> base_link。
+  服务客户端：/lifecycle_manager_navigation/manage_nodes，nav2_msgs/srv/ManageLifecycleNodes。
+  关键参数：global_frame=map、base_frame=base_link、sensor_timeout=1.0 s，scan_topic、
+  odom_topic 和 lifecycle_service 可覆盖。
+  行为：每 0.5 s 检查 scan、odom 接收心跳和定位 TF；三项同时就绪后只请求一次 STARTUP。
+  服务拒绝或异常会解除请求锁并允许后续重试。
+  失效行为：条件不全时 Nav2 生命周期节点保持 inactive，不发送导航速度。
 
-SLAM Toolbox
-  输入：/scan、TF odom -> base_link；输出 /map 与 map -> odom。
+2.7 navigation_health_monitor
+  包/可执行文件：slam / navigation_health_monitor
+  默认节点名：/navigation_health_monitor；配置：slam/config/nav2.yaml。
+  启动条件：nav2_enabled:=true；无论 nav2_autostart 是否开启都运行。
+  订阅：/scan（LaserScan）与 /odom（Odometry），传感器 QoS；查询 TF map -> base_link。
+  发布：/navigation/healthy，std_msgs/msg/Bool，reliable、transient_local、depth=1；
+  /diagnostics，diagnostic_msgs/msg/DiagnosticArray，普通 QoS。
+  关键参数：sensor_timeout=1.0 s、minimum_scan_valid_ratio=0.60、max_xy_covariance=1.0、
+  max_odom_jump=0.75 m、future_stamp_tolerance=0.10 s、global_frame/base_frame。
+  检查：LaserScan 厂商量程、NaN/±Inf；Odometry 有限数、XY 协方差、四元数模长和位置
+  突跳；消息 Header 新鲜度、接收超时和定位 TF。正 Inf 表示量程内无回波，属于合法 scan。
+  失效行为：任一检查失败发布 healthy=false，并在 diagnostics 的 scan/odom/tf/odom_jump
+  键中给出原因；navigation_speed_gate 随后在 0.5 s 内归零。
 
-Nav2
-  输入：/map、/scan、/perception/obstacle_points、/odom、TF 和目标位姿。
-  输出链：controller/behavior -> /cmd_vel_nav -> velocity_smoother -> /cmd_vel_smoothed
-  -> navigation_speed_gate -> /cmd_vel_terrain_safe -> collision_monitor -> /cmd_vel。
-  `/cmd_vel` 当前没有硬件消费者。
+2.8 SLAM Toolbox
+  包/可执行文件：slam_toolbox / async_slam_toolbox_node；配置：slam/config/slam.yaml。
+  默认节点名：/slam_toolbox；启动条件：slam_enabled:=true。
+  订阅：/scan（LaserScan）和 TF odom -> base_link；使用消息时间戳匹配扫描与 TF。
+  发布：/map（nav_msgs/msg/OccupancyGrid）、/map_metadata、map -> odom TF，以及
+  slam_toolbox 标准服务/图形。地图话题采用 transient local，便于后来启动的 Nav2 获得地图。
+  生命周期：launch 负责配置并激活 SLAM Toolbox；它不产生 /odom，真实状态估计必须提供。
+  失效行为：scan/odom TF 缺失时不能更新地图；Nav2 readiness 因 map -> base_link 缺失保持等待。
 
-robot_state_publisher
-  输入：占位 URDF；输出固定传感器 TF。robot_model:=false 时不启动，适合由真机模型接管。
+2.9 Nav2 在线节点组
+  配置：slam/config/nav2.yaml；行为树：slam/behavior_trees/navigate_to_pose_wakula.xml。
+  启动条件：nav2_enabled:=true。以下节点均先启动为 lifecycle inactive，由 readiness monitor
+  经 lifecycle_manager_navigation 统一激活：
+    /planner_server：Navfn 全局规划，输入 /map、目标位姿和全局代价地图；输出全局路径；
+    /controller_server：DWB 局部控制，输入路径、/odom、局部代价地图；输出 /cmd_vel_nav；
+    /smoother_server：平滑 Nav2 路径，不是速度平滑器；
+    /behavior_server：提供 spin、backup、drive_on_heading、wait 恢复行为；
+    /bt_navigator：NavigateToPose 行为树入口，协调规划、控制、清图、等待、后退和重规划；
+    /velocity_smoother：输入 /cmd_vel_nav，按速度/加速度上限输出 /cmd_vel_smoothed；
+    /collision_monitor：输入 /cmd_vel_terrain_safe、/scan 和 local costmap footprint，输出最终
+    /cmd_vel；预测碰撞时减速/停车，是 /cmd_vel 的唯一算法发布者；
+    /lifecycle_manager_navigation：服务 /lifecycle_manager_navigation/manage_nodes，按固定顺序
+    配置/激活/关闭上述 lifecycle 节点。
+  代价地图：global_costmap 使用 /map+/scan；local_costmap 使用 /scan+
+  /perception/obstacle_points。点云只 marking、不 clearing；2D 激光同时 marking/clearing。
+  速度链：/cmd_vel_nav -> /cmd_vel_smoothed -> /cmd_vel_terrain_safe -> /cmd_vel。
+  真机边界：未来底盘只订阅最终 /cmd_vel，不应订阅前三个中间速度话题；当前仓库没有
+  /cmd_vel 硬件消费者。
+
+2.10 robot_state_publisher 与 RViz
+  robot_state_publisher：包/可执行文件均为 robot_state_publisher；robot_model:=true 时加载
+  quadruped_description 的占位 Xacro，发布 robot_description、/tf 和 /tf_static。真机已有
+  自己的 URDF/TF 发布者时必须设置 robot_model:=false，避免重复 TF。
+  rviz2：包/可执行文件 rviz2 / rviz2；rviz:=true 时加载 slam/rviz/slam.rviz，只做显示，
+  不参与任何检测或决策。无显示器或 RK3588 部署建议 rviz:=false。
+
+2.11 离线辅助程序（不在一键在线栈内）
+  perception_bag_evaluator：包/可执行文件 quadruped_tools / perception_bag_evaluator；读取
+  rosbag2 与人工 CSV 标签，输出混淆矩阵、precision/recall/F1、连续量误差和参数建议。
+  它不订阅在线控制话题、不发布速度，也不会自动改写正式 YAML。
 
 三、标准输入接口
 ------------

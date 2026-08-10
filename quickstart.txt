@@ -110,6 +110,12 @@ SLAM 产生 map -> odom。启用地形感知还需：
   ros2 run tf2_ros tf2_echo map base_link
   ./scripts/diagnose.sh
 
+需要定位某个话题由谁发布/订阅时，先查 connect.txt 第二节的逐节点合同，再运行：
+
+  ros2 node list
+  ros2 node info /节点名
+  ros2 topic info /话题名 --verbose
+
 正常现象：vision=true 时没有同步的相机—点云消息会保持 speed_limit=0；识别 CLEAR 且
 数据持续新鲜后为 1；STEP/CLIMB/PIT/WALL/BAR 为 0；相机证据只能在 WALK 时减速，
 不能触发腿部动作。`/navigation/healthy` 为 false 或断流时速度门也保持零。只有点云时
