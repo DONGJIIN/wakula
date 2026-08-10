@@ -88,6 +88,7 @@ quickstart.txt 第八、九节。
   navigation.launch.py：最小化 Nav2 节点启动入口。
   slam.launch.py：完整自主系统启动入口。
   sensor_compat.launch.py：常见/自定义传感器的集中适配入口。
+  all_in_one.launch.py：面向使用者的一键总入口，转发所有常用开关。
   sensor_profiles.yaml：雷达和相机常用话题组合，不包含算法参数。
   nav2_readiness_monitor.py：传感器和 TF 就绪后才自动激活 Nav2。
 
@@ -217,14 +218,17 @@ SLAM Toolbox 使用激光扫描和里程计不断估计机器人位姿，同时�
 它产生 map -> odom；底盘状态估计产生 odom -> base_link。两段 TF 连接后，Nav2 才能
 知道机器人在地图中的位置。
 
-传感器兼容采用“两层入口”：
+启动结构采用三层复用，每层只负责一种职责：
 
-  slam.launch.py
-    只使用 /scan、/odom、标准 Image/PointCloud2 和 TF，保持算法配置稳定。
+  all_in_one.launch.py
+    用户唯一推荐入口，集中暴露 profile、话题、RViz、视觉、控制和比赛模式开关。
 
   sensor_compat.launch.py
     读取 sensor_profiles.yaml，在包含标准入口之前集中 remap /scan、/odom，并把图像、
     点云源作为参数传给感知节点。换硬件不需要逐个修改 slam.yaml、nav2.yaml 或源码。
+
+  slam.launch.py
+    只使用 /scan、/odom、标准 Image/PointCloud2 和 TF，保持算法配置稳定。
 
 sensor_profile 预置 RPLIDAR、YDLIDAR、LDLiDAR、Hokuyo、RealSense D400、Orbbec
 Gemini 2、ZED2、OAK-D、Velodyne、Ouster、Livox、Hesai、RoboSense 和 LSLIDAR 的常见
@@ -300,38 +304,38 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 
 完整自主链路：
 
-  ros2 launch slam slam.launch.py
+  ros2 launch slam all_in_one.launch.py
 
 无 RViz：
 
-  ros2 launch slam slam.launch.py rviz:=false
+  ros2 launch slam all_in_one.launch.py rviz:=false
 
 关闭 RGB 视觉：
 
-  ros2 launch slam slam.launch.py vision:=false
+  ros2 launch slam all_in_one.launch.py vision:=false
 
 指定相机话题：
 
-  ros2 launch slam slam.launch.py camera_topic:=/my_camera/image_raw \
+  ros2 launch slam all_in_one.launch.py camera_topic:=/my_camera/image_raw \
     point_cloud_topic:=/my_camera/points
 
 使用常见传感器 profile：
 
-  ros2 launch slam sensor_compat.launch.py sensor_profile:=realsense_d400
+  ros2 launch slam all_in_one.launch.py sensor_profile:=realsense_d400
 
 适配任意自定义话题：
 
-  ros2 launch slam sensor_compat.launch.py scan_topic:=/front/scan \
+  ros2 launch slam all_in_one.launch.py scan_topic:=/front/scan \
     odom_topic:=/robot/odometry camera_topic:=/rgb/image_raw \
     point_cloud_topic:=/depth/points
 
 只加载 Nav2 节点但不自动激活：
 
-  ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
+  ros2 launch slam all_in_one.launch.py rviz:=false nav2_autostart:=false
 
 比赛模式：
 
-  ros2 launch slam slam.launch.py competition:=true
+  ros2 launch slam all_in_one.launch.py competition:=true
 
 
 十、现场调试顺序

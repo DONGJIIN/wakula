@@ -64,9 +64,15 @@ nav2_readiness_monitor
 二、外部传感器输入
 ------------------
 
-公共适配原则：`slam.launch.py` 保持 /scan、/odom 和 ROS 标准消息；需要更换硬件时使用
-`sensor_compat.launch.py`。该入口读取 `sensor_profiles.yaml`，把厂商话题集中映射到内部
-合同，避免分别修改 SLAM、Nav2、Collision Monitor、RViz 和感知节点。
+公共适配原则：用户运行 `all_in_one.launch.py`；它包含 `sensor_compat.launch.py` 读取
+`sensor_profiles.yaml`，再包含保持 /scan、/odom 和 ROS 标准消息的 `slam.launch.py`。
+厂商话题只在兼容层集中映射，避免分别修改 SLAM、Nav2、Collision Monitor、RViz 和
+感知节点；总入口只转发参数，不产生重复节点或额外高带宽消息副本。
+
+一键入口还统一转发 use_sim_time、use_control、rviz、vision、competition 和
+nav2_autostart。默认启动 OpenCV 和 RViz，不启动 ros2_control；Nav2 仅在传感器与 TF
+满足就绪条件后激活。雷达、相机、里程计和机器狗 SDK 驱动不属于本 launch，需由硬件包
+先行启动并发布本文件规定的标准接口。
 
 兼容入口参数：
 

@@ -96,6 +96,27 @@ def test_sensor_compat_launch_exposes_one_hardware_adaptation_point():
     } <= launch_argument_names(description)
 
 
+def test_all_in_one_launch_exposes_complete_user_controls():
+    """The one-command entry forwards runtime and sensor controls."""
+    path = PACKAGE_ROOT / "launch" / "all_in_one.launch.py"
+    spec = importlib.util.spec_from_file_location("all_in_one_launch", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    description = module.generate_launch_description()
+    assert {
+        "sensor_profile",
+        "scan_topic",
+        "odom_topic",
+        "camera_topic",
+        "point_cloud_topic",
+        "use_control",
+        "rviz",
+        "vision",
+        "competition",
+        "nav2_autostart",
+    } <= launch_argument_names(description)
+
+
 def test_readiness_monitor_does_not_start_without_localization_tf():
     """Sensor messages alone must not activate Nav2 without localization."""
     rclpy.init()

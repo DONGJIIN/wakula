@@ -43,7 +43,7 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 | 真机联调与工程化 | ⬜ 未完成 | 架空→保护绳→低速→单障碍→整场测试，完成标定工具、日志、rosbag、CI、版本和维护流程 |
 
 当前代码已经完成的是上表中“环境感知、SLAM 与自主导航、任务逻辑、ROS 软件安全”的
-第一版雏形：6 个 ROS 2 包可编译，19 项测试通过，并提供常见雷达/相机兼容入口。
+第一版雏形：6 个 ROS 2 包可编译，20 项测试通过，并提供一键启动及常见传感器兼容入口。
 其余项目不能因仿真话题或 URDF 能运行就视为完成。详细清单与开发顺序见
 `quickstart.txt` 第七至九节。
 
@@ -139,7 +139,7 @@ wakula/
 | `quadruped_bringup` | 公共启动入口，避免重复节点 | `bringup.launch.py` |
 | `quadruped_perception` | 图像障碍证据、点云地形几何、Nav2 障碍点云 | 两个分析节点 |
 | `quadruped_planning` | `WALK/STEP/CLIMB/STOP`、速度安全门、比赛 FSM | 四个规划节点 |
-| `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
+| `slam` | 建图、定位、全局/局部规划、碰撞监控 | `all_in_one.launch.py` |
 
 主要节点：
 
@@ -188,8 +188,9 @@ OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视�
 | RGB | 自动选择 | `sensor_msgs/msg/Image` | `camera_topic` |
 | 深度/3D 点云 | 自动选择 | `sensor_msgs/msg/PointCloud2` | `point_cloud_topic` |
 
-`slam.launch.py` 是纯默认入口；`sensor_compat.launch.py` 是硬件兼容入口。后者通过一层
-集中 remap/参数转发适配驱动，SLAM、Nav2、碰撞保护和感知源码都不用修改。预置 profile：
+`all_in_one.launch.py` 是推荐的一键入口；它调用 `sensor_compat.launch.py` 处理硬件名称，
+再调用 `slam.launch.py` 启动核心系统。集中 remap/参数转发不会复制传感器数据，SLAM、
+Nav2、碰撞保护和感知源码都不用修改。预置 profile：
 
 ```text
 2D 雷达：ros_default、rplidar、ydlidar、ldlidar、hokuyo
@@ -252,28 +253,44 @@ colcon test-result --verbose
 ros2 launch quadruped_description display.launch.py
 ```
 
-完整启动 SLAM + Nav2 + 感知 + 越障安全链路：
+一键启动机器人模型、SLAM Toolbox、Nav2、OpenCV、点云地形、越障决策、速度安全链和 RViz：
 
 ```bash
-ros2 launch slam slam.launch.py
+ros2 launch slam all_in_one.launch.py
 ```
+
+此 launch 不启动雷达/相机厂商驱动，也不实现机器狗真实步态；应先启动对应硬件驱动。
+
+常用参数均集中在同一入口：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `sensor_profile` | `ros_default` | 选择常见雷达/相机话题组合 |
+| `scan_topic`、`odom_topic` | 空 | 非空时覆盖 profile 的雷达/里程计来源 |
+| `camera_topic`、`point_cloud_topic` | 空 | 非空时覆盖图像/点云来源 |
+| `rviz` | `true` | 是否启动 RViz |
+| `vision` | `true` | 是否启动 OpenCV 节点 |
+| `nav2_autostart` | `true` | 数据和 TF 就绪后是否自动激活 Nav2 |
+| `competition` | `false` | 是否使用 Robocon 比赛状态机 |
+| `use_control` | `false` | 是否启动 mock/已配置的 ros2_control；真机未接好前保持关闭 |
+| `use_sim_time` | `false` | 仿真或 rosbag 时是否使用 `/clock` |
 
 无图形界面：
 
 ```bash
-ros2 launch slam slam.launch.py rviz:=false
+ros2 launch slam all_in_one.launch.py rviz:=false
 ```
 
 没有 RGB 相机时：
 
 ```bash
-ros2 launch slam slam.launch.py vision:=false
+ros2 launch slam all_in_one.launch.py vision:=false
 ```
 
 覆盖非默认相机话题：
 
 ```bash
-ros2 launch slam slam.launch.py \
+ros2 launch slam all_in_one.launch.py \
   camera_topic:=/my_camera/image_raw \
   point_cloud_topic:=/my_camera/points
 ```
@@ -281,13 +298,13 @@ ros2 launch slam slam.launch.py \
 用常见硬件 profile 启动（示例为 RealSense D400）：
 
 ```bash
-ros2 launch slam sensor_compat.launch.py sensor_profile:=realsense_d400
+ros2 launch slam all_in_one.launch.py sensor_profile:=realsense_d400
 ```
 
 任意未知设备无需新增代码，直接覆盖实际话题：
 
 ```bash
-ros2 launch slam sensor_compat.launch.py \
+ros2 launch slam all_in_one.launch.py \
   scan_topic:=/front_lidar/scan \
   odom_topic:=/robot/odometry \
   camera_topic:=/rgb/image_raw \
@@ -303,7 +320,7 @@ ros2 launch quadruped_bringup bringup.launch.py
 Robocon 比赛模式：
 
 ```bash
-ros2 launch slam slam.launch.py competition:=true
+ros2 launch slam all_in_one.launch.py competition:=true
 ```
 
 Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`，并确认
@@ -312,7 +329,7 @@ Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`
 外参，这是正常安全行为。若只检查参数、不希望自动激活，可使用：
 
 ```bash
-ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
+ros2 launch slam all_in_one.launch.py rviz:=false nav2_autostart:=false
 ```
 
 ## 7. OpenCV 障碍识别
@@ -428,6 +445,7 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
 `slam/launch/slam.launch.py` 在其上增加 SLAM、Nav2 与 RViz，避免重复维护节点。
 `slam/launch/sensor_compat.launch.py` 只负责硬件名称适配，并包含上述标准入口。
+`slam/launch/all_in_one.launch.py` 是面向使用者的总入口，只转发参数，不重复创建节点。
 
 ## 12. 实机接入清单
 
