@@ -23,4 +23,8 @@ def test_bringup_launch_description_is_constructible():
         "vision_params_file",
         "terrain_params_file",
         "crossing_params_file",
+        "hardware_params_file",
+        "auto_crossing",
+        "safety_supervisor",
+        "mock_hardware",
     } <= arguments

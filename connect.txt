@@ -48,6 +48,18 @@ crossing_action_server
   提供 /crossing/traverse_obstacle，将 Action Goal 转换为带 UUID 的控制器命令，并汇总
   反馈、取消、超时和结果。一键启动时始终运行。
 
+crossing_action_coordinator
+  把稳定 STEP/CLIMB 和地形距离自动转换为 Action Goal；限制重试，越障期间锁住 Nav2
+  速度，并在 STOP 或安全停车时取消活动 Goal。auto_crossing:=true 时启动。
+
+system_safety_supervisor
+  汇总软件急停、标准 IMU、JointState、BatteryState 和数据心跳，发布统一停车互锁及诊断。
+  safety_supervisor:=true 时启动。
+
+mock_sdk_adapter
+  只实现 execution_command/status 通信合同，不驱动电机；支持成功、失败、失联和非法进度
+  故障注入，仅在 mock_hardware:=true 时启动。
+
 competition_obstacle_manager
   比赛模式越障管理器。它与 obstacle_crossing_manager 互斥启动，避免重复发布决策。
 
@@ -104,6 +116,9 @@ rviz2
   vision                是否启动 OpenCV，默认 true
   rviz                  是否启动 RViz，默认 true
   competition           是否切换比赛状态机，默认 false
+  auto_crossing         是否自动发送越障 Action，默认 true
+  safety_supervisor     是否启动统一软件安全监督，默认 true
+  mock_hardware         是否启动无电机模拟 SDK 后端，默认 false
   use_control           是否启动 ros2_control，默认 false
   use_sim_time          是否使用 /clock，默认 false
   nav2_log_level        Nav2 日志等级，默认 info
@@ -115,7 +130,11 @@ rviz2
   vision_params_file    OpenCV YAML
   terrain_params_file   点云地形 YAML
   crossing_params_file  越障融合和速度门 YAML
+  hardware_params_file  安全监督和模拟 SDK YAML
   rviz_config_file      RViz 配置
+
+注意：quadruped_cmd_vel_gate 和 crossing_action_coordinator 都监视 /safety/stop 心跳。
+关闭 safety_supervisor 后，必须由外部安全节点继续发布该接口，否则系统按失联处理并保持停车。
 
 显式参数优先于 profile。当前 profile 包括 rplidar、ydlidar、ldlidar、hokuyo、
 realsense_d400、orbbec_gemini2、zed2、oak_d、velodyne、ouster、livox、hesai、
@@ -352,6 +371,22 @@ CROSS_T_STAIRS_SINGLE_SUPPORT、CLIMB_OR_JUMP_0P30_WALL、RETRY_OBSTACLE。
 接收方：状态显示、调试记录节点
 含义：true 表示视觉已让 WALK 进入点云复核减速状态。
 
+5. 越障执行互锁
+
+名称：/crossing/execution_active
+类型：std_msgs/msg/Bool
+发送方：crossing_action_coordinator
+接收方：quadruped_cmd_vel_gate、状态记录节点
+含义：true 表示 TraverseObstacle 已由后端接管；速度门必须停止普通 Nav2 Twist。
+
+6. 最近自动越障结果
+
+名称：/crossing/last_result
+类型：std_msgs/msg/String
+发送方：crossing_action_coordinator
+接收方：比赛/任务逻辑、操作界面、rosbag
+格式：`SUCCESS: 说明` 或 `FAILED: 说明`。它用于状态展示；强类型最终结果仍以 Action 为准。
+
 
 五、Nav2 速度接口
 ----------------
@@ -375,7 +410,8 @@ CROSS_T_STAIRS_SINGLE_SUPPORT、CLIMB_OR_JUMP_0P30_WALL、RETRY_OBSTACLE。
 类型：geometry_msgs/msg/Twist
 发送方：quadruped_cmd_vel_gate
 接收方：Nav2 collision_monitor
-说明：应用 crossing/speed_scale，并验证速度心跳和决策心跳后的命令。
+说明：应用 crossing/speed_scale，并验证速度、决策和安全监督心跳后的命令。
+互锁：/safety/stop 或 /crossing/execution_active 为 true 时始终为零。
 超时：command_timeout 默认 0.5 秒；decision_timeout 默认 0.7 秒。
 
 4. /cmd_vel
@@ -398,8 +434,64 @@ CROSS_T_STAIRS_SINGLE_SUPPORT、CLIMB_OR_JUMP_0P30_WALL、RETRY_OBSTACLE。
 用途：显示 FootprintApproach 预测区域，供 RViz 调试。
 
 
-六、SLAM、地图和 TF 接口
------------------------
+六、统一安全与故障注入接口
+--------------------------
+
+1. 标准状态输入
+
+  /imu/data       sensor_msgs/msg/Imu
+  /joint_states   sensor_msgs/msg/JointState
+  /battery_state  sensor_msgs/msg/BatteryState
+
+发送方：未来 IMU 驱动、状态估计器、joint_state_broadcaster、厂商 SDK 或 BMS 适配器。
+接收方：system_safety_supervisor。未选硬件阶段 require_* 默认 false；某来源一旦出现，
+非法值或超过 sensor_timeout 不再更新仍会触发停车。真机阶段必须逐项启用 require_*。
+minimum_battery_voltage 在选型前为 0.0，仅检查非有限电压；确定电池串数后必须改为实测
+欠压保护阈值，且底层 BMS/驱动保护应早于 ROS 软件动作。
+
+2. 急停输入与测试服务
+
+名称：/safety/emergency_stop
+类型：std_msgs/msg/Bool
+发送方：硬件急停状态适配器或上位安全控制器
+接收方：system_safety_supervisor
+含义：true 无条件请求软件停车；false 只释放本项原因，其他故障仍可保持 STOP。
+
+名称：/safety/set_emergency_stop
+类型：std_srvs/srv/SetBool
+服务端：system_safety_supervisor
+客户端：fault_injector 或人工台架测试
+限制：只是软件故障注入入口，不能代替串入驱动使能/供电回路的物理急停。
+
+3. 统一停车输出
+
+名称：/safety/stop
+类型：std_msgs/msg/Bool
+发送方：system_safety_supervisor
+接收方：quadruped_cmd_vel_gate、crossing_action_coordinator
+QoS：Reliable、Transient Local、深度 1，并以 20 Hz 持续发布。
+含义：true 时速度门输出零且活动越障 Goal 被取消。速度门启动时内部默认值为 true，收到
+安全监督器明确的 false 之前不放行速度。
+
+名称：/safety/state
+类型：std_msgs/msg/String
+格式：OK，或 `STOP:reason1,reason2`。原因包括 emergency_stop、attitude_limit，以及
+IMU、关节、电池的 invalid、stale 或 missing 状态。
+
+诊断：/diagnostics 中状态名为 quadruped/system_safety。
+
+4. 模拟 SDK 故障入口
+
+名称：/testing/mock_controller_fault
+类型：std_msgs/msg/String
+发送方：quadruped_tools/fault_injector 或人工测试
+接收方：mock_sdk_adapter
+值：none、fail、silence、invalid_progress。仅 mock_hardware:=true 时有效，禁止把该接口
+实现到真实电机驱动中。
+
+
+七、SLAM、地图和 TF 接口
+------------------------
 
 1. 地图
 
@@ -449,7 +541,7 @@ ROS 话题：
           且服务已就绪。
 
 
-七、ROS 2 Action 接口
+八、ROS 2 Action 接口
 --------------------
 
 1. 真机越障 Action
@@ -457,7 +549,7 @@ ROS 话题：
 名称：/crossing/traverse_obstacle
 类型：quadruped_interfaces/action/TraverseObstacle
 服务端：crossing_action_server
-客户端：任务执行器、比赛 FSM 适配器、人工调试程序
+客户端：crossing_action_coordinator、比赛 FSM 适配器、人工调试程序
 同一时刻：只允许一个活动 Goal。
 
 Goal：
@@ -530,7 +622,7 @@ Nav2 标准节点还会提供以下常用 Action，名称以运行时 action lis
 这些 Action 主要由 bt_navigator 内部编排；外部通常只需要调用 navigate_to_pose。
 
 
-八、比赛模式通信
+九、比赛模式通信
 ----------------
 
 输入到 competition_obstacle_manager：
@@ -594,8 +686,8 @@ course_waypoint_navigator 通信闭环：
       -> 失败：/competition/obstacle_failed
 
 
-九、ros2_control 与关节接口
---------------------------
+十、ros2_control 与关节接口
+---------------------------
 
 joint_state_broadcaster：
 
@@ -633,8 +725,8 @@ ros2 service list -t | grep controller_manager 查询。
 无论使用哪种方案，都不得绕过急停、姿态限制、关节限位和通信看门狗。
 
 
-十、QoS、时间和命名约定
-----------------------
+十一、QoS、时间和命名约定
+-------------------------
 
 1. 高频传感器输入使用 qos_profile_sensor_data：Best Effort、Volatile，避免网络抖动时
    积压旧图像或旧点云。
@@ -659,7 +751,7 @@ ros2 service list -t | grep controller_manager 查询。
 6. 单机和多机的 Topic、Action、Service、TF 名称完全相同，不因主机名改变接口。
 
 
-十一、失效与超时通信
+十二、失效与超时通信
 --------------------
 
 视觉超时：
@@ -683,9 +775,20 @@ Nav2 激活输入超时：
 Collision Monitor 数据超时：
   source_timeout 默认 1.0 秒。碰撞数据源超时按 Nav2 安全策略处理。
 
+安全状态输入超时：
+  system_safety_supervisor sensor_timeout 默认 1.0 秒。已出现或 require_* 为 true 的 IMU、
+  JointState、BatteryState 超时后发布 /safety/stop=true。
 
-十二、接入厂商 SDK 的最小合同
-----------------------------
+安全监督输出超时：
+  cmd_vel_gate 和 crossing_action_coordinator 的 safety_timeout 默认 0.5 秒。超过时间没有
+  新 `/safety/stop` 时，速度门归零且协调器取消活动 Goal。
+
+越障 Action 地形输入超时：
+  crossing_action_coordinator observation_timeout 默认 0.7 秒。过期地形不会触发新 Goal。
+
+
+十三、接入厂商 SDK 的最小合同
+-----------------------------
 
 本节只是上层 ROS 2 与真机之间的最小软件边界，不代表整机接口已经完成。机械、电气、
 电源、执行器、实时总线、状态估计、步态/MPC/WBC、硬件急停和故障管理仍需分别设计，
@@ -720,7 +823,7 @@ SDK 或状态估计器至少发布：
 5. STOP：立即停止推进并保持稳定站立。
 6. ROS 命令超过驱动侧超时时间：无条件停止，不能保持最后速度。
 
-后续整机建议保留的 ROS 2 标准接口（计划项，当前尚未全部实现）：
+安全监督器已经订阅、但仍需由真机驱动提供的 ROS 2 标准接口：
 
   /imu/data              sensor_msgs/msg/Imu          原始或滤波后的机身 IMU
   /joint_states          sensor_msgs/msg/JointState   12 关节位置、速度和力矩
@@ -735,7 +838,7 @@ STEP/CLIMB/LOW_PROFILE 已使用带反馈、取消、结果和超时的 Traverse
 应沿用相同 UUID、心跳、取消和终态原则，而不是继续扩展 String 命令。
 
 
-十三、通信调试命令
+十四、通信调试命令
 ------------------
 
 检查 ROS 环境和包发现：
@@ -762,6 +865,10 @@ STEP/CLIMB/LOW_PROFILE 已使用带反馈、取消、结果和超时的 Traverse
   ros2 topic echo /terrain/features
   ros2 topic echo /crossing/action
   ros2 topic echo /crossing/speed_scale
+  ros2 topic echo /crossing/execution_active
+  ros2 topic echo /crossing/last_result
+  ros2 topic echo /safety/stop
+  ros2 topic echo /safety/state
 
 查看 TF：
   ros2 run tf2_ros tf2_echo map base_link
@@ -776,11 +883,17 @@ STEP/CLIMB/LOW_PROFILE 已使用带反馈、取消、结果和超时的 Traverse
   ros2 action info /navigate_to_pose
   ros2 action info /leg_controller/follow_joint_trajectory
 
+故障注入（仅台架/模拟后端）：
+  ros2 run quadruped_tools fault_injector --estop on
+  ros2 run quadruped_tools fault_injector --estop off
+  ros2 run quadruped_tools fault_injector --controller-fault silence
+  ros2 run quadruped_tools fault_injector --controller-fault none
+
 检查 /cmd_vel 唯一发布者：
   ros2 topic info /cmd_vel --verbose
 
 
-十四、文档同步约定
+十五、文档同步约定
 ------------------
 
 以后每次修改 Wakula 项目时，同时检查并按需更新以下四个根目录文件：

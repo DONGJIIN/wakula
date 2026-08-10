@@ -44,6 +44,9 @@ def _launch_complete_stack(context):
     use_control = LaunchConfiguration("use_control")
     vision = LaunchConfiguration("vision")
     competition = LaunchConfiguration("competition")
+    auto_crossing = LaunchConfiguration("auto_crossing")
+    safety_supervisor = LaunchConfiguration("safety_supervisor")
+    mock_hardware = LaunchConfiguration("mock_hardware")
     nav2_autostart = LaunchConfiguration("nav2_autostart")
     slam_enabled = LaunchConfiguration("slam_enabled")
     nav2_enabled = LaunchConfiguration("nav2_enabled")
@@ -62,7 +65,11 @@ def _launch_complete_stack(context):
             "terrain_params_file": LaunchConfiguration("terrain_params_file"),
             "vision_params_file": LaunchConfiguration("vision_params_file"),
             "crossing_params_file": LaunchConfiguration("crossing_params_file"),
+            "hardware_params_file": LaunchConfiguration("hardware_params_file"),
             "competition": competition,
+            "auto_crossing": auto_crossing,
+            "safety_supervisor": safety_supervisor,
+            "mock_hardware": mock_hardware,
         }.items(),
     )
     slam_toolbox = IncludeLaunchDescription(
@@ -192,6 +199,21 @@ def generate_launch_description():
                 description="Use the Robocon competition state machine.",
             ),
             DeclareLaunchArgument(
+                "auto_crossing",
+                default_value="true",
+                description="Automatically convert terrain modes into Action goals.",
+            ),
+            DeclareLaunchArgument(
+                "safety_supervisor",
+                default_value="true",
+                description="Start the standard robot-state safety supervisor.",
+            ),
+            DeclareLaunchArgument(
+                "mock_hardware",
+                default_value="false",
+                description="Use a contract-only SDK backend; never drives motors.",
+            ),
+            DeclareLaunchArgument(
                 "rviz",
                 default_value="true",
                 description="Start RViz with the project display config.",
@@ -231,6 +253,13 @@ def generate_launch_description():
                     "quadruped_planning", "config", "crossing.yaml"
                 ),
                 description="Crossing fusion and velocity-gate YAML.",
+            ),
+            DeclareLaunchArgument(
+                "hardware_params_file",
+                default_value=package_file(
+                    "quadruped_hardware", "config", "hardware.yaml"
+                ),
+                description="Safety and mock SDK parameter YAML.",
             ),
             DeclareLaunchArgument(
                 "rviz_config_file",

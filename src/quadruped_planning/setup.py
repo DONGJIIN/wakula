@@ -31,6 +31,8 @@ setup(
             "quadruped_planning.course_waypoint_navigator:main",
             "crossing_action_server = "
             "quadruped_planning.crossing_action_server:main",
+            "crossing_action_coordinator = "
+            "quadruped_planning.crossing_action_coordinator:main",
         ],
     },
 )

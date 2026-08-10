@@ -11,6 +11,10 @@ from quadruped_planning.crossing_action_server import (
     validate_controller_status,
     validate_goal_values,
 )
+from quadruped_planning.crossing_action_coordinator import (
+    CrossingTriggerLatch,
+    valid_terrain_observation,
+)
 from quadruped_planning.obstacle_crossing_manager import (
     ConservativeDecisionFilter,
     apply_visual_assist,
@@ -116,6 +120,35 @@ def test_velocity_gate_requires_both_fresh_inputs():
     assert gated_twist(command, 1.0, False, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, False).linear.x == 0.0
     assert gated_twist(command, 0.0, True, True).linear.x == 0.0
+    assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
+    assert gated_twist(command, 1.0, True, True, False, True).linear.x == 0.0
+    assert gated_twist(
+        command, 1.0, True, True, False, False, False
+    ).linear.x == 0.0
+
+
+def test_crossing_trigger_latches_until_clear_and_limits_retries():
+    """One obstacle cannot create an unbounded stream of Action goals."""
+    latch = CrossingTriggerLatch(clear_frames=2, retry_limit=1)
+    assert latch.observe("STEP", True, False)
+    assert not latch.observe("STEP", True, False)
+    latch.finish(False)
+    assert latch.observe("STEP", True, False)
+    latch.finish(False)
+    assert not latch.observe("STEP", True, False)
+    assert not latch.observe("WALK", False, False)
+    assert not latch.observe("WALK", False, False)
+    assert latch.observe("CLIMB", True, False)
+
+
+def test_crossing_trigger_rejects_invalid_or_distant_terrain():
+    data = [0.0] * 9
+    data[6], data[7] = 0.12, 0.60
+    assert valid_terrain_observation(data, 0.80) == (0.12, 0.60)
+    data[7] = 1.20
+    assert valid_terrain_observation(data, 0.80) is None
+    data[7] = float("nan")
+    assert valid_terrain_observation(data, 0.80) is None
 
 
 def test_crossing_action_goal_validation():

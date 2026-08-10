@@ -28,7 +28,11 @@ def generate_launch_description():
     terrain_params_file = LaunchConfiguration("terrain_params_file")
     vision_params_file = LaunchConfiguration("vision_params_file")
     crossing_params_file = LaunchConfiguration("crossing_params_file")
+    hardware_params_file = LaunchConfiguration("hardware_params_file")
     competition = LaunchConfiguration("competition")
+    auto_crossing = LaunchConfiguration("auto_crossing")
+    safety_supervisor = LaunchConfiguration("safety_supervisor")
+    mock_hardware = LaunchConfiguration("mock_hardware")
 
     description_file = package_file(
         "quadruped_description", "urdf", "quadruped.urdf.xacro"
@@ -50,6 +54,9 @@ def generate_launch_description():
     )
     waypoint_file = package_file(
         "quadruped_planning", "config", "course_waypoints.yaml"
+    )
+    default_hardware_file = package_file(
+        "quadruped_hardware", "config", "hardware.yaml"
     )
     robot_description = ParameterValue(
         Command([FindExecutable(name="xacro"), " ", description_file]),
@@ -82,6 +89,12 @@ def generate_launch_description():
                 "crossing_params_file", default_value=default_crossing_file
             ),
             DeclareLaunchArgument("competition", default_value="false"),
+            DeclareLaunchArgument("auto_crossing", default_value="true"),
+            DeclareLaunchArgument("safety_supervisor", default_value="true"),
+            DeclareLaunchArgument("mock_hardware", default_value="false"),
+            DeclareLaunchArgument(
+                "hardware_params_file", default_value=default_hardware_file
+            ),
             Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
@@ -157,6 +170,27 @@ def generate_launch_description():
                 executable="crossing_action_server",
                 output="screen",
                 parameters=[crossing_params_file, common_time],
+            ),
+            Node(
+                package="quadruped_planning",
+                executable="crossing_action_coordinator",
+                output="screen",
+                parameters=[crossing_params_file, common_time],
+                condition=IfCondition(auto_crossing),
+            ),
+            Node(
+                package="quadruped_hardware",
+                executable="system_safety_supervisor",
+                output="screen",
+                parameters=[hardware_params_file, common_time],
+                condition=IfCondition(safety_supervisor),
+            ),
+            Node(
+                package="quadruped_hardware",
+                executable="mock_sdk_adapter",
+                output="screen",
+                parameters=[hardware_params_file, common_time],
+                condition=IfCondition(mock_hardware),
             ),
             Node(
                 package="quadruped_planning",

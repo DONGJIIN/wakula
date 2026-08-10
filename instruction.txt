@@ -12,18 +12,17 @@ Wakula 四足机器人自主导航与越障工程说明
 /cmd_vel、/crossing/mode 和 /crossing/action 需要由厂商 SDK、MPC/WBC 控制器或
 自研步态控制器转换为真正的腿部动作。
 
-后续整机软件建议按职责新增独立包，避免把底层控制继续堆入现有导航节点：
+后续整机软件继续按职责拆包，避免把底层控制堆入导航节点：
 
-  quadruped_hardware          SDK/ros2_control、关节和设备诊断
+  quadruped_hardware          已建立安全监督和模拟 SDK；后续加入具体 SDK/硬件插件
   quadruped_state_estimation 编码器、IMU、足端接触和里程计融合
   quadruped_kinematics       正逆运动学、雅可比和动力学模型
   quadruped_locomotion       站立、步态、落脚、MPC/WBC 和越障 Action
-  quadruped_safety           急停状态、姿态/关节/电源保护和故障仲裁
   quadruped_simulation       Gazebo/Isaac 整机、传感器和比赛场景
 
-这些名称是后续模块边界，不代表当前已经实现。每个包应先定义输入、输出、超时、错误
-状态和验收测试，再开始写控制算法；整机阶段交付物及通过条件见 README 顶部和
-quickstart.txt 第八、九节。
+除 quadruped_hardware 已建立硬件无关基线外，其余名称是后续模块边界，不代表已经实现。
+每个包应先定义输入、输出、超时、错误状态和验收测试，再开始写控制算法；整机阶段
+交付物及通过条件见 README 顶部和 quickstart.txt 第八、九节。
 
 
 二、总体数据流
@@ -38,7 +37,9 @@ quickstart.txt 第八、九节。
 7. 同一份深度点云还会发布给 Nav2 local_costmap，辅助 2D 雷达标记近距离障碍。
 8. 越障管理器根据点云决定 WALK、STEP、CLIMB 或 STOP。
 9. OpenCV 只能让 WALK 减速并请求点云复核，不能单独触发跳跃或攀爬。
-10. Nav2 速度依次经过速度平滑、越障速度门和碰撞监控，最后输出 /cmd_vel。
+10. Action 协调器在障碍进入触发距离后发 Goal，并在执行期间锁住普通 Nav2 速度。
+11. 安全监督器融合急停、IMU、关节和电池状态，可取消 Action 并强制速度门输出零。
+12. Nav2 速度依次经过速度平滑、越障/安全速度门和碰撞监控，最后输出 /cmd_vel。
 
 速度链路：
 
@@ -83,15 +84,26 @@ quickstart.txt 第八、九节。
 
   obstacle_crossing_manager.py：视觉和地形融合决策。
   crossing_action_server.py：越障 Action 生命周期与控制器超时网关。
+  crossing_action_coordinator.py：决策到 Action 的自动触发、重试和速度接管互锁。
   cmd_vel_gate.py：速度缩放和双心跳失效保护。
   competition_obstacle_manager.py：Robocon 比赛状态、计时、计分和接触约束。
   course_waypoint_navigator.py：将比赛障碍接近点发送给 Nav2。
 
-7. src/quadruped_tools
+7. src/quadruped_hardware
+
+  system_safety_supervisor.py：汇总标准 IMU、JointState、BatteryState 和急停输入。
+  mock_sdk_adapter.py：实现 UUID/反馈/触地/取消合同的无电机模拟后端。
+  hardware.yaml：未选硬件阶段的初始安全阈值和模拟动作时长。
+
+  如果关闭 system_safety_supervisor，外部安全实现必须继续以同样 QoS 发布
+  /safety/stop；速度门和自动 Action 协调器在心跳缺失时都会按安全原则保持停车。
+
+8. src/quadruped_tools
 
   perception_bag_evaluator.py：读取 rosbag 结果、生成标注模板、搜索阈值并输出准确率报告。
+  fault_injector.py：注入软件急停和模拟控制器失败、失联、非法进度。
 
-8. src/slam
+9. src/slam
 
   slam.yaml：SLAM Toolbox 参数。
   nav2.yaml：Nav2 规划器、控制器、代价地图、速度平滑和碰撞监控参数。
@@ -268,6 +280,15 @@ crossing_action_server 每次只接受一个合法 Goal，将其转换为带 UUI
 UUID 的 /crossing/execution_status 返回。取消、Goal 超时或状态心跳超时都会发送 CANCEL。
 这层已经完成；真正关节轨迹、接触力和全身控制仍必须由后端实现。
 
+crossing_action_coordinator 订阅稳定 `/crossing/mode` 与 `/terrain/features`。STEP 或
+CLIMB 进入 trigger_distance 后，它自动构造 Goal；执行期间发布
+`/crossing/execution_active=true`，使 cmd_vel_gate 停止普通导航速度。成功后只有连续
+平地才能重新触发同类动作；失败重试次数有上限。STOP 或安全停车会请求取消当前 Goal。
+
+mock_sdk_adapter 不模拟动力学，只模拟未来 SDK 的通信行为。它以固定频率返回单调进度，
+末段提供 contact_verified，支持 CANCEL；`/testing/mock_controller_fault` 可切换 none、
+fail、silence、invalid_progress，分别验证成功、执行失败、心跳超时和非法状态拒绝。
+
 离线工具 perception_bag_evaluator 的流程：
 
 1. 从 rosbag 读取 /vision/obstacle_evidence 和 /terrain/features。
@@ -303,8 +324,8 @@ SLAM Toolbox 使用激光扫描和里程计不断估计机器人位姿，同时�
 
   slam.launch.py
     读取 sensor_profiles.yaml，集中 remap /scan、/odom，并把图像和点云来源传给感知
-    节点；随后启动机器人模型、SLAM Toolbox、Nav2、OpenCV、地形分析、越障管理、
-    速度安全和 RViz。slam_enabled、nav2_enabled、vision、rviz 可独立开关。
+    节点；随后启动机器人模型、SLAM Toolbox、Nav2、OpenCV、地形分析、Action 协调、
+    安全监督、速度门和 RViz。各子系统可由 launch 参数独立开关。
 
   sensor_compat.launch.py
     仅把旧参数转发给 slam.launch.py，保留脚本兼容；新开发不再以它作为主入口。
@@ -369,10 +390,24 @@ cmd_vel_gate 接收：
 
   /cmd_vel_smoothed       Nav2 平滑后的速度
   /crossing/speed_scale   越障决策速度倍率
+  /crossing/execution_active  越障控制器是否接管腿部
+  /safety/stop            统一软件停车互锁
 
-它维护两条独立心跳：导航速度心跳和越障决策心跳。只有两条心跳都未超时，且速度倍率
-大于零时，才复制并缩放 Twist；否则每个周期重新构造并发布全零 Twist。这样即使某个
-节点崩溃，旧的非零速度也不会一直保留。
+它维护导航速度、越障决策和安全监督三条独立心跳。只有全部未超时、速度倍率大于零、
+没有安全停车且 Action 未接管时，才复制并缩放 Twist；否则每周期发布全零 Twist。
+
+system_safety_supervisor 的硬件无关规则：
+
+1. `/safety/emergency_stop=true` 无条件停车，也可用 SetBool 服务做软件故障注入。
+2. IMU 四元数非法或 roll/pitch 超限停车。
+3. JointState 无名称或存在 NaN/Inf 停车。
+4. BatteryState 非有限或电压低于配置阈值停车；选型前阈值为 0，真机必须填写。
+5. 可选来源一旦出现，随后超过 sensor_timeout 未更新也停车。
+6. 真机阶段把 require_imu、require_joint_states、require_battery 逐项设为 true。
+7. `/safety/stop` 自身超过 safety_timeout 未更新时，速度归零且活动 Action 被取消。
+
+这些规则是 ROS 软件互锁，不替代串在驱动使能回路中的物理急停、过流/过温保护和底层
+通信看门狗。硬件型号确定后还要加入每关节位置/速度/力矩限制及厂商故障码仲裁。
 
 所有 Python 节点在关闭阶段还会容忍 launch 与终端重复发送的 SIGINT，避免资源销毁
 过程中出现误导性的 KeyboardInterrupt traceback。
@@ -448,6 +483,18 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 
   ros2 launch slam slam.launch.py competition:=true
 
+无真机完整 Action 闭环：
+
+  ros2 launch slam slam.launch.py mock_hardware:=true \
+    slam_enabled:=false nav2_enabled:=false vision:=false rviz:=false
+
+故障注入：
+
+  ros2 run quadruped_tools fault_injector --estop on
+  ros2 run quadruped_tools fault_injector --estop off
+  ros2 run quadruped_tools fault_injector --controller-fault silence
+  ros2 run quadruped_tools fault_injector --controller-fault none
+
 
 十一、现场调试顺序
 ----------------
@@ -475,7 +522,10 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
     点云话题、目标坐标系、ROI、采样上限和地形阈值。
 
   src/quadruped_planning/config/crossing.yaml
-    STEP/CLIMB/STOP 阈值、视觉融合、速度门和超时时间。
+    STEP/CLIMB/STOP 阈值、视觉融合、Action 协调、速度门和超时时间。
+
+  src/quadruped_hardware/config/hardware.yaml
+    安全监督初始阈值、必需状态开关和模拟 SDK 动作时长。
 
   src/slam/config/slam.yaml
     SLAM Toolbox 建图参数。
@@ -485,6 +535,9 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 
   src/quadruped_planning/config/course_waypoints.yaml
     比赛障碍接近点，目前需用正式场地测量值替换。
+
+  .github/workflows/ros2-ci.yaml
+    每次 main 推送和 PR 在 Ubuntu 24.04 / ROS 2 Jazzy 构建并运行测试。
 
 
 十三、当前边界
