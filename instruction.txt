@@ -290,6 +290,15 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 九、常用启动命令
 ----------------
 
+先确认当前终端能找到工作空间：
+
+  source ~/.bashrc
+  ros2 pkg prefix slam
+
+如果没有配置自动加载，则手动 source /opt/ros/jazzy/setup.bash 和
+~/wakula/install/setup.bash。出现 Package 'slam' not found 是环境未加载，不是 launch
+文件或 ROS 包名称错误。
+
 安装依赖并编译：
 
   cd ~/wakula

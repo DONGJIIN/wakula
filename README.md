@@ -247,6 +247,19 @@ colcon test-result --verbose
 
 ## 6. 启动方式
 
+本机已经在 `~/.bashrc` 中自动加载 ROS 2 Jazzy 和 `~/wakula/install/setup.bash`。修改配置
+后让当前终端立即生效，或在其他尚未配置的终端手动执行：
+
+```bash
+source ~/.bashrc
+# 等价的手动方式：
+source /opt/ros/jazzy/setup.bash
+source ~/wakula/install/setup.bash
+```
+
+若出现 `Package 'slam' not found`，说明当前终端尚未加载工作空间；执行上面的命令，
+再用 `ros2 pkg prefix slam` 确认输出指向 `~/wakula/install/slam`。
+
 只查看模型：
 
 ```bash

@@ -650,6 +650,14 @@ Action，而不是继续扩展 String 命令。Action 的自定义类型和最�
 十三、通信调试命令
 ------------------
 
+检查 ROS 环境和包发现：
+  source ~/.bashrc
+  ros2 pkg prefix slam
+  printenv AMENT_PREFIX_PATH
+
+`ros2 pkg prefix slam` 必须指向 `~/wakula/install/slam`。若只显示 `/opt/ros/jazzy` 搜索
+路径，当前终端没有 source Wakula 工作空间，后续 Topic/Node 调试也不会看到项目节点。
+
 查看发送方和接收方：
   ros2 topic info /cmd_vel --verbose
   ros2 topic info /terrain/features --verbose

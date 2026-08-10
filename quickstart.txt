@@ -80,7 +80,9 @@ Wakula 后续开发快速上手指南
 
   source install/setup.bash
 
-每次打开新终端都需要重新 source ROS 2 和 install/setup.bash。
+本机 ~/.bashrc 已自动加载 ROS 2 Jazzy 和 ~/wakula/install/setup.bash，新开终端无需重复
+执行；刚修改 ~/.bashrc 的当前终端先运行 source ~/.bashrc。另一台电脑尚未配置自动加载
+时，每个新终端仍需手动 source。用 ros2 pkg prefix slam 检查是否加载成功。
 
 7. 运行测试：
 
@@ -413,11 +415,11 @@ scripts
 五、常用启动命令
 ----------------
 
-每个新终端先执行：
+本机新终端会由 ~/.bashrc 自动加载。若当前终端提示找不到包，先执行：
 
-  source /opt/ros/jazzy/setup.bash
+  source ~/.bashrc
   cd ~/wakula
-  source install/setup.bash
+  ros2 pkg prefix slam
 
 只查看 URDF：
 
