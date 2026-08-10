@@ -207,6 +207,8 @@ TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
   data[5] height       障碍包围框高度比例，0.0～1.0
 发布条件：每个已处理图像都会发布；未形成稳定证据时六项为零。
 安全规则：未知类型码、NaN、置信度不足、画面边缘目标或超时结果均被拒绝。
+稳定条件：默认 5 帧窗口至少 3 帧同类型，且 center_x、center_y、width、height 的跨帧
+          跳变不超过 vision.yaml 中对应阈值。接口字段和 ROS 话题未因准确率改进而变化。
 
 2. 可读视觉提示
 
@@ -236,6 +238,8 @@ TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
 接收方：RViz、rqt_image_view 或标定工具
 启用条件：vision.yaml 中 publish_debug_mask=true。
 通道协议：B=蓝色区域，G=Canny 边缘，R=橙色区域。
+图像内容：已经过 CLAHE/自适应 Canny、形态学和前向 ROI 处理，可直接用于检查算法真正
+          参与判断的像素；ROI 外为黑色。
 
 5. 地形特征
 

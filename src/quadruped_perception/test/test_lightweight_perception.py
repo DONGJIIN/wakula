@@ -7,7 +7,10 @@ from quadruped_perception.terrain_analyzer import compute_terrain_features
 from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
     ObstacleEvidence,
+    adaptive_canny_thresholds,
+    apply_detection_roi,
     detect_obstacle_evidence,
+    enhance_illumination,
     largest_color_feature,
     stabilize_evidence,
 )
@@ -45,6 +48,44 @@ def test_grayscale_geometry_and_temporal_confirmation():
     assert stable.hint == "poles"
     assert stable.confidence >= 0.55
     assert stabilize_evidence(history[:2], 3).hint == "none"
+
+
+def test_pole_pair_rejects_unaligned_vertical_clutter():
+    """Two unrelated vertical color regions must not masquerade as a gate."""
+    orange = np.zeros((240, 320), dtype=np.uint8)
+    empty = np.zeros_like(orange)
+    cv2.rectangle(orange, (50, 10), (70, 100), 255, -1)
+    cv2.rectangle(orange, (220, 145), (240, 235), 255, -1)
+    evidence = detect_obstacle_evidence(orange, empty, empty, 100.0)
+    assert evidence.hint != "poles"
+
+
+def test_temporal_confirmation_rejects_spatially_inconsistent_boxes():
+    """Repeated labels at jumping positions are treated as separate objects."""
+    history = [
+        ObstacleEvidence("poles", 0.8, center_x, 0.5, 0.2, 0.5)
+        for center_x in (0.15, 0.50, 0.85)
+    ]
+    assert stabilize_evidence(history, 3).hint == "none"
+
+
+def test_illumination_roi_and_adaptive_edge_helpers():
+    """Preprocessing preserves shape, masks borders and returns valid thresholds."""
+    image = np.full((80, 120, 3), 25, dtype=np.uint8)
+    cv2.rectangle(image, (30, 20), (90, 65), (0, 70, 150), -1)
+    enhanced = enhance_illumination(image, 2.0, 4)
+    assert enhanced.shape == image.shape
+    assert not np.array_equal(enhanced, image)
+
+    mask = np.full((100, 200), 255, dtype=np.uint8)
+    roi = apply_detection_roi(mask, 0.10, 0.90, 0.10)
+    assert cv2.countNonZero(roi[:10]) == 0
+    assert cv2.countNonZero(roi[:, :20]) == 0
+    assert roi[50, 100] == 255
+
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    low, high = adaptive_canny_thresholds(gray, 60, 160, 0.33)
+    assert 0 <= low < high <= 255
 
 
 def test_color_feature_is_normalized():

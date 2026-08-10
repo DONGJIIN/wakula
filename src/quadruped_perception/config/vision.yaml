@@ -11,8 +11,24 @@ vision_obstacle_detector:
     morphology_size: 5
     edge_low_threshold: 60
     edge_high_threshold: 160
+    # Use image brightness to adapt Canny while keeping the fixed values as bounds.
+    adaptive_canny: true
+    adaptive_canny_sigma: 0.33
+    # CLAHE improves HSV/Canny stability under shadows and uneven venue lighting.
+    illumination_normalization: true
+    clahe_clip_limit: 2.0
+    clahe_grid_size: 8
+    # Ignore likely ceiling, robot-body and lens-border pixels.
+    roi_top_ratio: 0.05
+    roi_bottom_ratio: 0.95
+    roi_side_margin_ratio: 0.02
+    # Reject sparse color reflections inside large bounding rectangles.
+    min_color_fill_ratio: 0.18
     history_size: 5
     confirmation_frames: 3
+    # The same label must also stay at a similar image position and size.
+    max_temporal_center_jitter: 0.15
+    max_temporal_size_jitter: 0.25
     # Lock one default topic; fail over only when it has stopped publishing.
     source_switch_timeout: 2.0
     # OpenCV HSV ranges; recalibrate under venue lighting before competition.

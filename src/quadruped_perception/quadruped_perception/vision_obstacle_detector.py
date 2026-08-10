@@ -2,6 +2,7 @@
 
 from collections import Counter, deque
 from dataclasses import dataclass
+from itertools import combinations
 from typing import List, Sequence, Tuple
 
 import cv2
@@ -69,6 +70,120 @@ def contour_boxes(mask: np.ndarray, min_area: float) -> List[ContourBox]:
     return boxes
 
 
+def enhance_illumination(
+    bgr: np.ndarray, clip_limit: float = 2.0, grid_size: int = 8
+) -> np.ndarray:
+    """Normalize brightness on one LAB channel while largely preserving color."""
+    grid_size = max(2, int(grid_size))
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    lightness, channel_a, channel_b = cv2.split(lab)
+    clahe = cv2.createCLAHE(
+        clipLimit=max(0.1, float(clip_limit)),
+        tileGridSize=(grid_size, grid_size),
+    )
+    lightness = clahe.apply(lightness)
+    return cv2.cvtColor(
+        cv2.merge((lightness, channel_a, channel_b)), cv2.COLOR_LAB2BGR
+    )
+
+
+def apply_detection_roi(
+    mask: np.ndarray,
+    top_ratio: float,
+    bottom_ratio: float,
+    side_margin_ratio: float,
+) -> np.ndarray:
+    """Keep the configurable forward-view region and suppress image borders."""
+    image_height, image_width = mask.shape[:2]
+    top = int(np.clip(top_ratio, 0.0, 0.95) * image_height)
+    bottom = int(np.clip(bottom_ratio, 0.05, 1.0) * image_height)
+    margin = int(np.clip(side_margin_ratio, 0.0, 0.45) * image_width)
+    if bottom <= top:
+        return np.zeros_like(mask)
+    result = np.zeros_like(mask)
+    result[top:bottom, margin : image_width - margin] = mask[
+        top:bottom, margin : image_width - margin
+    ]
+    return result
+
+
+def adaptive_canny_thresholds(
+    gray: np.ndarray, fallback_low: int, fallback_high: int, sigma: float
+) -> Tuple[int, int]:
+    """Estimate stable Canny thresholds, with configured values as safe bounds."""
+    median = float(np.median(gray))
+    if median < 20.0:
+        return fallback_low, fallback_high
+    sigma = float(np.clip(sigma, 0.05, 0.90))
+    low = int(np.clip((1.0 - sigma) * median, fallback_low * 0.5, fallback_high))
+    high = int(
+        np.clip(
+            (1.0 + sigma) * median,
+            max(low + 1, fallback_low),
+            min(255, fallback_high * 1.5),
+        )
+    )
+    return low, high
+
+
+def box_fill_ratio(box: ContourBox) -> float:
+    """Return contour rectangularity in its bounding box."""
+    return box[4] / max(1.0, float(box[2] * box[3]))
+
+
+def mask_density(mask: np.ndarray, box: ContourBox) -> float:
+    """Measure supporting pixels inside a candidate bounding box."""
+    x, y, width, height, _ = box
+    region = mask[y : y + height, x : x + width]
+    return float(cv2.countNonZero(region)) / max(1.0, float(width * height))
+
+
+def best_pole_pair(
+    boxes: Sequence[ContourBox],
+    image_width: int,
+    image_height: int,
+    min_fill_ratio: float = 0.0,
+) -> Tuple[List[ContourBox], float]:
+    """Select two aligned pole-like boxes and return their geometry score."""
+    candidates = [
+        box
+        for box in boxes
+        if box[3] >= box[2] * 1.5
+        and box[3] >= image_height * 0.15
+        and box_fill_ratio(box) >= min_fill_ratio
+    ]
+    best_pair: List[ContourBox] = []
+    best_score = 0.0
+    for first, second in combinations(candidates, 2):
+        if first[0] > second[0]:
+            first, second = second, first
+        center_separation = (
+            second[0] + second[2] / 2.0 - first[0] - first[2] / 2.0
+        ) / image_width
+        if not 0.10 <= center_separation <= 0.80:
+            continue
+        vertical_overlap = max(
+            0,
+            min(first[1] + first[3], second[1] + second[3])
+            - max(first[1], second[1]),
+        ) / max(1.0, float(min(first[3], second[3])))
+        height_similarity = min(first[3], second[3]) / max(first[3], second[3])
+        width_similarity = min(first[2], second[2]) / max(first[2], second[2])
+        if vertical_overlap < 0.45 or height_similarity < 0.55:
+            continue
+        fill = min(box_fill_ratio(first), box_fill_ratio(second))
+        score = (
+            0.35 * vertical_overlap
+            + 0.30 * height_similarity
+            + 0.15 * width_similarity
+            + 0.20 * min(1.0, fill / max(0.25, min_fill_ratio))
+        )
+        if score > best_score:
+            best_pair = [first, second]
+            best_score = score
+    return best_pair, best_score
+
+
 def largest_color_feature(mask: np.ndarray, min_area: float) -> ColorFeature:
     """Return area and normalized bounding box for the largest valid contour."""
     boxes = contour_boxes(mask, min_area)
@@ -114,6 +229,7 @@ def detect_obstacle_evidence(
     blue_mask: np.ndarray,
     edge_mask: np.ndarray,
     min_area: float,
+    min_color_fill_ratio: float = 0.18,
 ) -> ObstacleEvidence:
     """Combine color and contour geometry into a conservative raw hint."""
     image_height, image_width = orange_mask.shape[:2]
@@ -125,43 +241,52 @@ def detect_obstacle_evidence(
     horizontal_blue = [
         box
         for box in blue_boxes
-        if box[2] >= box[3] * 2.2 and box[4] / image_area >= 0.005
+        if box[2] >= box[3] * 2.2
+        and box[4] / image_area >= 0.005
+        and box_fill_ratio(box) >= min_color_fill_ratio
+        and box[1] + box[3] / 2.0 <= image_height * 0.70
     ]
     if horizontal_blue:
         box = max(horizontal_blue, key=lambda item: item[4])
-        confidence = min(0.98, 0.70 + box[4] / image_area * 4.0)
+        geometry = min(1.0, box[2] / max(1.0, box[3] * 5.0))
+        edge_support = mask_density(edge_mask, box)
+        confidence = min(
+            0.98,
+            0.66
+            + 0.12 * geometry
+            + 0.10 * min(1.0, edge_support * 5.0)
+            + box[4] / image_area * 2.0,
+        )
         return evidence_from_boxes(
             "height_bar", confidence, [box], image_width, image_height
         )
 
-    tall_orange = [
-        box
-        for box in orange_boxes
-        if box[3] >= box[2] * 1.5 and box[3] >= image_height * 0.15
-    ]
-    if len(tall_orange) >= 2:
-        tall_orange.sort(key=lambda box: box[0])
-        confidence = min(0.98, 0.72 + len(tall_orange) * 0.06)
+    pole_pair, pair_score = best_pole_pair(
+        orange_boxes,
+        image_width,
+        image_height,
+        min_color_fill_ratio,
+    )
+    if pole_pair:
+        edge_support = np.mean([mask_density(edge_mask, box) for box in pole_pair])
+        confidence = min(
+            0.98,
+            0.66 + 0.22 * pair_score + 0.10 * min(1.0, edge_support * 5.0),
+        )
         return evidence_from_boxes(
-            "poles", confidence, tall_orange, image_width, image_height
+            "poles", confidence, pole_pair, image_width, image_height
         )
 
     # 当颜色受光照影响时，再使用 Canny 轮廓作为保守的几何补充。
     edge_boxes = contour_boxes(edge_mask, min_area)
-    tall_edges = [
-        box
-        for box in edge_boxes
-        if box[3] >= box[2] * 2.0
-        and box[3] >= image_height * 0.20
-        and image_width * 0.05 <= box[0] + box[2] / 2.0 <= image_width * 0.95
-    ]
-    if len(tall_edges) >= 2:
-        tall_edges.sort(key=lambda box: box[0])
-        separated = tall_edges[-1][0] - tall_edges[0][0] >= image_width * 0.12
-        if separated:
-            return evidence_from_boxes(
-                "poles", 0.64, tall_edges, image_width, image_height
-            )
+    edge_pair, edge_pair_score = best_pole_pair(
+        edge_boxes, image_width, image_height
+    )
+    if edge_pair:
+        confidence = min(0.72, 0.54 + 0.14 * edge_pair_score)
+        return evidence_from_boxes(
+            "poles", confidence, edge_pair, image_width, image_height
+        )
 
     horizontal_edges = [
         box
@@ -192,7 +317,10 @@ def detect_obstacle_evidence(
     colored_boxes = orange_boxes + blue_boxes
     if colored_boxes:
         box = max(colored_boxes, key=lambda item: item[4])
-        if box[4] / image_area >= 0.03:
+        if (
+            box[4] / image_area >= 0.03
+            and box_fill_ratio(box) >= min_color_fill_ratio
+        ):
             return evidence_from_boxes(
                 "colored_obstacle", 0.55, [box], image_width, image_height
             )
@@ -200,7 +328,10 @@ def detect_obstacle_evidence(
 
 
 def stabilize_evidence(
-    history: Sequence[ObstacleEvidence], minimum_matches: int
+    history: Sequence[ObstacleEvidence],
+    minimum_matches: int,
+    max_center_jitter: float = 0.15,
+    max_size_jitter: float = 0.25,
 ) -> ObstacleEvidence:
     """Accept only a non-empty hint repeated across multiple recent frames."""
     # 多帧投票抑制反光、运动模糊和单帧噪声。
@@ -211,17 +342,31 @@ def stabilize_evidence(
     if count < minimum_matches:
         return ObstacleEvidence()
     matches = [item for item in history if item.hint == hint]
-    confidence = float(np.mean([item.confidence for item in matches]))
+    center_x = np.asarray([item.center_x for item in matches])
+    center_y = np.asarray([item.center_y for item in matches])
+    widths = np.asarray([item.width for item in matches])
+    heights = np.asarray([item.height for item in matches])
+    center_jitter = max(float(np.ptp(center_x)), float(np.ptp(center_y)))
+    size_jitter = max(float(np.ptp(widths)), float(np.ptp(heights)))
+    if center_jitter > max_center_jitter or size_jitter > max_size_jitter:
+        return ObstacleEvidence()
+    confidence = float(np.median([item.confidence for item in matches]))
     consistency = count / max(1, len(history))
+    spatial_consistency = 1.0 - max(
+        center_jitter / max(1e-6, max_center_jitter),
+        size_jitter / max(1e-6, max_size_jitter),
+    )
     return ObstacleEvidence(
         hint=hint,
         # Repetition is already enforced by minimum_matches. Keep a small
         # consistency penalty without suppressing a valid 3-of-5 result.
-        confidence=confidence * (0.8 + 0.2 * consistency),
-        center_x=float(np.mean([item.center_x for item in matches])),
-        center_y=float(np.mean([item.center_y for item in matches])),
-        width=float(np.mean([item.width for item in matches])),
-        height=float(np.mean([item.height for item in matches])),
+        confidence=confidence
+        * (0.8 + 0.2 * consistency)
+        * (0.9 + 0.1 * spatial_consistency),
+        center_x=float(np.median(center_x)),
+        center_y=float(np.median(center_y)),
+        width=float(np.median(widths)),
+        height=float(np.median(heights)),
     )
 
 
@@ -240,8 +385,19 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("morphology_size", 5)
         self.declare_parameter("edge_low_threshold", 60)
         self.declare_parameter("edge_high_threshold", 160)
+        self.declare_parameter("adaptive_canny", True)
+        self.declare_parameter("adaptive_canny_sigma", 0.33)
+        self.declare_parameter("illumination_normalization", True)
+        self.declare_parameter("clahe_clip_limit", 2.0)
+        self.declare_parameter("clahe_grid_size", 8)
+        self.declare_parameter("roi_top_ratio", 0.05)
+        self.declare_parameter("roi_bottom_ratio", 0.95)
+        self.declare_parameter("roi_side_margin_ratio", 0.02)
+        self.declare_parameter("min_color_fill_ratio", 0.18)
         self.declare_parameter("history_size", 5)
         self.declare_parameter("confirmation_frames", 3)
+        self.declare_parameter("max_temporal_center_jitter", 0.15)
+        self.declare_parameter("max_temporal_size_jitter", 0.25)
         self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("orange_hsv_lower", [5, 80, 70])
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
@@ -261,10 +417,43 @@ class VisionObstacleDetector(Node):
             self.edge_low + 1,
             int(self.get_parameter("edge_high_threshold").value),
         )
+        self.adaptive_canny = bool(self.get_parameter("adaptive_canny").value)
+        self.adaptive_canny_sigma = float(
+            np.clip(self.get_parameter("adaptive_canny_sigma").value, 0.05, 0.90)
+        )
+        self.illumination_normalization = bool(
+            self.get_parameter("illumination_normalization").value
+        )
+        self.clahe_clip_limit = max(
+            0.1, float(self.get_parameter("clahe_clip_limit").value)
+        )
+        self.clahe_grid_size = max(
+            2, int(self.get_parameter("clahe_grid_size").value)
+        )
+        self.roi_top_ratio = float(
+            np.clip(self.get_parameter("roi_top_ratio").value, 0.0, 0.95)
+        )
+        self.roi_bottom_ratio = float(
+            np.clip(self.get_parameter("roi_bottom_ratio").value, 0.05, 1.0)
+        )
+        self.roi_side_margin_ratio = float(
+            np.clip(self.get_parameter("roi_side_margin_ratio").value, 0.0, 0.45)
+        )
+        self.min_color_fill_ratio = float(
+            np.clip(self.get_parameter("min_color_fill_ratio").value, 0.0, 1.0)
+        )
         history_size = max(1, int(self.get_parameter("history_size").value))
         self.confirmation_frames = min(
             history_size,
             max(1, int(self.get_parameter("confirmation_frames").value)),
+        )
+        self.max_temporal_center_jitter = max(
+            0.01,
+            float(self.get_parameter("max_temporal_center_jitter").value),
+        )
+        self.max_temporal_size_jitter = max(
+            0.01,
+            float(self.get_parameter("max_temporal_size_jitter").value),
         )
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
@@ -368,19 +557,51 @@ class VisionObstacleDetector(Node):
                 interpolation=cv2.INTER_AREA,
             )
 
+        # CLAHE 只处理亮度通道，在阴影与局部强光下保留较稳定的 HSV 色相。
+        processed_bgr = (
+            enhance_illumination(bgr, self.clahe_clip_limit, self.clahe_grid_size)
+            if self.illumination_normalization
+            else bgr
+        )
         # HSV 负责颜色，灰度 Canny 负责轮廓；两者不做神经网络推理。
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2HSV)
         orange_mask = self._clean_mask(
             cv2.inRange(hsv, self.orange_lower, self.orange_upper)
         )
         blue_mask = self._clean_mask(
             cv2.inRange(hsv, self.blue_lower, self.blue_upper)
         )
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        edge_mask = cv2.Canny(gray, self.edge_low, self.edge_high)
+        edge_low, edge_high = (
+            adaptive_canny_thresholds(
+                gray, self.edge_low, self.edge_high, self.adaptive_canny_sigma
+            )
+            if self.adaptive_canny
+            else (self.edge_low, self.edge_high)
+        )
+        edge_mask = cv2.Canny(gray, edge_low, edge_high)
         edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_CLOSE, self.kernel)
         edge_mask = cv2.dilate(edge_mask, self.kernel, iterations=1)
+        # 去掉天花板、机身边缘和镜头黑边等通常不属于前向通道的区域。
+        orange_mask = apply_detection_roi(
+            orange_mask,
+            self.roi_top_ratio,
+            self.roi_bottom_ratio,
+            self.roi_side_margin_ratio,
+        )
+        blue_mask = apply_detection_roi(
+            blue_mask,
+            self.roi_top_ratio,
+            self.roi_bottom_ratio,
+            self.roi_side_margin_ratio,
+        )
+        edge_mask = apply_detection_roi(
+            edge_mask,
+            self.roi_top_ratio,
+            self.roi_bottom_ratio,
+            self.roi_side_margin_ratio,
+        )
 
         orange = largest_color_feature(orange_mask, self.min_area)
         blue = largest_color_feature(blue_mask, self.min_area)
@@ -396,12 +617,19 @@ class VisionObstacleDetector(Node):
             )
         )
         raw_evidence = detect_obstacle_evidence(
-            orange_mask, blue_mask, edge_mask, self.min_area
+            orange_mask,
+            blue_mask,
+            edge_mask,
+            self.min_area,
+            self.min_color_fill_ratio,
         )
         # 只把稳定后的原子证据交给规划层，避免读取到不同帧的混合字段。
         self.evidence_history.append(raw_evidence)
         evidence = stabilize_evidence(
-            self.evidence_history, self.confirmation_frames
+            self.evidence_history,
+            self.confirmation_frames,
+            self.max_temporal_center_jitter,
+            self.max_temporal_size_jitter,
         )
         self.evidence_pub.publish(Float32MultiArray(data=evidence.as_array()))
         self.hint_pub.publish(String(data=evidence.hint))
