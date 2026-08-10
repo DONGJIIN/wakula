@@ -9,6 +9,37 @@ from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 
 
 Decision = Tuple[str, str, float]
+MODE_SEVERITY = {"WALK": 0, "STEP": 1, "CLIMB": 2, "STOP": 3}
+
+
+class ConservativeDecisionFilter:
+    """Apply dangerous upgrades immediately and confirm safer downgrades."""
+
+    def __init__(self, clear_frames: int, initial: Decision):
+        self.clear_frames = max(1, int(clear_frames))
+        self.current = initial
+        self.pending_mode = None
+        self.pending_count = 0
+
+    def update(self, candidate: Decision) -> Decision:
+        """Return a decision with asymmetric safety hysteresis."""
+        current_level = MODE_SEVERITY.get(self.current[0], MODE_SEVERITY["STOP"])
+        candidate_level = MODE_SEVERITY.get(candidate[0], MODE_SEVERITY["STOP"])
+        if candidate_level >= current_level:
+            self.current = candidate
+            self.pending_mode = None
+            self.pending_count = 0
+            return self.current
+        if candidate[0] != self.pending_mode:
+            self.pending_mode = candidate[0]
+            self.pending_count = 1
+        else:
+            self.pending_count += 1
+        if self.pending_count >= self.clear_frames:
+            self.current = candidate
+            self.pending_mode = None
+            self.pending_count = 0
+        return self.current
 
 
 def validate_height_thresholds(
@@ -39,9 +70,10 @@ def select_terrain_decision(
     if not all(isfinite(value) for value in values) or points < min_points:
         return "STOP", "WAIT_FOR_TERRAIN", 0.0
     # 从最危险条件向下判断，确保高墙不会被较低的 STEP 阈值截获。
-    if obstacle_height >= stop_threshold or slope >= max_slope * 1.5:
+    absolute_slope = abs(slope)
+    if obstacle_height >= stop_threshold or absolute_slope >= max_slope * 1.5:
         return "STOP", "REPLAN_OR_REQUEST_FOOTSTEPS", 0.0
-    if obstacle_height >= climb_threshold or slope >= max_slope:
+    if obstacle_height >= climb_threshold or absolute_slope >= max_slope:
         return "CLIMB", "CROSS_CLIMB", 0.20
     if obstacle_height >= step_threshold or roughness >= max_roughness:
         return "STEP", "CROSS_STEP", 0.45
@@ -56,16 +88,19 @@ def visual_evidence_in_path(
         isfinite(float(value)) for value in evidence[:6]
     ):
         return False
-    type_code, confidence, center_x, _, width, height = map(float, evidence[:6])
+    type_code, confidence, center_x, center_y, width, height = map(
+        float, evidence[:6]
+    )
     margin = max(0.0, min(0.49, center_margin))
     rounded_code = round(type_code)
     known_type = 1 <= rounded_code <= 4 and abs(type_code - rounded_code) < 1e-3
     return (
         known_type
-        and confidence >= min_confidence
+        and min_confidence <= confidence <= 1.0
         and margin <= center_x <= 1.0 - margin
-        and width > 0.0
-        and height > 0.0
+        and 0.0 <= center_y <= 1.0
+        and 0.0 < width <= 1.0
+        and 0.0 < height <= 1.0
     )
 
 
@@ -91,6 +126,7 @@ class ObstacleCrossingManager(Node):
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_points", 30)
         self.declare_parameter("sensor_timeout", 0.7)
+        self.declare_parameter("clear_confirmation_frames", 3)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("vision_timeout", 0.6)
         self.declare_parameter("vision_min_confidence", 0.55)
@@ -118,6 +154,10 @@ class ObstacleCrossingManager(Node):
         self.max_roughness = float(self.get_parameter("max_roughness").value)
         self.min_points = int(self.get_parameter("min_points").value)
         self.sensor_timeout = float(self.get_parameter("sensor_timeout").value)
+        self.decision_filter = ConservativeDecisionFilter(
+            int(self.get_parameter("clear_confirmation_frames").value),
+            ("STOP", "WAIT_FOR_TERRAIN", 0.0),
+        )
         self.vision_enabled = bool(self.get_parameter("vision_assist_enabled").value)
         self.vision_timeout = max(
             0.0, float(self.get_parameter("vision_timeout").value)
@@ -162,7 +202,7 @@ class ObstacleCrossingManager(Node):
 
     def features_callback(self, msg: Float32MultiArray) -> None:
         if len(msg.data) < 4:
-            self.publish_decision("STOP", "WAIT_FOR_TERRAIN", 0.0)
+            self._publish_candidate(("STOP", "WAIT_FOR_TERRAIN", 0.0))
             return
         self.last_features_time = self.get_clock().now()
         obstacle_height = float(msg.data[6]) if len(msg.data) > 6 else float(msg.data[2])
@@ -171,7 +211,7 @@ class ObstacleCrossingManager(Node):
         roughness = float(msg.data[5]) if len(msg.data) > 5 else 0.0
 
         # 点云决定动作等级，视觉仅能在 WALK 状态要求减速复核。
-        decision = select_terrain_decision(
+        raw_decision = select_terrain_decision(
             obstacle_height,
             points,
             slope,
@@ -183,12 +223,17 @@ class ObstacleCrossingManager(Node):
             self.max_slope,
             self.max_roughness,
         )
+        decision = self.decision_filter.update(raw_decision)
         visual_active = self._fresh_visual_target()
         mode, action, speed = apply_visual_assist(
             decision, visual_active, self.vision_speed_scale
         )
         self.visual_active_pub.publish(Bool(data=visual_active))
         self.publish_decision(mode, action, speed)
+
+    def _publish_candidate(self, candidate: Decision) -> None:
+        decision = self.decision_filter.update(candidate)
+        self.publish_decision(*decision)
 
     def vision_callback(self, msg: Float32MultiArray) -> None:
         self.last_vision_time = self.get_clock().now()
@@ -207,7 +252,7 @@ class ObstacleCrossingManager(Node):
     def timeout_callback(self) -> None:
         age = (self.get_clock().now() - self.last_features_time).nanoseconds / 1e9
         if age > self.sensor_timeout:
-            self.publish_decision("STOP", "WAIT_FOR_TERRAIN", 0.0)
+            self._publish_candidate(("STOP", "WAIT_FOR_TERRAIN", 0.0))
 
     def publish_decision(self, mode: str, action: str, speed: float) -> None:
         mode_msg = String()

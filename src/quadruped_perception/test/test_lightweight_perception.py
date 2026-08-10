@@ -121,6 +121,41 @@ def test_numpy_terrain_features_and_minimum_points():
     assert sparse is None
 
 
+def test_ground_envelope_separates_step_from_ground_slope():
+    """A raised block must not turn a flat floor into a steep fitted slope."""
+    rng = np.random.default_rng(7)
+    ground = np.column_stack(
+        (
+            rng.uniform(0.1, 1.5, 3000),
+            rng.uniform(-0.4, 0.4, 3000),
+            rng.normal(0.0, 0.002, 3000),
+        )
+    )
+    step = np.column_stack(
+        (
+            rng.uniform(0.65, 0.85, 500),
+            rng.uniform(-0.15, 0.15, 500),
+            rng.normal(0.12, 0.002, 500),
+        )
+    )
+    result = compute_terrain_features(
+        np.vstack((ground, step)),
+        0.1,
+        1.5,
+        0.45,
+        30000,
+        0.1,
+        0.28,
+        0.45,
+        0.06,
+        30,
+    )
+    features, _ = result
+    assert abs(features[4]) < 0.02
+    assert 0.10 <= features[2] <= 0.14
+    assert 0.60 <= features[7] <= 0.90
+
+
 def test_sensor_topic_selection_locks_and_fails_over():
     """A second default topic is ignored until the active source is stale."""
     assert should_accept_source(None, "/camera/image_raw", 0.0, 2.0)

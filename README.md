@@ -43,7 +43,7 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 | 真机联调与工程化 | ⬜ 未完成 | 架空→保护绳→低速→单障碍→整场测试，完成标定工具、日志、rosbag、CI、版本和维护流程 |
 
 当前代码已经完成的是上表中“环境感知、SLAM 与自主导航、任务逻辑、ROS 软件安全”的
-第一版雏形：8 个 ROS 2 包可编译，28 项测试通过，并提供一键启动、越障 Action、
+第一版雏形：8 个 ROS 2 包可编译，33 项测试通过，并提供一键启动、越障 Action、
 rosbag 离线评估及常见传感器兼容入口。
 其余项目不能因仿真话题或 URDF 能运行就视为完成。详细清单与开发顺序见
 `quickstart.txt` 第七至九节。
@@ -464,6 +464,9 @@ Feedback 包含阶段、0～1 进度、耗时、接触确认和文字；Result �
 `CANCEL`。旧 `/crossing/action` 仍是决策建议；兼容请求发布在 `/crossing/action_request`，
 不能代替强类型状态和 Action 结果。
 
+后端状态还必须满足阶段合法、进度在 0～1 且运行进度不倒退。默认只有进度达到 0.95 且
+`contact_verified=true` 的 `SUCCEEDED` 才会被接受；否则 Action 以执行证据不足失败。
+
 手动测试 Goal（未接控制器时会按安全设计超时失败）：
 
 ```bash
@@ -495,6 +498,10 @@ ros2 action send_goal /crossing/traverse_obstacle \
 重规划；坡度、粗糙度也会使模式升级。阈值必须依据机器狗的实际腿长、质心、步态能力
 和相机安装误差重新标定。
 
+地面不再用包含障碍物的全部点直接拟合，而是在纵向分箱中提取低分位地面包络，再估计
+坡度、粗糙度和相对障碍高度，避免台阶把“平地”错误拉成斜坡。`frontal_obstacle_height`
+只统计中央通道，`lookahead` 是最近成片障碍的实际 x 距离，不再是固定 ROI 长度。
+
 同一 ROI 被降采样后发布为 `/perception/obstacle_points`，Nav2 的 local costmap 以
 `PointCloud2` 障碍源进行 marking，2D 雷达继续负责 marking + clearing。点云层不主动
 clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗口会移除离开视野的旧区域。
@@ -514,9 +521,10 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
   --suggestions calibration_suggestions.yaml
 ```
 
-报告包含混淆矩阵、accuracy、macro-F1、每类 precision/recall/F1、匹配数量和时间对齐误差；
-工具网格搜索 `vision_min_confidence` 与 `step/climb/stop_threshold`，将建议值写入独立 YAML，
-不会自动覆盖正式配置。HSV、ROI、相机内外参仍需结合 debug mask/标定板人工标定。
+报告包含混淆矩阵、accuracy 及其 95% Wilson 区间、macro-F1、每类 precision/recall/F1、
+匹配数量和时间对齐误差。默认至少需要每类链路 20 个已匹配样本；达到数量后按时间将最新
+30% 留作验证集，只在较早 70% 上搜索 `vision_min_confidence` 与高度阈值，避免用同一批
+数据调参又验收造成指标虚高。建议值写入独立 YAML，不会自动覆盖正式配置。
 
 ## 10. 速度与失效安全
 
@@ -533,6 +541,9 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 
 规划命令或越障决策任意一项超时，速度门都发布零速度。机器狗 SDK 还应实现独立的通信
 看门狗、急停和姿态保护，不能仅依赖 ROS 进程。
+
+融合模式采用非对称防抖：从 WALK 升到 STEP/CLIMB/STOP 立即生效；向更安全等级恢复时，
+默认要求连续 3 帧一致的较低风险证据。这样既不延迟危险升级，也减少阈值附近来回切换。
 
 ## 11. Robocon 障碍赛模式
 

@@ -89,7 +89,7 @@ Wakula 后续开发快速上手指南
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-当前基准为 28 项测试、0 error、0 failure。
+当前基准为 33 项测试、0 error、0 failure。
 
 8. 查看机器人模型：
 
@@ -592,8 +592,8 @@ OpenCV：
 1. 自动接入常见 PointCloud2 话题。
 2. 按消息时间戳转换到 base_link。
 3. NumPy 有限值过滤、ROI 裁剪和有界降采样。
-4. 分位数地面/障碍高度估计。
-5. 最小二乘坡度、粗糙度和可通行度估计。
+4. 纵向分箱低分位地面包络，避免障碍污染坡度估计。
+5. 相对地面高度、中央通道高度、最近成片障碍距离、粗糙度和可通行度估计。
 6. 同一份 ROI 点云进入 Nav2 local_costmap。
 7. 点云源锁定和失联自动切换。
 
@@ -607,13 +607,16 @@ OpenCV：
 6. 合成 RGB + PointCloud2 端到端融合验证。
 7. TraverseObstacle Action 的参数校验、UUID 命令、反馈、取消、结果及双重超时。
 8. 真机控制器使用 execution_command/status 强类型合同，旧字符串仅作兼容提示。
+9. 风险升级立即执行、安全降级连续 3 帧确认，减少模式抖动。
+10. Action 状态检查合法阶段、单调进度以及成功时的进度/接触证明。
 
 离线标定和评估：
 
 1. 从 rosbag 直接读取视觉证据和点云地形特征，无需启动实时节点。
 2. 生成稀疏 CSV 真值模板并按时间容差匹配。
-3. 输出 accuracy、macro-F1、每类 precision/recall/F1 和混淆矩阵。
-4. 搜索视觉置信度及 STEP/CLIMB/STOP 高度阈值，建议 YAML 不覆盖正式配置。
+3. 输出 accuracy 及 95% 区间、macro-F1、每类 precision/recall/F1 和混淆矩阵。
+4. 默认至少 20 个样本，并按时间使用 70% 训练、30% 独立验证，避免指标泄漏。
+5. 搜索视觉置信度及 STEP/CLIMB/STOP 高度阈值，建议 YAML 不覆盖正式配置。
 
 比赛框架：
 
@@ -627,7 +630,7 @@ OpenCV：
   8 个 ROS 2 包可编译。
   slam.launch.py 保持 ROS 2 内部默认名称，并集中处理 profile 和显式覆盖。
   常见 2D/3D 雷达及 RGB-D 相机 profile 可通过 YAML 扩展。
-  当前 28 项测试全部通过。
+  当前 33 项测试全部通过。
   README、算法原理、通信合同和快速上手文档齐全。
   以上只代表上层 ROS 2 感知、导航、决策雏形，不代表四足整机研发完成。
 

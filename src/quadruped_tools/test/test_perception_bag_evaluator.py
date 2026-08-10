@@ -3,6 +3,7 @@
 from quadruped_tools.perception_bag_evaluator import (
     GroundTruth,
     TimedRecord,
+    chronological_split,
     classification_metrics,
     evaluate,
     load_labels,
@@ -19,6 +20,8 @@ def test_classification_metrics_include_confusion_and_macro_f1():
     assert abs(metrics["accuracy"] - 2 / 3) < 1e-6
     assert metrics["confusion_matrix"]["poles"]["none"] == 1
     assert 0.0 < metrics["macro_f1"] < 1.0
+    assert metrics["accuracy_ci95"][0] < metrics["accuracy"]
+    assert metrics["accuracy_ci95"][1] > metrics["accuracy"]
 
 
 def test_optimizers_recover_separable_vision_and_terrain_samples():
@@ -55,11 +58,21 @@ def test_evaluate_aligns_labels_and_returns_yaml_parameters():
         TimedRecord(1_020_000_000, (0, 0, 0.10, 100, 0, 0, 0.10)),
         TimedRecord(2_020_000_000, (0, 0, 0.04, 100, 0, 0, 0.04)),
     ]
-    report, suggestions = evaluate(labels, vision, terrain, 0.05)
+    report, suggestions = evaluate(
+        labels, vision, terrain, 0.05, minimum_samples=2
+    )
     assert report["matched_vision_samples"] == 2
     assert report["matched_terrain_samples"] == 2
     assert "vision_min_confidence" in suggestions
     assert suggestions["step_threshold"] < suggestions["climb_threshold"]
+
+
+def test_chronological_holdout_keeps_newest_samples_for_validation():
+    """Calibration and validation must not score the exact same time samples."""
+    samples = [(TimedRecord(stamp, ()), "none") for stamp in range(10)]
+    training, validation = chronological_split(samples, 0.30)
+    assert [item[0].stamp_ns for item in training] == list(range(7))
+    assert [item[0].stamp_ns for item in validation] == list(range(7, 10))
 
 
 def test_label_template_and_csv_validation(tmp_path):

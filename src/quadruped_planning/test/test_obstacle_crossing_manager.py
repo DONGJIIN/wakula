@@ -6,8 +6,13 @@ from std_msgs.msg import Bool, String
 
 from quadruped_planning.cmd_vel_gate import gated_twist
 from quadruped_planning.competition_obstacle_manager import CompetitionObstacleManager
-from quadruped_planning.crossing_action_server import validate_goal_values
+from quadruped_planning.crossing_action_server import (
+    controller_success_is_valid,
+    validate_controller_status,
+    validate_goal_values,
+)
 from quadruped_planning.obstacle_crossing_manager import (
+    ConservativeDecisionFilter,
     apply_visual_assist,
     select_terrain_decision,
     validate_height_thresholds,
@@ -40,6 +45,7 @@ def test_geometry_owns_crossing_mode():
     assert decide(height=0.10)[0] == "STEP"
     assert decide(height=0.20)[0] == "CLIMB"
     assert decide(height=0.35)[0] == "STOP"
+    assert decide(slope=-0.50)[0] == "CLIMB"
 
 
 def test_visual_target_requires_confidence_and_center():
@@ -50,6 +56,12 @@ def test_visual_target_requires_confidence_and_center():
     assert visual_evidence_in_path(centered_poles, 0.55, 0.20)
     assert not visual_evidence_in_path(edge_poles, 0.55, 0.20)
     assert not visual_evidence_in_path(uncertain_bar, 0.55, 0.20)
+    assert not visual_evidence_in_path(
+        [1.0, 1.2, 0.5, 0.5, 0.2, 0.6], 0.55, 0.20
+    )
+    assert not visual_evidence_in_path(
+        [1.0, 0.8, 0.5, 1.2, 0.2, 0.6], 0.55, 0.20
+    )
 
 
 def test_invalid_visual_data_is_ignored():
@@ -99,6 +111,33 @@ def test_crossing_action_goal_validation():
     assert not validate_goal_values(
         1, float("nan"), 0.50, 0.4, 10.0, 60.0
     )[0]
+
+
+def test_controller_status_requires_monotonic_valid_progress():
+    """Malformed, out-of-range and regressing feedback cannot refresh a goal."""
+    assert validate_controller_status(0, 2, 0.5, 0.4)[0]
+    assert not validate_controller_status(9, 2, 0.5, 0.4)[0]
+    assert not validate_controller_status(0, 9, 0.5, 0.4)[0]
+    assert not validate_controller_status(0, 2, 1.2, 0.4)[0]
+    assert not validate_controller_status(0, 2, 0.3, 0.4)[0]
+    # Failure/cancel must still be accepted even if the backend resets progress.
+    assert validate_controller_status(2, 2, 0.0, 0.8)[0]
+
+
+def test_controller_success_requires_progress_and_contact_proof():
+    assert controller_success_is_valid(0.98, True, 0.95, True)
+    assert not controller_success_is_valid(0.90, True, 0.95, True)
+    assert not controller_success_is_valid(1.0, False, 0.95, True)
+    assert controller_success_is_valid(1.0, False, 0.95, False)
+
+
+def test_decision_filter_escalates_now_and_confirms_clearance():
+    """Risk increases immediately while a safer mode needs repeated evidence."""
+    filter_ = ConservativeDecisionFilter(3, ("WALK", "NAVIGATE", 1.0))
+    assert filter_.update(("CLIMB", "CROSS_CLIMB", 0.2))[0] == "CLIMB"
+    assert filter_.update(("WALK", "NAVIGATE", 1.0))[0] == "CLIMB"
+    assert filter_.update(("WALK", "NAVIGATE", 1.0))[0] == "CLIMB"
+    assert filter_.update(("WALK", "NAVIGATE", 1.0))[0] == "WALK"
 
 
 def test_competition_tracks_out_of_order_active_obstacle():

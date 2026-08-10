@@ -48,6 +48,56 @@ def filter_roi_points(
     return points
 
 
+def fit_ground_envelope(
+    points: np.ndarray, ground_percentile: float, bin_count: int = 12
+) -> Tuple[float, float, np.ndarray, float]:
+    """Fit a robust ground line to low z quantiles in longitudinal bins."""
+    x_values = points[:, 0].astype(np.float64)
+    z_values = points[:, 2].astype(np.float64)
+    quantile = float(np.clip(ground_percentile, 0.02, 0.40))
+    edges = np.linspace(float(x_values.min()), float(x_values.max()), bin_count + 1)
+    sample_x = []
+    sample_z = []
+    for index in range(bin_count):
+        upper_inclusive = index == bin_count - 1
+        selected = (x_values >= edges[index]) & (
+            (x_values <= edges[index + 1])
+            if upper_inclusive
+            else (x_values < edges[index + 1])
+        )
+        if np.count_nonzero(selected) < 3:
+            continue
+        sample_x.append(float(np.median(x_values[selected])))
+        sample_z.append(float(np.quantile(z_values[selected], quantile)))
+
+    if len(sample_x) >= 2:
+        centered = np.asarray(sample_x) - np.mean(sample_x)
+        denominator = float(np.dot(centered, centered))
+        slope = (
+            0.0
+            if denominator < 1e-9
+            else float(
+                np.dot(centered, np.asarray(sample_z) - np.mean(sample_z))
+                / denominator
+            )
+        )
+        intercept = float(np.mean(sample_z) - slope * np.mean(sample_x))
+        profile_residuals = np.asarray(sample_z) - (
+            slope * np.asarray(sample_x) + intercept
+        )
+        profile_roughness = float(np.sqrt(np.mean(np.square(profile_residuals))))
+    else:
+        slope = 0.0
+        intercept = float(np.quantile(z_values, quantile))
+        profile_roughness = 0.0
+
+    relative_z = z_values - (slope * x_values + intercept)
+    lower_half = relative_z[relative_z <= np.quantile(relative_z, 0.50)]
+    point_roughness = float(np.std(lower_half)) if len(lower_half) else 0.0
+    roughness = max(profile_roughness, point_roughness)
+    return slope, intercept, relative_z, roughness
+
+
 def compute_terrain_features(
     xyz: np.ndarray,
     x_min: float,
@@ -66,22 +116,34 @@ def compute_terrain_features(
         return None
 
     x_values = points[:, 0].astype(np.float64)
-    z_values = points[:, 2].astype(np.float64)
-    # 分位数比最大/最小值更不容易受飞点影响。
-    ground = float(np.quantile(z_values, np.clip(ground_percentile, 0.0, 1.0)))
-    high = float(np.quantile(z_values, 0.98))
-    obstacle_height = max(0.0, high - ground)
-    # 最小二乘拟合 z = slope*x + intercept，残差均方根表示粗糙度。
-    centered_x = x_values - np.mean(x_values)
-    denominator = float(np.dot(centered_x, centered_x))
-    slope = (
-        0.0
-        if denominator < 1e-9
-        else float(np.dot(centered_x, z_values - np.mean(z_values)) / denominator)
+    slope, intercept, relative_z, roughness = fit_ground_envelope(
+        points, ground_percentile
     )
-    intercept = float(np.mean(z_values) - slope * np.mean(x_values))
-    residuals = z_values - (slope * x_values + intercept)
-    roughness = float(np.sqrt(np.mean(np.square(residuals))))
+    ground_offset = float(
+        np.quantile(relative_z, np.clip(ground_percentile, 0.02, 0.40))
+    )
+    obstacle_height = max(0.0, float(np.quantile(relative_z, 0.98) - ground_offset))
+    ground = float(slope * np.median(x_values) + intercept + ground_offset)
+    high = ground + obstacle_height
+
+    # 中央走廊比完整 ROI 更接近视觉画面中心和机器人实际落脚通道。
+    central = np.abs(points[:, 1]) <= y_half * 0.50
+    frontal_height = obstacle_height
+    if np.count_nonzero(central) >= max(5, min_points // 3):
+        frontal_height = max(
+            0.0,
+            float(np.quantile(relative_z[central], 0.98) - ground_offset),
+        )
+
+    # lookahead 表示最近成片障碍的 x 距离；稀疏单点不会决定距离。
+    height_gate = max(0.04, min(0.08, critical_height * 0.30))
+    obstacle_x = x_values[relative_z - ground_offset >= height_gate]
+    minimum_obstacle_points = max(3, int(len(points) * 0.005))
+    lookahead = (
+        float(np.quantile(obstacle_x, 0.10))
+        if len(obstacle_x) >= minimum_obstacle_points
+        else float(x_max)
+    )
     height_penalty = obstacle_height / max(critical_height, 1e-3)
     slope_penalty = abs(slope) / max(max_slope, 1e-3) * 0.35
     roughness_penalty = roughness / max(max_roughness, 1e-3) * 0.35
@@ -95,8 +157,8 @@ def compute_terrain_features(
             float(len(points)),
             slope,
             roughness,
-            obstacle_height,
-            max(0.0, x_max - x_min),
+            frontal_height,
+            float(np.clip(lookahead, x_min, x_max)),
             traversability,
         ],
         len(points),

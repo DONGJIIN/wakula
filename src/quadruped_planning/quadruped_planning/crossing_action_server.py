@@ -20,6 +20,19 @@ MODE_NAMES = {
     TraverseObstacle.Goal.CLIMB: "CLIMB",
     TraverseObstacle.Goal.LOW_PROFILE: "LOW_PROFILE",
 }
+VALID_STATUS_STATES = {
+    CrossingStatus.RUNNING,
+    CrossingStatus.SUCCEEDED,
+    CrossingStatus.FAILED,
+    CrossingStatus.CANCELED,
+}
+VALID_FEEDBACK_PHASES = {
+    CrossingStatus.ACCEPTED,
+    CrossingStatus.PREPARING,
+    CrossingStatus.EXECUTING,
+    CrossingStatus.VERIFYING_CONTACT,
+    CrossingStatus.RECOVERING,
+}
 
 
 def validate_goal_values(
@@ -45,6 +58,35 @@ def validate_goal_values(
     return True, ""
 
 
+def validate_controller_status(
+    state: int, phase: int, progress: float, previous_progress: float
+) -> Tuple[bool, str]:
+    """Reject malformed or regressing controller status updates."""
+    if state not in VALID_STATUS_STATES:
+        return False, "unknown controller state"
+    if phase not in VALID_FEEDBACK_PHASES:
+        return False, "unknown feedback phase"
+    if not math.isfinite(progress) or not 0.0 <= progress <= 1.0:
+        return False, "progress must be finite and in [0, 1]"
+    if state in (CrossingStatus.RUNNING, CrossingStatus.SUCCEEDED) and (
+        progress + 1e-6 < previous_progress
+    ):
+        return False, "progress regressed"
+    return True, ""
+
+
+def controller_success_is_valid(
+    progress: float,
+    contact_verified: bool,
+    minimum_progress: float,
+    require_contact: bool,
+) -> bool:
+    """Require explicit completion evidence before accepting controller success."""
+    return progress >= minimum_progress and (
+        contact_verified or not require_contact
+    )
+
+
 class CrossingActionServer(Node):
     """Own goal lifecycle while the hardware adapter owns leg execution."""
 
@@ -56,11 +98,22 @@ class CrossingActionServer(Node):
         self.declare_parameter("legacy_request_topic", "/crossing/action_request")
         self.declare_parameter("maximum_goal_timeout", 60.0)
         self.declare_parameter("controller_status_timeout", 1.5)
+        self.declare_parameter("minimum_success_progress", 0.95)
+        self.declare_parameter("require_contact_verification", True)
         self.maximum_goal_timeout = max(
             0.1, float(self.get_parameter("maximum_goal_timeout").value)
         )
         self.status_timeout = max(
             0.1, float(self.get_parameter("controller_status_timeout").value)
+        )
+        self.minimum_success_progress = float(
+            max(
+                0.0,
+                min(1.0, self.get_parameter("minimum_success_progress").value),
+            )
+        )
+        self.require_contact_verification = bool(
+            self.get_parameter("require_contact_verification").value
         )
 
         self.command_pub = self.create_publisher(
@@ -83,6 +136,7 @@ class CrossingActionServer(Node):
         self._active_goal_handle = None
         self._latest_status = None
         self._latest_status_time = None
+        self._last_progress = 0.0
         self._action_server = ActionServer(
             self,
             TraverseObstacle,
@@ -122,8 +176,21 @@ class CrossingActionServer(Node):
         with self._lock:
             if goal_id != self._active_goal_id:
                 return
+            valid, reason = validate_controller_status(
+                int(msg.state),
+                int(msg.phase),
+                float(msg.progress),
+                self._last_progress,
+            )
+            if not valid:
+                self.get_logger().warning(
+                    f"Ignored invalid crossing status: {reason}",
+                    throttle_duration_sec=1.0,
+                )
+                return
             self._latest_status = msg
             self._latest_status_time = time.monotonic()
+            self._last_progress = float(msg.progress)
 
     def execute_callback(self, goal_handle):
         start = time.monotonic()
@@ -133,6 +200,7 @@ class CrossingActionServer(Node):
             self._active_goal_handle = goal_handle
             self._latest_status = None
             self._latest_status_time = None
+            self._last_progress = 0.0
         try:
             self._publish_command(
                 CrossingCommand.START, goal_handle.goal_id, goal_handle.request
@@ -195,6 +263,20 @@ class CrossingActionServer(Node):
                 if status is not None:
                     goal_handle.publish_feedback(self._feedback(status, elapsed))
                     if status.state == CrossingStatus.SUCCEEDED:
+                        success_valid = controller_success_is_valid(
+                            float(status.progress),
+                            bool(status.contact_verified),
+                            self.minimum_success_progress,
+                            self.require_contact_verification,
+                        )
+                        if not success_valid:
+                            goal_handle.abort()
+                            return self._result(
+                                False,
+                                TraverseObstacle.Result.EXECUTION_FAILED,
+                                "controller success lacked progress/contact proof",
+                                elapsed,
+                            )
                         goal_handle.succeed()
                         return self._result(
                             True,
@@ -233,6 +315,7 @@ class CrossingActionServer(Node):
                     self._active_goal_handle = None
                     self._latest_status = None
                     self._latest_status_time = None
+                    self._last_progress = 0.0
                     self._goal_reserved = False
 
     def _publish_command(self, command, goal_id, request) -> None:

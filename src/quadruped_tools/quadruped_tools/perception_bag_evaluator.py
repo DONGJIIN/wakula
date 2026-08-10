@@ -4,6 +4,7 @@ import argparse
 import bisect
 import csv
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
@@ -76,12 +77,27 @@ def classification_metrics(
             "support": sum(confusion[label].values()),
         }
     count = len(expected)
+    correct = sum(actual == guess for actual, guess in zip(expected, predicted))
+    if count:
+        z_value = 1.96
+        proportion = correct / count
+        denominator = 1.0 + z_value * z_value / count
+        center = (proportion + z_value * z_value / (2.0 * count)) / denominator
+        margin = (
+            z_value
+            * math.sqrt(
+                proportion * (1.0 - proportion) / count
+                + z_value * z_value / (4.0 * count * count)
+            )
+            / denominator
+        )
+        confidence_interval = [max(0.0, center - margin), min(1.0, center + margin)]
+    else:
+        confidence_interval = [0.0, 1.0]
     return {
         "samples": count,
-        "accuracy": (
-            sum(actual == guess for actual, guess in zip(expected, predicted))
-            / max(1, count)
-        ),
+        "accuracy": correct / max(1, count),
+        "accuracy_ci95": confidence_interval,
         "macro_f1": (
             sum(item["f1"] for item in per_class.values()) / max(1, len(labels))
         ),
@@ -195,6 +211,17 @@ def optimize_terrain_thresholds(
     return best[1], best[2]
 
 
+def chronological_split(samples, validation_fraction: float):
+    """Reserve the newest samples to avoid tuning and scoring on identical data."""
+    ordered = sorted(samples, key=lambda item: item[0].stamp_ns)
+    fraction = max(0.0, min(0.5, float(validation_fraction)))
+    if len(ordered) < 4 or fraction == 0.0:
+        return ordered, []
+    validation_count = max(1, int(round(len(ordered) * fraction)))
+    validation_count = min(validation_count, len(ordered) - 2)
+    return ordered[:-validation_count], ordered[-validation_count:]
+
+
 def load_labels(path: Path) -> List[GroundTruth]:
     """Load the documented CSV label format and validate class names."""
     labels = []
@@ -287,6 +314,8 @@ def evaluate(
     vision_records: Sequence[TimedRecord],
     terrain_records: Sequence[TimedRecord],
     tolerance_s: float,
+    validation_fraction: float = 0.30,
+    minimum_samples: int = 20,
 ) -> Tuple[Dict[str, object], Dict[str, object]]:
     """Align ground truth, tune thresholds and return report plus YAML values."""
     tolerance_ns = int(max(0.0, tolerance_s) * 1e9)
@@ -317,22 +346,94 @@ def evaluate(
         "mean_alignment_ms": (
             sum(deltas) / max(1, len(deltas)) / 1e6
         ),
+        "validation_fraction": max(0.0, min(0.5, validation_fraction)),
+        "warnings": [],
     }
     suggestions = {}
     if vision_samples:
-        threshold, metrics = optimize_vision_threshold(vision_samples)
-        report["vision"] = metrics
-        suggestions["vision_min_confidence"] = threshold
-    if terrain_samples:
-        thresholds, metrics = optimize_terrain_thresholds(terrain_samples)
-        report["terrain"] = metrics
-        suggestions.update(
-            {
-                "step_threshold": thresholds[0],
-                "climb_threshold": thresholds[1],
-                "stop_threshold": thresholds[2],
+        if len(vision_samples) < minimum_samples:
+            report["warnings"].append(
+                f"vision has {len(vision_samples)} samples; need {minimum_samples} "
+                "before accepting calibrated parameters"
+            )
+            expected = [label for _, label in vision_samples]
+            predicted = [vision_prediction(record, 0.55) for record, _ in vision_samples]
+            report["vision"] = {
+                "status": "insufficient_samples",
+                "baseline_threshold": 0.55,
+                "all_samples": classification_metrics(expected, predicted),
             }
-        )
+        else:
+            training, validation = chronological_split(
+                vision_samples, validation_fraction
+            )
+            threshold, training_metrics = optimize_vision_threshold(training)
+            vision_report = {
+                "status": "calibrated",
+                "selected_threshold": threshold,
+                "training": training_metrics,
+            }
+            if validation:
+                expected = [label for _, label in validation]
+                predicted = [
+                    vision_prediction(record, threshold) for record, _ in validation
+                ]
+                vision_report["validation"] = classification_metrics(
+                    expected, predicted
+                )
+            else:
+                report["warnings"].append(
+                    "vision validation holdout unavailable; collect more samples"
+                )
+            report["vision"] = vision_report
+            suggestions["vision_min_confidence"] = threshold
+    if terrain_samples:
+        if len(terrain_samples) < minimum_samples:
+            report["warnings"].append(
+                f"terrain has {len(terrain_samples)} samples; need {minimum_samples} "
+                "before accepting calibrated parameters"
+            )
+            expected = [label for _, label in terrain_samples]
+            predicted = [
+                terrain_prediction(record, 0.08, 0.18, 0.32)
+                for record, _ in terrain_samples
+            ]
+            report["terrain"] = {
+                "status": "insufficient_samples",
+                "baseline_thresholds": [0.08, 0.18, 0.32],
+                "all_samples": classification_metrics(expected, predicted),
+            }
+        else:
+            training, validation = chronological_split(
+                terrain_samples, validation_fraction
+            )
+            thresholds, training_metrics = optimize_terrain_thresholds(training)
+            terrain_report = {
+                "status": "calibrated",
+                "selected_thresholds": list(thresholds),
+                "training": training_metrics,
+            }
+            if validation:
+                expected = [label for _, label in validation]
+                predicted = [
+                    terrain_prediction(record, *thresholds)
+                    for record, _ in validation
+                ]
+                terrain_report["validation"] = classification_metrics(
+                    expected, predicted
+                )
+            else:
+                report["warnings"].append(
+                    "terrain validation holdout unavailable; collect more samples"
+                )
+            report["terrain"] = terrain_report
+            suggestions.update(
+                {
+                    "step_threshold": thresholds[0],
+                    "climb_threshold": thresholds[1],
+                    "stop_threshold": thresholds[2],
+                }
+            )
     if not vision_samples and not terrain_samples:
         raise ValueError("no labels matched bag records within tolerance")
     return report, suggestions
@@ -353,6 +454,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--terrain-topic", default="/terrain/features")
     parser.add_argument("--tolerance", type=float, default=0.15)
     parser.add_argument("--sample-period", type=float, default=0.5)
+    parser.add_argument("--validation-fraction", type=float, default=0.30)
+    parser.add_argument("--minimum-samples", type=int, default=20)
     return parser
 
 
@@ -377,6 +480,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         vision_records,
         terrain_records,
         args.tolerance,
+        args.validation_fraction,
+        max(1, args.minimum_samples),
     )
     args.report.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

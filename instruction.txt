@@ -187,11 +187,12 @@ Canny，最后用 rosbag 中的真阳性和误检片段调整时序阈值。一�
 2. 裁剪机器人前方 ROI：默认 x=0.10～1.50 m，左右各 0.45 m。
 3. 删除 NaN、无穷值和 ROI 外的点。
 4. 点数过多时使用等间隔索引降采样，保证每帧计算量有上限。
-5. z 值的低分位数作为地面高度，高分位数作为障碍顶部高度。
-6. 障碍高度 = 顶部高度 - 地面高度。
-7. 使用最小二乘拟合 z = slope*x + intercept，slope 表示纵向坡度。
-8. 拟合残差的均方根表示地面粗糙度。
-9. 综合高度、坡度和粗糙度计算 0～1 的可通行度。
+5. 沿 x 方向分为 12 个区间，在每个区间取低 z 分位数形成地面包络。
+6. 对地面包络拟合 z = slope*x + intercept，避免台阶/墙面把地面坡度拉偏。
+7. 每个点减去对应位置的拟合地面，使用相对高度高分位数估计障碍高度。
+8. 中央半宽通道单独计算 frontal_obstacle_height；成片高点的近端分位数作为 lookahead。
+9. 地面包络残差和下半部点云离散度共同估计粗糙度。
+10. 综合高度、坡度和粗糙度计算 0～1 的可通行度。
 
 采用分位数而不是绝对最小值和最大值，是为了减少深度飞点对高度结果的影响。
 
@@ -225,6 +226,9 @@ Canny，最后用 rosbag 中的真阳性和误检片段调整时序阈值。一�
 坡度和粗糙度也可能让决策升级。配置必须满足 STEP < CLIMB < STOP；如果用户配置
 了负数、非有限值或顺序错误，程序会恢复安全默认值并给出警告。
 
+模式使用非对称防抖：风险升高立即切换；风险降低默认必须连续
+clear_confirmation_frames=3 帧一致才恢复。传感器无效或超时仍立即 STOP。
+
 点云数据少于 min_points、包含非法数值或超过 sensor_timeout 没有更新时，一律
 STOP。该原则是“没有看到地形不等于地形安全”。
 
@@ -234,6 +238,7 @@ STOP。该原则是“没有看到地形不等于地形安全”。
 2. 置信度不低于 vision_min_confidence。
 3. 障碍中心位于画面中部行进区域。
 4. 证据没有超过 vision_timeout。
+5. confidence、center、width、height 全部位于合法归一化范围。
 
 若点云判断 WALK，但视觉满足以上条件，动作变为
 VERIFY_VISUAL_OBSTACLE_WITH_DEPTH，速度降到 vision_speed_scale。若点云已经判断
@@ -256,9 +261,11 @@ UUID 的 /crossing/execution_status 返回。取消、Goal 超时或状态心跳
 
 1. 从 rosbag 读取 /vision/obstacle_evidence 和 /terrain/features。
 2. 按固定采样周期生成 labels.csv，人工填写视觉和地形真值。
-3. 按时间戳在容差内匹配记录，分别计算混淆矩阵、accuracy、macro-F1、precision 和 recall。
-4. 网格搜索 vision_min_confidence 与 step/climb/stop_threshold。
-5. 输出 JSON 报告和独立 YAML 建议，不直接修改正式参数。
+3. 按时间戳在容差内匹配记录，分别计算混淆矩阵、accuracy、95% 区间、macro-F1、
+   precision 和 recall。
+4. 样本达到默认 20 个后，按时间将较早 70% 用于调参，最新 30% 独立验证。
+5. 只在训练部分搜索 vision_min_confidence 与 step/climb/stop_threshold。
+6. 输出 JSON 报告和独立 YAML 建议，不直接修改正式参数。
 
 命令：
 

@@ -7,6 +7,8 @@ obstacle_crossing_manager:
     max_roughness: 0.06
     min_points: 30
     sensor_timeout: 0.7
+    # Escalate immediately; require this many valid frames before moving safer.
+    clear_confirmation_frames: 3
     # Vision may only slow navigation and request depth confirmation. Geometry
     # remains the authority for STEP/CLIMB/STOP decisions.
     vision_assist_enabled: true
@@ -22,6 +24,8 @@ crossing_action_server:
     legacy_request_topic: /crossing/action_request
     maximum_goal_timeout: 60.0
     controller_status_timeout: 1.5
+    minimum_success_progress: 0.95
+    require_contact_verification: true
 cmd_vel_gate:
   ros__parameters:
     input_topic: /cmd_vel_smoothed

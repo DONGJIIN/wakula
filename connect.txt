@@ -256,10 +256,10 @@ TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
   data[1] high_z                   高分位顶部高度，米
   data[2] obstacle_height          障碍相对高度，米
   data[3] valid_points             ROI 有效点数
-  data[4] slope                    z 对 x 的拟合斜率
-  data[5] roughness                拟合残差均方根，米
-  data[6] frontal_obstacle_height  前方障碍高度，当前与 data[2] 相同
-  data[7] lookahead                ROI 前后长度，米
+  data[4] slope                    低分位地面包络对 x 的拟合斜率
+  data[5] roughness                地面包络和低层点离散度，米
+  data[6] frontal_obstacle_height  中央半宽通道的相对障碍高度，米
+  data[7] lookahead                最近成片高点的 x 距离；未发现时为 ROI x_max
   data[8] traversability           0.0～1.0，可通行度
 失效行为：点数不足时不发布新特征，并通过 /diagnostics 报警；决策节点超时后 STOP。
 
@@ -477,6 +477,8 @@ Result：success、error_code、message、duration。error_code：0=OK、1=INVAL
       progress、contact_verified、message。
 要求：goal_id 必须原样返回；运行期间应以高于 1/controller_status_timeout 的频率更新。
 默认超过 1.5 秒没有同 UUID 状态即取消后端命令并中止 Goal。
+严谨性：RUNNING/SUCCEEDED 进度不得倒退；state、phase、progress 非法的状态不会刷新心跳。
+默认 SUCCEEDED 还要求 progress>=0.95 且 contact_verified=true，否则返回 EXECUTION_FAILED。
 
 兼容名称：/crossing/action_request，std_msgs/msg/String。它只给旧 SDK 显示 STEP/CLIMB/
 LOW_PROFILE，不携带结果，不能作为新控制器的完成判据。
