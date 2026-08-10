@@ -17,7 +17,7 @@ setup(
     zip_safe=True,
     maintainer="Quadruped Developer",
     maintainer_email="developer@example.com",
-    description="Terrain perception nodes for autonomous obstacle crossing.",
+    description="Lightweight camera and point-cloud terrain perception.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
@@ -25,6 +25,7 @@ setup(
             "terrain_analyzer = quadruped_perception.terrain_analyzer:main",
             "vision_obstacle_detector = "
             "quadruped_perception.vision_obstacle_detector:main",
+            "perception_fusion = quadruped_perception.perception_fusion:main",
         ],
     },
 )

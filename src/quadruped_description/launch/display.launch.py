@@ -39,12 +39,6 @@ def generate_launch_description():
                 output="screen",
             ),
             Node(
-                package="joint_state_publisher_gui",
-                executable="joint_state_publisher_gui",
-                parameters=[{"robot_description": robot_description}],
-                output="screen",
-            ),
-            Node(
                 package="rviz2",
                 executable="rviz2",
                 arguments=["-d", rviz_config],

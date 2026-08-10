@@ -10,6 +10,7 @@
 ``dz/dx``（即坡角正切值），而不是角度。消息字段合同见根目录 ``connect.txt``。
 """
 
+import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -22,9 +23,11 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Header
 from tf2_ros import Buffer, TransformException, TransformListener
-from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
+
+from quadruped_interfaces.msg import TerrainFeatures
+from quadruped_perception.terrain_geometry import analyze_terrain_geometry
 
 from quadruped_perception.topic_selection import should_accept_source
 
@@ -41,13 +44,62 @@ FEATURE_ROUGHNESS = 5
 FEATURE_FRONTAL_HEIGHT = 6
 FEATURE_LOOKAHEAD = 7
 FEATURE_TRAVERSABILITY = 8
-FEATURE_COUNT = 9
+FEATURE_PIT_DEPTH = 9
+FEATURE_SLOPE_ROLL = 10
+FEATURE_OBSTACLE_TYPE = 11
+FEATURE_CONFIDENCE = 12
+FEATURE_WIDTH = 13
+FEATURE_CLEARANCE_HEIGHT = 14
+FEATURE_COUNT = 15
 DEFAULT_POINT_CLOUD_TOPICS = [
     "/camera/depth/points",
     "/camera/depth/color/points",
     "/camera/points",
     "/points",
 ]
+
+
+def transform_xyz(xyz: np.ndarray, translation, quaternion) -> np.ndarray:
+    """Transform only XYZ while accepting arbitrary extra PointCloud2 fields.
+
+    Several RGB-D drivers append packed RGB, intensity, ring or padding fields.
+    Rebuilding the complete structured record through ``tf2_sensor_msgs`` can
+    fail when those fields have vendor-specific alignment.  Terrain analysis
+    needs XYZ only, so this bounded NumPy transform deliberately decouples
+    geometry from unrelated fields.
+    """
+    points = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+    # GPU depth sensors use +/-Inf for pixels without a return; discard them
+    # before matrix multiplication to avoid warnings and needless CPU work.
+    points = points[np.isfinite(points).all(axis=1)]
+    tx, ty, tz = (float(value) for value in translation)
+    qx, qy, qz, qw = (float(value) for value in quaternion)
+    values = (tx, ty, tz, qx, qy, qz, qw)
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if not all(np.isfinite(value) for value in values) or norm < 1e-9:
+        raise ValueError("point-cloud transform is non-finite or degenerate")
+    qx, qy, qz, qw = (value / norm for value in (qx, qy, qz, qw))
+    rotation = np.asarray(
+        [
+            [
+                1 - 2 * (qy * qy + qz * qz),
+                2 * (qx * qy - qz * qw),
+                2 * (qx * qz + qy * qw),
+            ],
+            [
+                2 * (qx * qy + qz * qw),
+                1 - 2 * (qx * qx + qz * qz),
+                2 * (qy * qz - qx * qw),
+            ],
+            [
+                2 * (qx * qz - qy * qw),
+                2 * (qy * qz + qx * qw),
+                1 - 2 * (qx * qx + qy * qy),
+            ],
+        ],
+        dtype=np.float64,
+    )
+    return (points @ rotation.T + np.asarray((tx, ty, tz))).astype(np.float32)
 
 
 def filter_roi_points(
@@ -229,6 +281,10 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_valid_points", 30)
         self.declare_parameter("source_switch_timeout", 2.0)
+        self.declare_parameter("grid_cell_size", 0.05)
+        self.declare_parameter("ground_height_bin", 0.03)
+        self.declare_parameter("pit_depth_threshold", 0.08)
+        self.declare_parameter("wall_height_threshold", 0.25)
 
         override_topic = str(self.get_parameter("input_topic").value)
         candidates = list(self.get_parameter("input_topic_candidates").value)
@@ -263,6 +319,18 @@ class TerrainAnalyzer(Node):
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
         )
+        self.grid_cell_size = max(
+            0.02, float(self.get_parameter("grid_cell_size").value)
+        )
+        self.ground_height_bin = max(
+            0.01, float(self.get_parameter("ground_height_bin").value)
+        )
+        self.pit_depth_threshold = max(
+            0.03, float(self.get_parameter("pit_depth_threshold").value)
+        )
+        self.wall_height_threshold = max(
+            0.10, float(self.get_parameter("wall_height_threshold").value)
+        )
         if self.x_max <= self.x_min:
             self.get_logger().warning(
                 "front_x_max must exceed front_x_min; using a 0.10 m ROI"
@@ -277,6 +345,9 @@ class TerrainAnalyzer(Node):
         self.last_active_cloud_time = None
         self.features_pub = self.create_publisher(
             Float32MultiArray, "/terrain/features", 10
+        )
+        self.typed_features_pub = self.create_publisher(
+            TerrainFeatures, "/terrain/features_stamped", 10
         )
         self.obstacle_cloud_pub = self.create_publisher(
             PointCloud2, "/perception/obstacle_points", qos_profile_sensor_data
@@ -334,16 +405,10 @@ class TerrainAnalyzer(Node):
         if stamp == self.last_processed_stamp:
             return
         self.last_processed_stamp = stamp
-        cloud = self._to_target_frame(msg)
-        if cloud is None:
+        transformed = self._xyz_in_target_frame(msg)
+        if transformed is None:
             return
-        try:
-            xyz = point_cloud2.read_points_numpy(
-                cloud, field_names=["x", "y", "z"], skip_nans=True
-            )
-        except (AssertionError, ValueError) as exc:
-            self.get_logger().warning(f"Invalid PointCloud2 layout: {exc}")
-            return
+        header, xyz = transformed
         # 同一份已转换点云同时供 Nav2 标障和越障几何计算，避免重复 TF。
         nav2_points = filter_roi_points(
             xyz,
@@ -353,7 +418,7 @@ class TerrainAnalyzer(Node):
             self.nav2_cloud_max_points,
         )
         self.obstacle_cloud_pub.publish(
-            point_cloud2.create_cloud_xyz32(cloud.header, nav2_points.tolist())
+            point_cloud2.create_cloud_xyz32(header, nav2_points.tolist())
         )
         result = compute_terrain_features(
             xyz,
@@ -376,7 +441,40 @@ class TerrainAnalyzer(Node):
             )
             return
         features, valid_points = result
+        geometry = analyze_terrain_geometry(
+            nav2_points,
+            cell_size=self.grid_cell_size,
+            ground_bin_size=self.ground_height_bin,
+            step_height=self.warning_height,
+            pit_depth=self.pit_depth_threshold,
+            wall_height=self.wall_height_threshold,
+            min_cells=max(8, self.min_points // 3),
+        )
+        if geometry.valid:
+            # 旧九字段继续由原算法提供，扩展字段和强类型话题承载新几何合同。
+            features[FEATURE_PIT_DEPTH] = geometry.pit_depth
+            features[FEATURE_SLOPE_ROLL] = geometry.slope_roll
+            features[FEATURE_OBSTACLE_TYPE] = float(geometry.obstacle_type)
+            features[FEATURE_CONFIDENCE] = geometry.confidence
+            features[FEATURE_WIDTH] = geometry.width
+            features[FEATURE_CLEARANCE_HEIGHT] = geometry.clearance_height
         self.features_pub.publish(Float32MultiArray(data=features))
+        typed = TerrainFeatures()
+        typed.header = header
+        typed.valid = bool(geometry.valid)
+        typed.obstacle_type = int(geometry.obstacle_type)
+        typed.confidence = float(geometry.confidence)
+        typed.ground_height = float(geometry.ground_height)
+        typed.obstacle_height = float(features[FEATURE_FRONTAL_HEIGHT])
+        typed.pit_depth = float(geometry.pit_depth)
+        typed.slope_pitch = float(geometry.slope_pitch)
+        typed.slope_roll = float(geometry.slope_roll)
+        typed.roughness = float(max(features[FEATURE_ROUGHNESS], geometry.roughness))
+        typed.distance = float(features[FEATURE_LOOKAHEAD])
+        typed.width = float(geometry.width)
+        typed.clearance_height = float(geometry.clearance_height)
+        typed.valid_points = int(valid_points)
+        self.typed_features_pub.publish(typed)
         obstacle_height = features[FEATURE_OBSTACLE_HEIGHT]
         slope = features[FEATURE_GROUND_SLOPE]
         roughness = features[FEATURE_ROUGHNESS]
@@ -397,10 +495,17 @@ class TerrainAnalyzer(Node):
             },
         )
 
-    def _to_target_frame(self, msg: PointCloud2) -> Optional[PointCloud2]:
-        """按消息采集时刻查询 TF，禁止用最新 TF 掩盖时间不同步问题。"""
+    def _xyz_in_target_frame(self, msg: PointCloud2):
+        """读取 XYZ 并按采样时刻变换，忽略不相关的厂商扩展字段。"""
+        try:
+            xyz = point_cloud2.read_points_numpy(
+                msg, field_names=["x", "y", "z"], skip_nans=True
+            )
+        except (AssertionError, ValueError) as exc:
+            self.get_logger().warning(f"Invalid PointCloud2 XYZ layout: {exc}")
+            return None
         if not self.target_frame or msg.header.frame_id == self.target_frame:
-            return msg
+            return msg.header, np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.target_frame,
@@ -408,13 +513,26 @@ class TerrainAnalyzer(Node):
                 Time.from_msg(msg.header.stamp),
                 timeout=Duration(seconds=self.transform_timeout),
             )
-            return do_transform_cloud(msg, transform)
+            translation = transform.transform.translation
+            rotation = transform.transform.rotation
+            transformed = transform_xyz(
+                xyz,
+                (translation.x, translation.y, translation.z),
+                (rotation.x, rotation.y, rotation.z, rotation.w),
+            )
+            header = Header()
+            header.stamp = msg.header.stamp
+            header.frame_id = self.target_frame
+            return header, transformed
         except TransformException as exc:
             self.get_logger().warning(
                 f"Waiting for point-cloud TF {msg.header.frame_id} -> "
                 f"{self.target_frame}: {exc}",
                 throttle_duration_sec=2.0,
             )
+            return None
+        except ValueError as exc:
+            self.get_logger().warning(f"Invalid point-cloud transform: {exc}")
             return None
 
     def _publish_diagnostic(

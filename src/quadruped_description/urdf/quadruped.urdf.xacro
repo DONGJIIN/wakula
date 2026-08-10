@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="wakula_quadruped">
-  <!-- Generic 12-DOF quadruped model for RViz and ros2_control debugging.
-       Replace these dimensions and inertias with measured hardware values before deployment. -->
+  <!-- 仅用于 RViz 外形预览和传感器 TF 占位；尺寸、惯量与关节范围均未真机标定。
+       本文件不包含 ros2_control、驱动插件、运动学或动力学控制实现。 -->
   <xacro:property name="body_length" value="0.52"/>
   <xacro:property name="body_width" value="0.24"/>
   <xacro:property name="body_height" value="0.12"/>
@@ -176,26 +176,4 @@
     <origin rpy="${-pi/2} 0 ${-pi/2}"/>
   </joint>
 
-  <ros2_control name="QuadrupedSystem" type="system">
-    <hardware><plugin>mock_components/GenericSystem</plugin></hardware>
-    <xacro:macro name="controlled_joint" params="name initial:=0.0">
-      <joint name="${name}">
-        <command_interface name="position"/>
-        <state_interface name="position"><param name="initial_value">${initial}</param></state_interface>
-        <state_interface name="velocity"/>
-      </joint>
-    </xacro:macro>
-    <xacro:controlled_joint name="front_left_hip_joint"/>
-    <xacro:controlled_joint name="front_left_thigh_joint" initial="0.55"/>
-    <xacro:controlled_joint name="front_left_calf_joint" initial="-1.10"/>
-    <xacro:controlled_joint name="front_right_hip_joint"/>
-    <xacro:controlled_joint name="front_right_thigh_joint" initial="0.55"/>
-    <xacro:controlled_joint name="front_right_calf_joint" initial="-1.10"/>
-    <xacro:controlled_joint name="rear_left_hip_joint"/>
-    <xacro:controlled_joint name="rear_left_thigh_joint" initial="0.55"/>
-    <xacro:controlled_joint name="rear_left_calf_joint" initial="-1.10"/>
-    <xacro:controlled_joint name="rear_right_hip_joint"/>
-    <xacro:controlled_joint name="rear_right_thigh_joint" initial="0.55"/>
-    <xacro:controlled_joint name="rear_right_calf_joint" initial="-1.10"/>
-  </ros2_control>
 </robot>

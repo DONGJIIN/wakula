@@ -2,7 +2,7 @@
 <package format="3">
   <name>quadruped_perception</name>
   <version>0.1.0</version>
-  <description>Terrain perception nodes for autonomous obstacle crossing.</description>
+  <description>Lightweight camera and point-cloud terrain perception.</description>
   <maintainer email="developer@example.com">Quadruped Developer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
@@ -14,6 +14,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>sensor_msgs_py</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <depend>quadruped_interfaces</depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf2_sensor_msgs</exec_depend>
   <test_depend>ament_flake8</test_depend>
