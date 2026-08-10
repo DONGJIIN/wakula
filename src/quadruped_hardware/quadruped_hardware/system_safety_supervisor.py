@@ -18,6 +18,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, Imu, JointState
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
+from quadruped_interfaces.msg import HardwareStatus
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,8 @@ class SafetyLimits:
     require_imu: bool = False
     require_joint_states: bool = False
     require_battery: bool = False
+    max_abs_joint_position: float = 6.4
+    require_hardware_status: bool = False
 
 
 def quaternion_to_roll_pitch(x: float, y: float, z: float, w: float):
@@ -72,6 +75,18 @@ def joint_state_is_valid(names, position, velocity, effort) -> bool:
         if not all(finite) and not all_nan:
             return False
     return True
+
+
+def joint_positions_within_limit(position, maximum_absolute: float) -> bool:
+    """通用末级关节保护；精确的逐关节限位仍由 ros2_control 配置负责。"""
+    return (
+        math.isfinite(maximum_absolute)
+        and maximum_absolute > 0.0
+        and all(
+            math.isfinite(float(value)) and abs(float(value)) <= maximum_absolute
+            for value in position
+        )
+    )
 
 
 def evaluate_safety(
@@ -140,6 +155,8 @@ class SystemSafetySupervisor(Node):
         self.declare_parameter("require_imu", False)
         self.declare_parameter("require_joint_states", False)
         self.declare_parameter("require_battery", False)
+        self.declare_parameter("max_abs_joint_position", 6.4)
+        self.declare_parameter("require_hardware_status", False)
         self.limits = SafetyLimits(
             max_roll=max(0.05, float(self.get_parameter("max_roll").value)),
             max_pitch=max(0.05, float(self.get_parameter("max_pitch").value)),
@@ -155,6 +172,12 @@ class SystemSafetySupervisor(Node):
                 self.get_parameter("require_joint_states").value
             ),
             require_battery=bool(self.get_parameter("require_battery").value),
+            max_abs_joint_position=max(
+                0.1, float(self.get_parameter("max_abs_joint_position").value)
+            ),
+            require_hardware_status=bool(
+                self.get_parameter("require_hardware_status").value
+            ),
         )
 
         self.emergency_stop = False
@@ -163,6 +186,8 @@ class SystemSafetySupervisor(Node):
         self.battery_voltage = None
         self.last_times = [None, None, None]
         self.last_state = None
+        self.hardware_status_ok = None
+        self.last_hardware_time = None
 
         safety_qos = QoSProfile(
             depth=1,
@@ -184,6 +209,9 @@ class SystemSafetySupervisor(Node):
         self.create_subscription(
             Bool, "/safety/emergency_stop", self.estop_callback, 10
         )
+        self.create_subscription(
+            HardwareStatus, "/hardware/status", self.hardware_callback, 10
+        )
         self.create_service(
             SetBool, "/safety/set_emergency_stop", self.estop_service
         )
@@ -201,6 +229,8 @@ class SystemSafetySupervisor(Node):
     def joint_callback(self, msg: JointState) -> None:
         self.joint_values_valid = joint_state_is_valid(
             msg.name, msg.position, msg.velocity, msg.effort
+        ) and joint_positions_within_limit(
+            msg.position, self.limits.max_abs_joint_position
         )
         self.last_times[1] = self.get_clock().now()
 
@@ -210,6 +240,15 @@ class SystemSafetySupervisor(Node):
 
     def estop_callback(self, msg: Bool) -> None:
         self.emergency_stop = bool(msg.data)
+
+    def hardware_callback(self, msg: HardwareStatus) -> None:
+        """硬件 FAULT、断连或非零故障码均禁止运动。"""
+        self.hardware_status_ok = (
+            msg.state in (HardwareStatus.STANDBY, HardwareStatus.ENABLED)
+            and bool(msg.command_ready)
+            and int(msg.fault_code) == 0
+        )
+        self.last_hardware_time = self.get_clock().now()
 
     def estop_service(self, request, response):
         """提供无需硬件的故障注入入口；真机急停仍应有独立硬件回路。"""
@@ -233,6 +272,20 @@ class SystemSafetySupervisor(Node):
             ages,
             self.limits,
         )
+        reasons = list(reasons)
+        hardware_age = (
+            None
+            if self.last_hardware_time is None
+            else (now - self.last_hardware_time).nanoseconds / 1e9
+        )
+        if self.hardware_status_ok is False:
+            reasons.append("hardware_fault")
+        elif self.hardware_status_ok is None and self.limits.require_hardware_status:
+            reasons.append("missing_hardware_status")
+        if hardware_age is not None and hardware_age > self.limits.sensor_timeout:
+            reasons.append("stale_hardware_status")
+        reasons = tuple(dict.fromkeys(reasons))
+        stop = bool(reasons)
         state = "STOP:" + ",".join(reasons) if stop else "OK"
         self.stop_pub.publish(Bool(data=stop))
         self.state_pub.publish(String(data=state))

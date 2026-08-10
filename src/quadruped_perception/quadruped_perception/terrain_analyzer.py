@@ -26,6 +26,9 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Float32MultiArray, Header
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from quadruped_interfaces.msg import TerrainFeatures
+from quadruped_perception.terrain_geometry import analyze_terrain_geometry
+
 from quadruped_perception.topic_selection import should_accept_source
 
 
@@ -41,7 +44,13 @@ FEATURE_ROUGHNESS = 5
 FEATURE_FRONTAL_HEIGHT = 6
 FEATURE_LOOKAHEAD = 7
 FEATURE_TRAVERSABILITY = 8
-FEATURE_COUNT = 9
+FEATURE_PIT_DEPTH = 9
+FEATURE_SLOPE_ROLL = 10
+FEATURE_OBSTACLE_TYPE = 11
+FEATURE_CONFIDENCE = 12
+FEATURE_WIDTH = 13
+FEATURE_CLEARANCE_HEIGHT = 14
+FEATURE_COUNT = 15
 DEFAULT_POINT_CLOUD_TOPICS = [
     "/camera/depth/points",
     "/camera/depth/color/points",
@@ -272,6 +281,10 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_valid_points", 30)
         self.declare_parameter("source_switch_timeout", 2.0)
+        self.declare_parameter("grid_cell_size", 0.05)
+        self.declare_parameter("ground_height_bin", 0.03)
+        self.declare_parameter("pit_depth_threshold", 0.08)
+        self.declare_parameter("wall_height_threshold", 0.25)
 
         override_topic = str(self.get_parameter("input_topic").value)
         candidates = list(self.get_parameter("input_topic_candidates").value)
@@ -306,6 +319,18 @@ class TerrainAnalyzer(Node):
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
         )
+        self.grid_cell_size = max(
+            0.02, float(self.get_parameter("grid_cell_size").value)
+        )
+        self.ground_height_bin = max(
+            0.01, float(self.get_parameter("ground_height_bin").value)
+        )
+        self.pit_depth_threshold = max(
+            0.03, float(self.get_parameter("pit_depth_threshold").value)
+        )
+        self.wall_height_threshold = max(
+            0.10, float(self.get_parameter("wall_height_threshold").value)
+        )
         if self.x_max <= self.x_min:
             self.get_logger().warning(
                 "front_x_max must exceed front_x_min; using a 0.10 m ROI"
@@ -320,6 +345,9 @@ class TerrainAnalyzer(Node):
         self.last_active_cloud_time = None
         self.features_pub = self.create_publisher(
             Float32MultiArray, "/terrain/features", 10
+        )
+        self.typed_features_pub = self.create_publisher(
+            TerrainFeatures, "/terrain/features_stamped", 10
         )
         self.obstacle_cloud_pub = self.create_publisher(
             PointCloud2, "/perception/obstacle_points", qos_profile_sensor_data
@@ -413,7 +441,40 @@ class TerrainAnalyzer(Node):
             )
             return
         features, valid_points = result
+        geometry = analyze_terrain_geometry(
+            nav2_points,
+            cell_size=self.grid_cell_size,
+            ground_bin_size=self.ground_height_bin,
+            step_height=self.warning_height,
+            pit_depth=self.pit_depth_threshold,
+            wall_height=self.wall_height_threshold,
+            min_cells=max(8, self.min_points // 3),
+        )
+        if geometry.valid:
+            # 旧九字段继续由原算法提供，扩展字段和强类型话题承载新几何合同。
+            features[FEATURE_PIT_DEPTH] = geometry.pit_depth
+            features[FEATURE_SLOPE_ROLL] = geometry.slope_roll
+            features[FEATURE_OBSTACLE_TYPE] = float(geometry.obstacle_type)
+            features[FEATURE_CONFIDENCE] = geometry.confidence
+            features[FEATURE_WIDTH] = geometry.width
+            features[FEATURE_CLEARANCE_HEIGHT] = geometry.clearance_height
         self.features_pub.publish(Float32MultiArray(data=features))
+        typed = TerrainFeatures()
+        typed.header = header
+        typed.valid = bool(geometry.valid)
+        typed.obstacle_type = int(geometry.obstacle_type)
+        typed.confidence = float(geometry.confidence)
+        typed.ground_height = float(geometry.ground_height)
+        typed.obstacle_height = float(features[FEATURE_FRONTAL_HEIGHT])
+        typed.pit_depth = float(geometry.pit_depth)
+        typed.slope_pitch = float(geometry.slope_pitch)
+        typed.slope_roll = float(geometry.slope_roll)
+        typed.roughness = float(max(features[FEATURE_ROUGHNESS], geometry.roughness))
+        typed.distance = float(features[FEATURE_LOOKAHEAD])
+        typed.width = float(geometry.width)
+        typed.clearance_height = float(geometry.clearance_height)
+        typed.valid_points = int(valid_points)
+        self.typed_features_pub.publish(typed)
         obstacle_height = features[FEATURE_OBSTACLE_HEIGHT]
         slope = features[FEATURE_GROUND_SLOPE]
         roughness = features[FEATURE_ROUGHNESS]

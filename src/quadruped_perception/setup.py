@@ -25,6 +25,7 @@ setup(
             "terrain_analyzer = quadruped_perception.terrain_analyzer:main",
             "vision_obstacle_detector = "
             "quadruped_perception.vision_obstacle_detector:main",
+            "perception_fusion = quadruped_perception.perception_fusion:main",
         ],
     },
 )

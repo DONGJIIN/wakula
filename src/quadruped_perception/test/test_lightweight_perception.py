@@ -8,6 +8,11 @@ from quadruped_perception.terrain_analyzer import (
     compute_terrain_features,
     transform_xyz,
 )
+from quadruped_perception.terrain_geometry import (
+    PIT,
+    WALL,
+    analyze_terrain_geometry,
+)
 from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
     ObstacleEvidence,
@@ -185,3 +190,46 @@ def test_xyz_transform_handles_rotation_translation_and_invalid_quaternion():
     )
     with pytest.raises(ValueError, match="degenerate"):
         transform_xyz(points, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0))
+
+
+def _dense_floor(z=0.0):
+    """每个栅格给多个回波，模拟有组织深度点云。"""
+    rows = []
+    for x in np.arange(0.1, 1.31, 0.05):
+        for y in np.arange(-0.4, 0.41, 0.05):
+            rows.extend(((x, y, z - 0.001), (x, y, z + 0.001)))
+    return np.asarray(rows, dtype=np.float64)
+
+
+def test_grid_ground_segmentation_detects_wall_without_biasing_plane():
+    floor = _dense_floor()
+    wall = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in np.arange(-0.30, 0.31, 0.04)
+            for z in np.arange(0.0, 0.36, 0.03)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, wall)))
+    assert result.valid
+    assert result.obstacle_type == WALL
+    # 稳健 98% 分位不会追随最高单点，允许少量保守低估。
+    assert result.obstacle_height >= 0.28
+    assert abs(result.slope_pitch) < 0.03
+
+
+def test_grid_ground_segmentation_requires_real_low_returns_for_pit():
+    floor = _dense_floor()
+    pit = np.asarray(
+        [
+            (x, y, -0.16 + noise)
+            for x in np.arange(0.55, 0.76, 0.04)
+            for y in np.arange(-0.15, 0.16, 0.04)
+            for noise in (-0.002, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, pit)))
+    assert result.valid
+    assert result.obstacle_type == PIT
+    assert result.pit_depth >= 0.12

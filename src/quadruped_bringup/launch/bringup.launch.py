@@ -204,6 +204,13 @@ def generate_launch_description():
                 condition=IfCondition(vision),
             ),
             Node(
+                package="quadruped_perception",
+                executable="perception_fusion",
+                output="screen",
+                parameters=[common_time],
+                condition=IfCondition(vision),
+            ),
+            Node(
                 package="quadruped_planning",
                 executable="obstacle_crossing_manager",
                 output="screen",
@@ -233,6 +240,13 @@ def generate_launch_description():
             Node(
                 package="quadruped_hardware",
                 executable="mock_sdk_adapter",
+                output="screen",
+                parameters=[hardware_params_file, common_time],
+                condition=IfCondition(mock_hardware),
+            ),
+            Node(
+                package="quadruped_hardware",
+                executable="mock_hardware_state",
                 output="screen",
                 parameters=[hardware_params_file, common_time],
                 condition=IfCondition(mock_hardware),

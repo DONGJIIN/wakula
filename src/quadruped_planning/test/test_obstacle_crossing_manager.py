@@ -13,10 +13,12 @@ from quadruped_planning.crossing_action_server import (
 )
 from quadruped_planning.crossing_action_coordinator import (
     CrossingTriggerLatch,
+    select_goal_mode,
     valid_terrain_observation,
 )
 from quadruped_planning.obstacle_crossing_manager import (
     ConservativeDecisionFilter,
+    apply_geometry_classification,
     apply_visual_assist,
     select_terrain_decision,
     validate_height_thresholds,
@@ -67,6 +69,9 @@ def test_geometry_owns_crossing_mode():
     assert decide(height=0.20)[0] == "CLIMB"
     assert decide(height=0.35)[0] == "STOP"
     assert decide(slope=-0.50)[0] == "CLIMB"
+    assert apply_geometry_classification(decide(), 3, 0.12)[0] == "STOP"
+    assert apply_geometry_classification(decide(), 5, 0.0)[1] == "CROSS_LOW_PROFILE"
+    assert select_goal_mode("CLIMB", 5, "CROSS_LOW_PROFILE") == 3
 
 
 def test_visual_target_requires_confidence_and_center():

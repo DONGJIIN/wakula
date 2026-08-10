@@ -34,8 +34,6 @@ Wakula 后续开发快速上手指南
   PointCloud2               高度、坡度、粗糙度和近场立体障碍
   obstacle crossing manager 越障模式与速度倍率决策
   Collision Monitor         最终速度碰撞保护
-  解析 FK/IK + 基础步态     低速关节轨迹与越障执行基线
-  Gazebo Harmonic           无硬件训练场、传感器和 ros2_control 闭环
 
 当前已经形成完整的上层链路：
 
@@ -49,8 +47,9 @@ Wakula 后续开发快速上手指南
     -> 速度心跳与动作接管保护
     -> /cmd_vel
 
-尚未包含具体品牌机器狗 SDK、真实电机/力控制、MPC/WBC、完整落脚点规划和真机标定
-参数。内置位置步态只适合仿真、架空或保护绳低增益联调，不能直接用于自由站立高速实机。
+尚未包含具体品牌机器狗 SDK、真实电机控制、MPC/WBC、完整落脚点规划和经过真机标定
+的传感器参数。因此当前工程适合软件联调、算法验证和 SDK 接入开发，不能直接用于
+未经保护的高速实机。
 
 默认软件安全监督不可随意关闭；若以后由厂商安全节点替代，它仍必须持续发布
 /safety/stop，否则速度门和自动越障会按心跳失联保持停车。
@@ -78,7 +77,7 @@ Wakula 后续开发快速上手指南
 
   ./scripts/bootstrap.sh
 
-5. 编译全部 10 个 ROS 包：
+5. 编译全部 9 个 ROS 包：
 
   ./scripts/build.sh
 
@@ -95,7 +94,8 @@ Wakula 后续开发快速上手指南
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-当前基准为 53 项测试、0 error、0 failure。
+当前全工作空间基准为 60 项测试、0 error、0 failure；以
+`colcon test-result --verbose` 的当次输出为准。
 
 8. 查看机器人模型：
 
@@ -183,7 +183,6 @@ ROS 2 Jazzy；支持 amd64 与 arm64。不要复制 build、install、log，应�
     ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
     ros-jazzy-slam-toolbox \
     ros-jazzy-ros2-control ros-jazzy-ros2-controllers \
-    ros-jazzy-ros-gz ros-jazzy-gz-ros2-control \
     ros-jazzy-joint-state-publisher-gui \
     ros-jazzy-robot-state-publisher ros-jazzy-xacro \
     ros-jazzy-cv-bridge ros-jazzy-sensor-msgs-py \
@@ -253,7 +252,7 @@ URDF/Xacro 编辑。VS Code 不是机器人运行时依赖。
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-bootstrap.sh 会读取 10 个 package.xml，并用 rosdep 补齐遗漏依赖，因此 package.xml 是
+bootstrap.sh 会读取 9 个 package.xml，并用 rosdep 补齐遗漏依赖，因此 package.xml 是
 最终依赖清单，上面的 apt 列表是可直接安装的完整基线。检查：
 
   ros2 pkg prefix quadruped_description
@@ -359,7 +358,6 @@ RMW_IMPLEMENTATION，两端应安装并使用相同实现。校园网、访客 W
 
   ros2 launch quadruped_description display.launch.py
   ros2 launch slam slam.launch.py rviz:=false
-  ros2 launch slam slam.launch.py simulation:=true simulation_headless:=true rviz:=false
 
 第二条命令在没有 /scan、/odom、map -> base_link 时应等待而不激活 Nav2。最终验收：
 
@@ -368,7 +366,6 @@ RMW_IMPLEMENTATION，两端应安装并使用相同实现。校园网、访客 W
   [ ] colcon test-result --verbose 为 0 error、0 failure
   [ ] URDF 能在 RViz 打开
   [ ] 无传感器时 Nav2 安全等待，Ctrl+C 正常退出
-  [ ] 仿真可发布 /map，controller_server 与 collision_monitor 均为 active
   [ ] 真机 /scan、/odom、Image、PointCloud2 和 TF 频率稳定
   [ ] RViz 中点云、激光、机器人模型坐标重合
   [ ] /cmd_vel 只有 Collision Monitor 一个最终发布者
@@ -385,12 +382,6 @@ src/quadruped_description
     RViz 模型显示入口。
 
 src/quadruped_control
-  quadruped_control/kinematics.py、gait.py
-    三自由度腿部解析 FK/IK、可达性检查和四拍爬行/小跑轨迹。
-  quadruped_control/basic_motion_controller.py
-    /cmd_vel 与越障命令到标准 12 关节轨迹的低速控制基线。
-  config/basic_control.yaml
-    站高、步频、抬脚、超时及真机接触成功条件。
   config/controllers.yaml
     joint_state_broadcaster 和 12 关节轨迹控制器。
   config/joint_limits.yaml
@@ -437,12 +428,6 @@ src/quadruped_hardware
     不驱动电机的 SDK 合同后端，可返回成功或注入失败、失联、非法进度。
   config/hardware.yaml
     初始安全阈值、硬件输入 required 开关和模拟动作时长；电池选型后必须填写欠压值。
-
-src/quadruped_simulation
-  worlds/wakula_training.sdf
-    Gazebo Harmonic 地面、8/15/30 cm 台阶、斜坡和色杆训练场。
-  launch/simulation.launch.py、config/bridge.yaml
-    机器人生成、gz_ros2_control 装载及标准雷达/里程计/IMU/RGB-D 话题桥。
 
 src/quadruped_tools
   perception_bag_evaluator.py
@@ -495,14 +480,6 @@ scripts
 
   ros2 launch slam slam.launch.py
 
-一键启动完整 Gazebo 软件闭环：
-
-  ros2 launch slam slam.launch.py simulation:=true
-
-无界面运行：
-
-  ros2 launch slam slam.launch.py simulation:=true simulation_headless:=true rviz:=false
-
 查看一键入口的全部开关：
 
   ros2 launch slam slam.launch.py --show-args
@@ -548,6 +525,16 @@ scripts
   ros2 launch slam slam.launch.py mock_hardware:=true \
     slam_enabled:=false nav2_enabled:=false vision:=false rviz:=false
 
+该模式会额外启动 mock_hardware_state，在标准 `/joint_states`、`/imu/data`、
+`/battery_state` 和 `/hardware/status` 上提供静止反馈；它不会发送电机命令。更换真机时：
+
+1. 保留所有上层默认话题和 `TraverseObstacle` Action 名称。
+2. 用继承 `VendorSdkAdapterBase` 的厂商实现替换 mock；统一在该层做单位、关节方向、故障码
+   和硬件时间戳转换。若使用 ros2_control，同一职责放到 SystemInterface plugin。
+3. 将 hardware.yaml 的 require_imu、require_joint_states、require_battery、
+   require_hardware_status 逐项设为 true，并写入实测电池和关节保护值。
+4. 厂商节点必须周期发布 HardwareStatus；断连或故障时先在驱动侧失能，再由 ROS 上报。
+
 发送一个越障 Action（没有真机执行状态时会安全超时）：
 
   ros2 action send_goal /crossing/traverse_obstacle \
@@ -564,15 +551,22 @@ scripts
   ros2 run quadruped_tools fault_injector --controller-fault invalid_progress
   ros2 run quadruped_tools fault_injector --controller-fault none
 
-录制并离线评估 OpenCV/点云结果：
+录制、回放并离线评估 OpenCV/点云结果：
 
-  ros2 bag record /vision/obstacle_evidence /terrain/features
+  ./scripts/record_bag.sh
+  ./scripts/replay_bag.sh bags/某次记录 0.5
   ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
     --write-label-template labels.csv
   # 人工填写 labels.csv 后：
   ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
     --labels labels.csv --report perception_report.json \
     --suggestions calibration_suggestions.yaml
+
+采集脚本同时保存原始传感器、TF、相机信息、强类型感知/融合、Nav2、Action、硬件和安全
+状态；回放脚本发布 `/clock` 并初始暂停，算法用 `use_sim_time:=true`。常规检查可运行：
+
+  ./scripts/diagnose.sh
+  ./scripts/test.sh
 
 Robocon 比赛模式：
 
@@ -622,19 +616,8 @@ SLAM Toolbox 根据 /scan、/odom 和 TF 产生 map -> odom。
 
 1. 通用 12 自由度四足 URDF/Xacro。
 2. IMU、2D 雷达、RGB-D 相机坐标系。
-3. 解析三自由度腿部 FK/IK、不可达/关节限制检查。
-4. 四拍爬行和小跑足端轨迹、保守 Twist 限幅及轻量姿态补偿。
-5. /cmd_vel 和 TraverseObstacle 到 12 关节轨迹/反馈的基础运动节点。
-6. mock/gz ros2_control、关节状态和轨迹控制器。
-7. RViz 模型调试入口。
-
-仿真：
-
-1. Gazebo Harmonic 训练世界、机器人自动生成和控制器按序激活。
-2. 2D 激光、RGB-D、IMU、里程计和 TF 统一桥接到真机默认 ROS 2 名称。
-3. 8/15/30 cm 台阶、斜坡和色杆用于软件闭环开发。
-4. 一键启动同时运行仿真、SLAM、Nav2、OpenCV、点云、越障、安全和基础控制。
-5. 实测地图发布、Nav2 全生命周期激活、仿真时钟一致和低速位移闭环。
+3. mock ros2_control、关节状态和轨迹控制器。
+4. RViz 模型调试入口。
 
 SLAM 和 Nav2：
 
@@ -676,7 +659,7 @@ OpenCV：
 6. 合成 RGB + PointCloud2 端到端融合验证。
 7. TraverseObstacle Action 的参数校验、UUID 命令、反馈、取消、结果及双重超时。
 8. 真机控制器使用 execution_command/status 强类型合同，旧字符串仅作兼容提示。
-9. STOP 立即执行；STEP/CLIMB 连续 3 帧确认；风险降低连续 5 帧确认，减少模式抖动。
+9. 风险升级立即执行、安全降级连续 3 帧确认，减少模式抖动。
 10. Action 状态检查合法阶段、单调进度以及成功时的进度/接触证明。
 11. STEP/CLIMB 在实际 lookahead 距离内自动生成 Action Goal，同一障碍有限重试。
 12. 越障 Action 执行期间 `/crossing/execution_active` 锁住普通 Nav2 速度。
@@ -702,24 +685,24 @@ OpenCV：
 
 工程状态：
 
-  10 个 ROS 2 包可编译。
+  9 个 ROS 2 包可编译。
   slam.launch.py 保持 ROS 2 内部默认名称，并集中处理 profile 和显式覆盖。
   常见 2D/3D 雷达及 RGB-D 相机 profile 可通过 YAML 扩展。
-  当前 53 项测试全部通过。
+  当前全工作空间 60 项测试全部通过。
   GitHub Actions 会在 main 推送和 PR 上自动执行 Jazzy 构建测试。
   README、算法原理、通信合同和快速上手文档齐全。
-  以上还包含简化仿真、解析 IK 和低速位置步态基线，不代表四足整机研发完成。
+  以上只代表上层 ROS 2 感知、导航、决策雏形，不代表四足整机研发完成。
 
 建议的新成员源码阅读顺序：
 
-1. terrain_analyzer.py：理解 base_link、前向 ROI、地面包络和九字段输出。
-2. vision_obstacle_detector.py：理解 OpenCV 只提供减速复核证据的权限边界。
-3. obstacle_crossing_manager.py：理解几何主判据、非对称迟滞和失联 STOP。
+1. terrain_geometry.py/terrain_analyzer.py：理解高度栅格、地面平面、15 字段兼容输出和强类型消息。
+2. vision_obstacle_detector.py/perception_fusion.py：理解 OpenCV 权限边界、Header 和时间同步。
+3. obstacle_crossing_manager.py：理解几何主判据、坑洞停车、横杆低姿态、迟滞和失联 STOP。
 4. crossing_action_server.py：理解 UUID、双重超时、取消、进度和触地成功证据。
 5. crossing_action_coordinator.py：理解自动触发、有限重试和速度接管。
 6. system_safety_supervisor.py：理解标准硬件状态如何形成统一停车原因。
-7. mock_sdk_adapter.py：理解未来厂商 SDK 必须满足的强类型反馈合同。
-8. cmd_vel_gate.py：理解 Nav2 心跳、安全停车和 Action 接管互锁。
+7. sdk_adapter.py/mock_sdk_adapter.py/mock_hardware_state.py：理解真机替换边界和模拟心跳。
+8. navigation_health_monitor.py/cmd_vel_gate.py：理解 Nav2 输入健康、安全停车和接管互锁。
 9. perception_bag_evaluator.py：理解阈值只能在训练集搜索、验证集验收。
 
 这些核心文件已补充职责、单位、算法原因和失效行为注释。若修改消息下标、坐标系、阈值
@@ -740,16 +723,17 @@ OpenCV：
 5. 嵌入式：MCU 实时控制、CAN/串口/EtherCAT、电机闭环和故障看门狗尚未完成。
 6. 硬件接口：尚未接入具体机器狗 SDK 或 ros2_control hardware plugin。
 7. 状态估计：编码器、IMU、足端接触及视觉/雷达融合里程计尚未实现。
-8. 运动学动力学：解析 FK/IK 已有；实机 URDF/惯量校准、雅可比、动力学和重力补偿未完成。
-9. 基础运动：位置式步态已有；真机站起/趴下、接触稳定、步态切换和跌倒恢复未完成。
+8. 运动学动力学：实机 URDF/惯量、正逆运动学、雅可比和动力学模型尚未完成。
+9. 基础运动：站起、趴下、姿态稳定、行走、转向、步态切换和跌倒恢复尚未实现。
 10. 全身控制：MPC/WBC、落脚点规划、摆腿轨迹和接触力控制尚未实现。
-11. 越障执行：STEP/CLIMB 有定时抬脚爬行基线，但没有真实落脚/接触力闭环；LOW_PROFILE 未实现。
-12. 感知：RGB-深度同步、高程图、坡面分割、障碍跟踪和可落脚区域仍待完成。
+11. 越障执行：STEP、CLIMB、LOW_PROFILE 仍是请求，不是真实关节/力矩动作。
+12. 感知：带时间戳相机—点云同步框架、地面/坡度及台阶/坑/墙/杆分类已完成；完整局部
+    高程地图、运动目标跟踪、可落脚区域和真机准确率标定仍待完成。
 13. 导航：SLAM/Nav2 尚未使用真实整机里程计、传感器和运动性能完成现场标定。
 14. 比赛：OpenCV/点云阈值、正式场地点位和真实越障反馈尚未完成联调。
 15. 安全：软件监督/故障注入已完成；硬件急停、驱动失能、过流/过温/欠压及真实姿态/
     关节限制尚未验证。
-16. 仿真：Gazebo 基线已有；精确动力学、传感器噪声、足力、完整赛道和 SIL/HIL 未完成。
+16. 仿真：缺少 Gazebo/Isaac 动力学模型、完整赛道和 SIL/HIL；当前故障注入只验证通信。
 17. 工程化：CI 已建立；RK3588 散热与长期负载、日志轮转、自动部署和维护流程待验证。
 
 
@@ -960,7 +944,7 @@ profile 启动后仍没有相机数据：
 十三、新开发者接手完成标准
 --------------------------
 
-1. 能独立编译 10 个包并运行全部 53 项测试。
+1. 能独立编译 10 个包并运行全部测试。
 2. 能解释 map、odom、base_link 和传感器 frame 的关系。
 3. 能说明 /scan、/odom、RGB 和 PointCloud2 被哪些节点使用。
 4. 能解释 OpenCV 为什么不能单独触发 CLIMB。

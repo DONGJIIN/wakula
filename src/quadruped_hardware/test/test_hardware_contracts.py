@@ -11,6 +11,7 @@ from quadruped_hardware.system_safety_supervisor import (
     SystemSafetySupervisor,
     evaluate_safety,
     joint_state_is_valid,
+    joint_positions_within_limit,
     quaternion_to_roll_pitch,
 )
 from quadruped_interfaces.msg import CrossingStatus
@@ -99,3 +100,5 @@ def test_joint_state_accepts_unavailable_effort_but_rejects_partial_nan():
     names = ["a", "b"]
     assert joint_state_is_valid(names, [0.0, 0.1], [0.0, 0.0], [math.nan, math.nan])
     assert not joint_state_is_valid(names, [0.0, 0.1], [0.0, 0.0], [0.0, math.nan])
+    assert joint_positions_within_limit([0.0, -1.0, 1.0], 1.1)
+    assert not joint_positions_within_limit([0.0, 1.2], 1.1)

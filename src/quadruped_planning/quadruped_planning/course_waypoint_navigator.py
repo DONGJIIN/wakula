@@ -21,6 +21,9 @@ class CourseWaypointNavigator(Node):
         self.declare_parameter("obstacle_x", [0.0])
         self.declare_parameter("obstacle_y", [0.0])
         self.declare_parameter("obstacle_yaw", [0.0])
+        self.declare_parameter("start_x", 0.0)
+        self.declare_parameter("start_y", 0.0)
+        self.declare_parameter("start_yaw", 0.0)
         self.map_frame = str(self.get_parameter("map_frame").value)
         names = list(self.get_parameter("obstacle_names").value)
         xs = list(self.get_parameter("obstacle_x").value)
@@ -31,6 +34,11 @@ class CourseWaypointNavigator(Node):
             str(names[i]): (float(xs[i]), float(ys[i]), float(yaws[i]))
             for i in range(count)
         }
+        self.poses["__return_start"] = (
+            float(self.get_parameter("start_x").value),
+            float(self.get_parameter("start_y").value),
+            float(self.get_parameter("start_yaw").value),
+        )
         self.current_obstacle = None
         self.last_goal_name = None
         self.goal_name = None
@@ -38,8 +46,14 @@ class CourseWaypointNavigator(Node):
         self.create_subscription(
             String, "/competition/current_obstacle", self.obstacle_callback, 10
         )
+        self.create_subscription(
+            String, "/competition/state", self.state_callback, 10
+        )
         self.hint_pub = self.create_publisher(String, "/competition/obstacle_hint", 10)
         self.failed_pub = self.create_publisher(Bool, "/competition/obstacle_failed", 10)
+        self.returned_pub = self.create_publisher(
+            Bool, "/competition/returned_to_start", 10
+        )
         self.client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.timer = self.create_timer(0.2, self.try_send_goal)
         self.get_logger().info(
@@ -53,6 +67,15 @@ class CourseWaypointNavigator(Node):
             self.last_goal_name = None
             self.goal_name = None
             self.goal_handle = None
+
+    def state_callback(self, msg: String) -> None:
+        """最后一个障碍完成后自动把 Nav2 目标切回所选起点。"""
+        if (
+            msg.data.strip().upper() == "RETURN"
+            and self.current_obstacle != "__return_start"
+        ):
+            self.current_obstacle = "__return_start"
+            self.last_goal_name = None
 
     def try_send_goal(self) -> None:
         name = self.current_obstacle
@@ -99,8 +122,12 @@ class CourseWaypointNavigator(Node):
         self.goal_handle = None
         self.goal_name = None
         if status == GoalStatus.STATUS_SUCCEEDED and name:
-            self.hint_pub.publish(String(data=name))
-            self.get_logger().info(f"Reached {name} approach pose; starting crossing")
+            if name == "__return_start":
+                self.returned_pub.publish(Bool(data=True))
+                self.get_logger().info("Returned to configured start pose")
+            else:
+                self.hint_pub.publish(String(data=name))
+                self.get_logger().info(f"Reached {name} approach pose; starting crossing")
         else:
             self.failed_pub.publish(Bool(data=True))
             self.get_logger().warning(f"Could not reach {name} approach pose (status {status})")

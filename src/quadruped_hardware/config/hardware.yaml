@@ -10,6 +10,9 @@ system_safety_supervisor:
     require_imu: false
     require_joint_states: false
     require_battery: false
+    # 真机验收时设为 true；模拟硬件和厂商 Adapter 都发布 /hardware/status。
+    require_hardware_status: false
+    max_abs_joint_position: 6.4
 mock_sdk_adapter:
   ros__parameters:
     step_duration: 2.0

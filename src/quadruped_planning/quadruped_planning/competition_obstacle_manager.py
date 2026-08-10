@@ -119,6 +119,9 @@ class CompetitionObstacleManager(Node):
             10,
         )
         self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
+        self.create_subscription(
+            String, "/crossing/last_result", self.action_result_callback, 10
+        )
 
         self.state = "SEARCH"
         self.active_obstacle = None
@@ -276,6 +279,14 @@ class CompetitionObstacleManager(Node):
         self.failure_latched = True
         self.state = "RETRY_REQUIRED"
         self.publish_outputs("STOP", "RETRY_OBSTACLE", 0.0)
+
+    def action_result_callback(self, msg: String) -> None:
+        """把真实 TraverseObstacle 终态接回比赛计分/重试状态机。"""
+        result = msg.data.strip().upper()
+        if result.startswith("SUCCESS:"):
+            self.complete_callback(Bool(data=True))
+        elif result.startswith("FAILED:"):
+            self.failed_callback(Bool(data=True))
 
     def retry_callback(self, msg: Bool) -> None:
         if msg.data and self.state == "RETRY_REQUIRED":

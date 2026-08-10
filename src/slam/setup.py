@@ -13,6 +13,7 @@ setup(
         ("share/" + package_name + "/config", glob("config/*.yaml")),
         ("share/" + package_name + "/rviz", glob("rviz/*.rviz")),
         ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
+        ("share/" + package_name + "/behavior_trees", glob("behavior_trees/*.xml")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -24,6 +25,7 @@ setup(
     entry_points={
         "console_scripts": [
             "nav2_readiness_monitor = slam.nav2_readiness_monitor:main",
+            "navigation_health_monitor = slam.navigation_health_monitor:main",
         ],
     },
 )

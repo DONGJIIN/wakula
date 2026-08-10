@@ -23,6 +23,7 @@ setup(
             "system_safety_supervisor = "
             "quadruped_hardware.system_safety_supervisor:main",
             "mock_sdk_adapter = quadruped_hardware.mock_sdk_adapter:main",
+            "mock_hardware_state = quadruped_hardware.mock_hardware_state:main",
         ],
     },
 )

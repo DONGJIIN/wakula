@@ -130,6 +130,12 @@ def generate_launch_description():
             parameters=[{"use_sim_time": use_sim_time}],
             condition=IfCondition(autostart),
         ),
+        Node(
+            package="slam",
+            executable="navigation_health_monitor",
+            output="screen",
+            parameters=[{"use_sim_time": use_sim_time}],
+        ),
     ]
     return LaunchDescription(
         [

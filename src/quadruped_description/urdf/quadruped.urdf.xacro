@@ -244,13 +244,14 @@
         <always_on>true</always_on>
         <update_rate>12</update_rate>
         <visualize>false</visualize>
+        <gz_frame_id>lidar_link</gz_frame_id>
         <topic>/scan</topic>
         <lidar>
           <scan><horizontal>
             <samples>720</samples><resolution>1</resolution>
             <min_angle>-${pi}</min_angle><max_angle>${pi}</max_angle>
           </horizontal></scan>
-          <range><min>0.12</min><max>20.0</max><resolution>0.01</resolution></range>
+          <range><min>0.12</min><max>16.0</max><resolution>0.01</resolution></range>
           <noise><type>gaussian</type><mean>0.0</mean><stddev>0.006</stddev></noise>
         </lidar>
       </sensor>
@@ -281,7 +282,7 @@
     <gazebo reference="imu_link">
       <sensor name="wakula_imu" type="imu">
         <always_on>true</always_on><update_rate>100</update_rate>
-        <topic>/imu/data</topic>
+        <topic>/imu/data</topic><gz_frame_id>imu_link</gz_frame_id>
       </sensor>
     </gazebo>
   </xacro:if>

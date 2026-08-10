@@ -23,6 +23,8 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, String
 
+from quadruped_interfaces.msg import VisionObstacle
+
 from quadruped_perception.topic_selection import should_accept_source
 
 
@@ -505,6 +507,9 @@ class VisionObstacleDetector(Node):
         self.evidence_pub = self.create_publisher(
             Float32MultiArray, "/vision/obstacle_evidence", 10
         )
+        self.typed_evidence_pub = self.create_publisher(
+            VisionObstacle, "/vision/obstacle_stamped", 10
+        )
         self.hint_pub = self.create_publisher(String, "/vision/obstacle_hint", 10)
         self.mask_pub = (
             self.create_publisher(
@@ -658,6 +663,15 @@ class VisionObstacleDetector(Node):
             self.max_temporal_size_jitter,
         )
         self.evidence_pub.publish(Float32MultiArray(data=evidence.as_array()))
+        typed = VisionObstacle()
+        typed.header = msg.header
+        typed.obstacle_type = int(round(HINT_CODES.get(evidence.hint, 0.0)))
+        typed.confidence = float(evidence.confidence)
+        typed.center_x = float(evidence.center_x)
+        typed.center_y = float(evidence.center_y)
+        typed.width = float(evidence.width)
+        typed.height = float(evidence.height)
+        self.typed_evidence_pub.publish(typed)
         self.hint_pub.publish(String(data=evidence.hint))
 
         if self.publish_debug:

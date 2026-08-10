@@ -21,10 +21,22 @@ from std_msgs.msg import Bool, Float32MultiArray, String
 
 TERRAIN_FRONTAL_HEIGHT = 6
 TERRAIN_LOOKAHEAD = 7
+TERRAIN_OBSTACLE_TYPE = 11
+GEOMETRY_BAR = 5
 MODE_TO_ACTION = {
     "STEP": TraverseObstacle.Goal.STEP,
     "CLIMB": TraverseObstacle.Goal.CLIMB,
 }
+
+
+def select_goal_mode(mode: str, obstacle_type: int, action_intent: str) -> int:
+    """把四态 FSM 和比赛动作意图转换为底层三类 Action。"""
+    intent = action_intent.upper()
+    if obstacle_type == GEOMETRY_BAR or "LOW_PROFILE" in intent:
+        return TraverseObstacle.Goal.LOW_PROFILE
+    if mode == "CLIMB" or "CLIMB" in intent or "WALL" in intent:
+        return TraverseObstacle.Goal.CLIMB
+    return TraverseObstacle.Goal.STEP
 
 
 @dataclass
@@ -91,6 +103,7 @@ class CrossingActionCoordinator(Node):
         self.declare_parameter("climb_speed_scale", 0.20)
         self.declare_parameter("clear_confirmation_frames", 3)
         self.declare_parameter("retry_limit", 1)
+        self.declare_parameter("require_navigation_health", True)
 
         self.trigger_distance = max(
             0.05, float(self.get_parameter("trigger_distance").value)
@@ -117,12 +130,17 @@ class CrossingActionCoordinator(Node):
         )
 
         self.mode = "STOP"
+        self.action_intent = ""
         self.latest_terrain = None
         self.latest_terrain_time = None
         self.goal_active = False
         self.goal_pending = False
         self.goal_handle = None
         self.cancel_requested = False
+        self.require_navigation_health = bool(
+            self.get_parameter("require_navigation_health").value
+        )
+        self.navigation_healthy = not self.require_navigation_health
         # 没收到安全监督心跳前不允许发起真实动作。
         self.safety_stop = True
         self.last_safety_time = None
@@ -140,12 +158,18 @@ class CrossingActionCoordinator(Node):
         )
         self.create_subscription(String, "/crossing/mode", self.mode_callback, 10)
         self.create_subscription(
+            String, "/crossing/action", self.action_callback, 10
+        )
+        self.create_subscription(
             Float32MultiArray,
             "/terrain/features",
             self.terrain_callback,
             10,
         )
         self.create_subscription(Bool, "/safety/stop", self.safety_callback, 10)
+        self.create_subscription(
+            Bool, "/navigation/healthy", self.navigation_health_callback, 10
+        )
         self.action_client = ActionClient(
             self,
             TraverseObstacle,
@@ -173,6 +197,10 @@ class CrossingActionCoordinator(Node):
         self.latest_terrain_time = self.get_clock().now()
         self._maybe_send_goal()
 
+    def action_callback(self, msg: String) -> None:
+        """保存比赛/通用状态机动作意图；模式仍负责互锁和严重度。"""
+        self.action_intent = msg.data.strip().upper()
+
     def safety_callback(self, msg: Bool) -> None:
         """安全停车拥有最高权限，并会主动取消底层动作。"""
         self.safety_stop = bool(msg.data)
@@ -196,11 +224,20 @@ class CrossingActionCoordinator(Node):
             if self.goal_active:
                 self._cancel_active("safety supervisor heartbeat timed out")
 
+    def navigation_health_callback(self, msg: Bool) -> None:
+        """定位、TF 或传感器失效时取消动作并交回重规划流程。"""
+        self.navigation_healthy = bool(msg.data)
+        if not self.navigation_healthy and self.goal_active:
+            self._cancel_active("navigation inputs became unhealthy")
+        elif self.navigation_healthy:
+            self._maybe_send_goal()
+
     def _maybe_send_goal(self) -> None:
         if (
             self.latest_terrain is None
             or self.latest_terrain_time is None
             or self.safety_stop
+            or not self.navigation_healthy
         ):
             return
         age = (
@@ -228,7 +265,16 @@ class CrossingActionCoordinator(Node):
 
         height, distance = observation
         goal = TraverseObstacle.Goal()
-        goal.mode = MODE_TO_ACTION[self.mode]
+        # 横杆沿用四态 FSM 的 CLIMB 占用/互锁流程，但给执行器发送 LOW_PROFILE，
+        # 避免为了一个障碍类型再增加一套并行状态机。
+        obstacle_type = (
+            int(round(self.latest_terrain[TERRAIN_OBSTACLE_TYPE]))
+            if len(self.latest_terrain) > TERRAIN_OBSTACLE_TYPE
+            else 0
+        )
+        goal.mode = select_goal_mode(
+            self.mode, obstacle_type, self.action_intent
+        )
         goal.obstacle_height = height
         goal.obstacle_distance = distance
         goal.speed_scale = self.speed_scales[self.mode]

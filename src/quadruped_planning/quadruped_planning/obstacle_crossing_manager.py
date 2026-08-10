@@ -23,6 +23,12 @@ TERRAIN_VALID_POINTS = 3
 TERRAIN_GROUND_SLOPE = 4
 TERRAIN_ROUGHNESS = 5
 TERRAIN_FRONTAL_HEIGHT = 6
+TERRAIN_PIT_DEPTH = 9
+TERRAIN_OBSTACLE_TYPE = 11
+
+# 与 TerrainFeatures.msg 一致；保留数组输入是为了兼容既有 rosbag。
+GEOMETRY_CLEAR, GEOMETRY_STEP, GEOMETRY_PIT = 1, 2, 3
+GEOMETRY_WALL, GEOMETRY_BAR, GEOMETRY_POLE = 4, 5, 6
 
 
 class ConservativeDecisionFilter:
@@ -180,6 +186,25 @@ def apply_visual_assist(
     return mode, "VERIFY_VISUAL_OBSTACLE_WITH_DEPTH", min(speed, vision_speed_scale)
 
 
+def apply_geometry_classification(
+    decision: Decision, obstacle_type: int, pit_depth: float
+) -> Decision:
+    """在高度判定之上加入显式几何危险规则。
+
+    坑洞没有可安全踩踏的默认动作，必须停车重规划；墙面沿用高度等级；横杆请求低姿态
+    Action；立柱交给 Nav2 绕行并限速。未知类别不改变旧行为，便于回放旧 rosbag。
+    """
+    if obstacle_type == GEOMETRY_PIT and pit_depth > 0.0:
+        return "STOP", "REPLAN_AROUND_PIT", 0.0
+    if obstacle_type == GEOMETRY_BAR:
+        return "CLIMB", "CROSS_LOW_PROFILE", min(decision[2], 0.20)
+    if obstacle_type == GEOMETRY_POLE and decision[0] == "WALK":
+        return "WALK", "NAVIGATE_AROUND_POLE", min(decision[2], 0.35)
+    if obstacle_type == GEOMETRY_WALL and decision[0] == "STEP":
+        return "CLIMB", "CROSS_CLIMB", 0.20
+    return decision
+
+
 class ObstacleCrossingManager(Node):
     """订阅感知特征，执行安全融合并持续发布可供速度门使用的决策心跳。"""
 
@@ -308,6 +333,17 @@ class ObstacleCrossingManager(Node):
             if len(msg.data) > TERRAIN_ROUGHNESS
             else 0.0
         )
+        pit_depth = (
+            float(msg.data[TERRAIN_PIT_DEPTH])
+            if len(msg.data) > TERRAIN_PIT_DEPTH
+            else 0.0
+        )
+        obstacle_type = (
+            int(round(msg.data[TERRAIN_OBSTACLE_TYPE]))
+            if len(msg.data) > TERRAIN_OBSTACLE_TYPE
+            and isfinite(float(msg.data[TERRAIN_OBSTACLE_TYPE]))
+            else 0
+        )
 
         # 点云决定动作等级，视觉仅能在 WALK 状态要求减速复核。
         raw_decision = select_terrain_decision(
@@ -321,6 +357,9 @@ class ObstacleCrossingManager(Node):
             self.stop_threshold,
             self.max_slope,
             self.max_roughness,
+        )
+        raw_decision = apply_geometry_classification(
+            raw_decision, obstacle_type, pit_depth
         )
         decision = self.decision_filter.update(raw_decision)
         visual_active = self._fresh_visual_target()

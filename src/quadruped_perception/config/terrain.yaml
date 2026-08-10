@@ -18,3 +18,8 @@ terrain_analyzer:
     max_roughness: 0.06
     min_valid_points: 30
     source_switch_timeout: 2.0
+    # 高度图地面分割；不同深度相机只需用 rosbag 调这组参数。
+    grid_cell_size: 0.05
+    ground_height_bin: 0.03
+    pit_depth_threshold: 0.08
+    wall_height_threshold: 0.25

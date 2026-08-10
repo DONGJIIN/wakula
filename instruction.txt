@@ -78,7 +78,9 @@ MPC/WBC 接管，不能把位置开环基线当作动态稳定控制器。
 5. src/quadruped_perception
 
   vision_obstacle_detector.py：OpenCV 图像识别。
-  terrain_analyzer.py：PointCloud2 地形分析与 Nav2 点云输出。
+  terrain_analyzer.py：PointCloud2 地形分析、强类型结果与 Nav2 点云输出。
+  terrain_geometry.py：ROS 无关的高度栅格、主地面拟合及台阶/坑/墙/杆几何分类。
+  perception_fusion.py：相机—点云时间同步和保守证据融合。
   topic_selection.py：从多个常见相机话题中锁定一个有效数据源并支持超时切换。
 
 6. src/quadruped_planning
@@ -94,7 +96,9 @@ MPC/WBC 接管，不能把位置开环基线当作动态稳定控制器。
 
   system_safety_supervisor.py：汇总标准 IMU、JointState、BatteryState 和急停输入。
   mock_sdk_adapter.py：实现 UUID/反馈/触地/取消合同的无电机模拟后端。
-  hardware.yaml：未选硬件阶段的初始安全阈值和模拟动作时长。
+  hardware.yaml：未选硬件阶段的初始安全阈值、硬件状态要求和模拟动作时长。
+  sdk_adapter.py：未来厂商 SDK/ros2_control 插件必须遵守的 12 关节原子采样抽象。
+  mock_hardware_state.py：无真机时提供关节、IMU、电池和故障状态心跳。
 
   如果关闭 system_safety_supervisor，外部安全实现必须继续以同样 QoS 发布
   /safety/stop；速度门和自动 Action 协调器在心跳缺失时都会按安全原则保持停车。
@@ -278,6 +282,26 @@ clear_confirmation_frames=3 帧一致才恢复。传感器无效或超时仍立�
 点云数据少于 min_points、包含非法数值或超过 sensor_timeout 没有更新时，一律
 STOP。该原则是“没有看到地形不等于地形安全”。
 
+新增的几何分类使用两层结果：旧的纵向低分位包络继续产生兼容数组前九项；新的高度图
+将 ROI 按 5 cm 左右的 XY 栅格聚合，每格保存低/中/高分位高度，在高度直方图中选择
+面积占优的地面层，并拟合 z=ax+by+c。atan(a)、atan(b) 分别得到纵向和横向坡角。
+
+分类规则及安全边界：
+
+1. 台阶：主地面以上存在连续高栅格；高度使用稳健分位，不追逐最高飞点。
+2. 坑洞：必须实际看到主地面以下的低处回波，并达到多个栅格；只有空白或无深度时返回
+   未知，不能据此下令跨坑。
+3. 墙面：同一前缘具有较大垂直跨度、较宽横向覆盖且从近地面开始。
+4. 横杆：前缘横向较宽、下方存在净空；OpenCV 的水平框可细分类，但点云必须先确认高点。
+5. 立柱：前缘细长、横向宽度较窄；交给 Nav2 绕行并减速，而不是默认抬腿碰撞。
+6. 真机采集后用 terrain.yaml 的 grid_cell_size、ground_height_bin、pit_depth_threshold 和
+   wall_height_threshold 调整；栅格不应小于相机点间距的约两倍。
+
+强类型 TerrainFeatures/VisionObstacle 均保留原始 header。perception_fusion 只配对时间差在
+sync_slop 内的最近帧，并把实际 time_skew 写入 FusedObstacle。若相机与深度来自同一
+RGB-D，优先开启厂商硬件同步；若来自独立设备，使用 PTP/chrony 或硬件触发，不能靠扩大
+sync_slop 掩盖运动中的时间错位。
+
 代码注释约定：模块注释解释节点职责边界；函数注释说明输入输出、坐标系和单位；行内
 注释重点解释地面包络、视觉辅助权限、迟滞和双重超时等“不明显的原因”。通信数组使用
 具名下标常量，修改顺序时必须同时修改感知、规划、离线工具和 connect.txt。
@@ -438,7 +462,13 @@ system_safety_supervisor 的硬件无关规则：
 7. `/safety/stop` 自身超过 safety_timeout 未更新时，速度归零且活动 Action 被取消。
 
 这些规则是 ROS 软件互锁，不替代串在驱动使能回路中的物理急停、过流/过温保护和底层
-通信看门狗。硬件型号确定后还要加入每关节位置/速度/力矩限制及厂商故障码仲裁。
+通信看门狗。当前还对通用绝对关节角上限和 HardwareStatus 的 FAULT/故障码/心跳做末级
+检查；硬件型号确定后仍要把精确逐关节位置、速度、力矩、过流和过温限制放到实时驱动。
+
+navigation_health_monitor 独立监测 scan 有效率、odom 有限值与平面协方差、单帧位置突跳、
+map->base_link TF 和数据新鲜度。它发布 false 时 Action 协调器取消越障；Nav2 的专用行为树
+依次尝试清理代价地图、等待传感器恢复、低速小退和小角度旋转。真机可根据机身和场地
+减小恢复距离，不能在狭窄高台边缘直接采用默认旋转。
 
 所有 Python 节点在关闭阶段还会容忍 launch 与终端重复发送的 SIGINT，避免资源销毁
 过程中出现误导性的 KeyboardInterrupt traceback。
@@ -474,14 +504,6 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 完整自主链路：
 
   ros2 launch slam slam.launch.py
-
-一键启动全部仿真、控制、SLAM、Nav2 和感知：
-
-  ros2 launch slam slam.launch.py simulation:=true
-
-无界面全栈仿真：
-
-  ros2 launch slam slam.launch.py simulation:=true simulation_headless:=true rviz:=false
 
 无 RViz：
 
@@ -565,12 +587,6 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 
   src/quadruped_hardware/config/hardware.yaml
     安全监督初始阈值、必需状态开关和模拟 SDK 动作时长。
-
-  src/quadruped_control/config/basic_control.yaml
-    站高、步频、占空比、抬脚高度、控制周期和真机接触成功条件。
-
-  src/quadruped_simulation/worlds/wakula_training.sdf、config/bridge.yaml
-    Gazebo 训练障碍、物理系统以及 ROS 标准传感器话题桥。
 
   src/slam/config/slam.yaml
     SLAM Toolbox 建图参数。
