@@ -1,4 +1,4 @@
-"""Tests for the minimal Nav2 and SLAM integration."""
+"""Tests for the unified Nav2, SLAM and perception launch integration."""
 
 import importlib.util
 from pathlib import Path
@@ -96,10 +96,10 @@ def test_sensor_compat_launch_exposes_one_hardware_adaptation_point():
     } <= launch_argument_names(description)
 
 
-def test_all_in_one_launch_exposes_complete_user_controls():
-    """The one-command entry forwards runtime and sensor controls."""
-    path = PACKAGE_ROOT / "launch" / "all_in_one.launch.py"
-    spec = importlib.util.spec_from_file_location("all_in_one_launch", path)
+def test_slam_launch_is_the_complete_one_command_entry():
+    """The public entry exposes runtime, sensor and config controls."""
+    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
+    spec = importlib.util.spec_from_file_location("slam_launch", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
@@ -109,11 +109,15 @@ def test_all_in_one_launch_exposes_complete_user_controls():
         "odom_topic",
         "camera_topic",
         "point_cloud_topic",
-        "use_control",
-        "rviz",
-        "vision",
-        "competition",
+        "slam_enabled",
+        "nav2_enabled",
         "nav2_autostart",
+        "vision",
+        "rviz",
+        "slam_params_file",
+        "nav2_params_file",
+        "vision_params_file",
+        "terrain_params_file",
     } <= launch_argument_names(description)
 
 

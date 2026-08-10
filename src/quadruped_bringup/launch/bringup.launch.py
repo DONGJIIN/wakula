@@ -25,6 +25,9 @@ def generate_launch_description():
     vision = LaunchConfiguration("vision")
     camera_topic = LaunchConfiguration("camera_topic")
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
+    terrain_params_file = LaunchConfiguration("terrain_params_file")
+    vision_params_file = LaunchConfiguration("vision_params_file")
+    crossing_params_file = LaunchConfiguration("crossing_params_file")
     competition = LaunchConfiguration("competition")
 
     description_file = package_file(
@@ -33,13 +36,13 @@ def generate_launch_description():
     controllers_file = package_file(
         "quadruped_control", "config", "controllers.yaml"
     )
-    terrain_file = package_file(
+    default_terrain_file = package_file(
         "quadruped_perception", "config", "terrain.yaml"
     )
-    vision_file = package_file(
+    default_vision_file = package_file(
         "quadruped_perception", "config", "vision.yaml"
     )
-    crossing_file = package_file(
+    default_crossing_file = package_file(
         "quadruped_planning", "config", "crossing.yaml"
     )
     competition_file = package_file(
@@ -68,6 +71,15 @@ def generate_launch_description():
                 "point_cloud_topic",
                 default_value="",
                 description="Point-cloud override; empty auto-detects common defaults.",
+            ),
+            DeclareLaunchArgument(
+                "terrain_params_file", default_value=default_terrain_file
+            ),
+            DeclareLaunchArgument(
+                "vision_params_file", default_value=default_vision_file
+            ),
+            DeclareLaunchArgument(
+                "crossing_params_file", default_value=default_crossing_file
             ),
             DeclareLaunchArgument("competition", default_value="false"),
             Node(
@@ -117,7 +129,7 @@ def generate_launch_description():
                 executable="terrain_analyzer",
                 output="screen",
                 parameters=[
-                    terrain_file,
+                    terrain_params_file,
                     {"input_topic": point_cloud_topic},
                     common_time,
                 ],
@@ -127,7 +139,7 @@ def generate_launch_description():
                 executable="vision_obstacle_detector",
                 output="screen",
                 parameters=[
-                    vision_file,
+                    vision_params_file,
                     {"image_topic": camera_topic},
                     common_time,
                 ],
@@ -137,7 +149,7 @@ def generate_launch_description():
                 package="quadruped_planning",
                 executable="obstacle_crossing_manager",
                 output="screen",
-                parameters=[crossing_file, common_time],
+                parameters=[crossing_params_file, common_time],
                 condition=UnlessCondition(competition),
             ),
             Node(
@@ -158,7 +170,7 @@ def generate_launch_description():
                 package="quadruped_planning",
                 executable="cmd_vel_gate",
                 output="screen",
-                parameters=[crossing_file, common_time],
+                parameters=[crossing_params_file, common_time],
             ),
         ]
     )

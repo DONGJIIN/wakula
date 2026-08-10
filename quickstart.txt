@@ -95,7 +95,7 @@ Wakula 后续开发快速上手指南
 
 9. 无传感器启动完整软件：
 
-  ros2 launch slam all_in_one.launch.py rviz:=false
+  ros2 launch slam slam.launch.py rviz:=false
 
 没有 /scan、/odom 和 map -> base_link 时，Nav2 应保持未激活并输出等待信息。这是安全
 设计，不是错误。按一次 Ctrl+C，所有节点应正常退出。
@@ -290,11 +290,11 @@ IMU、里程计尺度和时间同步参数必须在真机重新标定，不能�
 4. 确认传感器 frame 到 base_link 的 TF；相机同时保留标准 CameraInfo。
 5. 先从最接近的 profile 启动，例如：
 
-  ros2 launch slam all_in_one.launch.py sensor_profile:=realsense_d400
+  ros2 launch slam slam.launch.py sensor_profile:=realsense_d400
 
 6. 如果驱动名称不同，只覆盖实际项：
 
-  ros2 launch slam all_in_one.launch.py \
+  ros2 launch slam slam.launch.py \
     sensor_profile:=realsense_d400 \
     scan_topic:=/front_lidar/scan \
     odom_topic:=/robot/odometry \
@@ -335,7 +335,7 @@ RMW_IMPLEMENTATION，两端应安装并使用相同实现。校园网、访客 W
 没有传感器也能验证安装、模型和安全等待行为：
 
   ros2 launch quadruped_description display.launch.py
-  ros2 launch slam all_in_one.launch.py rviz:=false
+  ros2 launch slam slam.launch.py rviz:=false
 
 第二条命令在没有 /scan、/odom、map -> base_link 时应等待而不激活 Nav2。最终验收：
 
@@ -397,11 +397,9 @@ src/slam
   config/sensor_profiles.yaml
     常见雷达/相机话题组合，可不改代码直接扩展型号。
   launch/slam.launch.py
-    保持 ROS 默认接口的核心系统入口。
+    SLAM、Nav2、OpenCV、点云、越障安全、RViz 和传感器适配的一键入口。
   launch/sensor_compat.launch.py
-    profile 或显式话题覆盖的硬件兼容入口。
-  launch/all_in_one.launch.py
-    SLAM、Nav2、OpenCV、点云、越障安全和 RViz 的一键推荐入口。
+    旧命令兼容别名；新开发统一调用 slam.launch.py。
   launch/navigation.launch.py
     精简 Nav2 入口。
   nav2_readiness_monitor.py
@@ -431,39 +429,51 @@ scripts
 
 启动完整自主链路：
 
-  ros2 launch slam all_in_one.launch.py
+  ros2 launch slam slam.launch.py
+
+查看一键入口的全部开关：
+
+  ros2 launch slam slam.launch.py --show-args
 
 不启动 RViz：
 
-  ros2 launch slam all_in_one.launch.py rviz:=false
+  ros2 launch slam slam.launch.py rviz:=false
 
 没有 RGB 相机时关闭 OpenCV：
 
-  ros2 launch slam all_in_one.launch.py vision:=false
+  ros2 launch slam slam.launch.py vision:=false
 
 指定非默认相机话题：
 
-  ros2 launch slam all_in_one.launch.py \
+  ros2 launch slam slam.launch.py \
     camera_topic:=/my_camera/image_raw \
     point_cloud_topic:=/my_camera/points
 
 使用常见相机/雷达 profile：
 
-  ros2 launch slam all_in_one.launch.py sensor_profile:=realsense_d400
+  ros2 launch slam slam.launch.py sensor_profile:=realsense_d400
 
 任意非默认驱动话题：
 
-  ros2 launch slam all_in_one.launch.py scan_topic:=/front/scan \
+  ros2 launch slam slam.launch.py scan_topic:=/front/scan \
     odom_topic:=/robot/odometry camera_topic:=/rgb/image_raw \
     point_cloud_topic:=/depth/points
 
 加载 Nav2 但不自动激活：
 
-  ros2 launch slam all_in_one.launch.py rviz:=false nav2_autostart:=false
+  ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
+
+只启动 SLAM/感知，不启动 Nav2：
+
+  ros2 launch slam slam.launch.py nav2_enabled:=false
+
+只检查感知和上层安全链，不启动 SLAM/Nav2：
+
+  ros2 launch slam slam.launch.py slam_enabled:=false nav2_enabled:=false
 
 Robocon 比赛模式：
 
-  ros2 launch slam all_in_one.launch.py competition:=true
+  ros2 launch slam slam.launch.py competition:=true
 
 启用 mock ros2_control：
 
@@ -560,7 +570,7 @@ OpenCV：
 工程状态：
 
   6 个 ROS 2 包可编译。
-  核心入口保持 ROS 2 默认名称，硬件兼容入口集中处理 profile 和显式覆盖。
+  slam.launch.py 保持 ROS 2 内部默认名称，并集中处理 profile 和显式覆盖。
   常见 2D/3D 雷达及 RGB-D 相机 profile 可通过 YAML 扩展。
   当前 20 项测试全部通过。
   README、算法原理、通信合同和快速上手文档齐全。
@@ -738,7 +748,7 @@ OpenCV 没有识别：
   使用 camera_topic 或 point_cloud_topic 显式指定；也可等待当前源超时后自动切换。
 
 更换雷达后 SLAM 或碰撞保护没有数据：
-  使用 all_in_one.launch.py 的 profile/scan_topic，不要逐个修改 YAML。scan_topic 必须是 LaserScan；
+  使用 slam.launch.py 的 profile/scan_topic，不要逐个修改 YAML。scan_topic 必须是 LaserScan；
   如果只有 PointCloud2，先运行 pointcloud_to_laserscan。
 
 profile 启动后仍没有相机数据：

@@ -64,17 +64,11 @@ nav2_readiness_monitor
 二、外部传感器输入
 ------------------
 
-公共适配原则：用户运行 `all_in_one.launch.py`；它包含 `sensor_compat.launch.py` 读取
-`sensor_profiles.yaml`，再包含保持 /scan、/odom 和 ROS 标准消息的 `slam.launch.py`。
-厂商话题只在兼容层集中映射，避免分别修改 SLAM、Nav2、Collision Monitor、RViz 和
-感知节点；总入口只转发参数，不产生重复节点或额外高带宽消息副本。
+公共适配原则：用户统一运行 `slam.launch.py`。它读取 `sensor_profiles.yaml`，把厂商
+话题集中映射到 /scan、/odom 和 ROS 标准消息合同，并启动 SLAM、Nav2、OpenCV、地形、
+越障安全及 RViz，避免分别修改各节点。`sensor_compat.launch.py` 只保留为旧命令别名。
 
-一键入口还统一转发 use_sim_time、use_control、rviz、vision、competition 和
-nav2_autostart。默认启动 OpenCV 和 RViz，不启动 ros2_control；Nav2 仅在传感器与 TF
-满足就绪条件后激活。雷达、相机、里程计和机器狗 SDK 驱动不属于本 launch，需由硬件包
-先行启动并发布本文件规定的标准接口。
-
-兼容入口参数：
+一键入口的传感器参数：
 
   sensor_profile        默认 ros_default；选择一个 YAML 预置组合
   sensor_profiles_file  默认使用本包配置；可指向现场自定义 YAML
@@ -82,6 +76,27 @@ nav2_autostart。默认启动 OpenCV 和 RViz，不启动 ros2_control；Nav2 �
   odom_topic            非空时覆盖 profile 的 Odometry 来源
   camera_topic          非空时覆盖 profile 的 Image 来源
   point_cloud_topic     非空时覆盖 profile 的 PointCloud2 来源
+
+一键入口的运行开关：
+
+  slam_enabled          是否启动 SLAM Toolbox，默认 true
+  nav2_enabled          是否启动全部 Nav2 节点，默认 true
+  nav2_autostart        输入和 TF 就绪后是否激活 Nav2，默认 true
+  vision                是否启动 OpenCV，默认 true
+  rviz                  是否启动 RViz，默认 true
+  competition           是否切换比赛状态机，默认 false
+  use_control           是否启动 ros2_control，默认 false
+  use_sim_time          是否使用 /clock，默认 false
+  nav2_log_level        Nav2 日志等级，默认 info
+
+一键入口可覆盖的配置文件：
+
+  slam_params_file      SLAM Toolbox YAML
+  nav2_params_file      Nav2 YAML
+  vision_params_file    OpenCV YAML
+  terrain_params_file   点云地形 YAML
+  crossing_params_file  越障融合和速度门 YAML
+  rviz_config_file      RViz 配置
 
 显式参数优先于 profile。当前 profile 包括 rplidar、ydlidar、ldlidar、hokuyo、
 realsense_d400、orbbec_gemini2、zed2、oak_d、velodyne、ouster、livox、hesai、
@@ -103,7 +118,7 @@ robosense 和 lslidar；名字只代表常见话题默认值，消息类型与 T
   ranges             每束激光距离
 QoS：传感器数据 QoS，通常 Best Effort、Volatile、较小队列。
 要求：frame_id 到 base_link 的 TF 必须存在；频率和时间戳必须连续。
-适配方式：兼容入口的 scan_topic 将外部来源统一 remap 给所有 /scan 消费者。
+适配方式：一键入口的 scan_topic 将外部来源统一 remap 给所有 /scan 消费者。
 
 2. 里程计
 
@@ -119,7 +134,7 @@ QoS：传感器数据 QoS，通常 Best Effort、Volatile、较小队列。
   twist.twist              机器人估计速度
   pose/twist covariance    定位与速度不确定度
 配套 TF：状态估计器必须持续发布 odom -> base_link。
-适配方式：兼容入口的 odom_topic 将外部来源统一 remap 给所有 /odom 消费者。
+适配方式：一键入口的 odom_topic 将外部来源统一 remap 给所有 /odom 消费者。
 
 3. RGB 图像自动兼容输入
 
@@ -544,7 +559,7 @@ ros2 service list -t | grep controller_manager 查询。
 6. 全局接口使用以 / 开头的绝对名称；Nav2 内部 remap 最终仍解析到根命名空间。
 7. 特殊硬件尽量使用启动参数或 remap，不直接修改核心默认名称。
 8. 同一个话题只能有明确的职责所有者，尤其 /cmd_vel 必须只有 Collision Monitor 发布。
-9. 核心入口只保留 /scan、/odom；设备 profile 和覆盖参数只存在于兼容入口。
+9. 算法内部只保留 /scan、/odom；设备 profile 和覆盖参数集中在 slam.launch.py。
 10. profile 不改变消息类型、单位、QoS 或 TF，只选择来源名称；显式非空参数优先。
 11. camera_topic、point_cloud_topic 为空时由感知节点自动选择 ROS 常用候选源。
 
