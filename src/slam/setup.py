@@ -1,3 +1,5 @@
+"""ament_python 安装元数据：SLAM/Nav2 配置、启动和健康监控。"""
+
 from glob import glob
 from setuptools import find_packages, setup
 

@@ -121,6 +121,7 @@ def test_slam_launch_is_the_complete_one_command_entry():
         "nav2_params_file",
         "vision_params_file",
         "terrain_params_file",
+        "terrain_navigation_params_file",
     } <= launch_argument_names(description)
 
 

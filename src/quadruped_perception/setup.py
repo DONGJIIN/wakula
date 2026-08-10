@@ -1,3 +1,5 @@
+"""ament_python 安装元数据：感知节点、参数和离线可复用算法。"""
+
 from glob import glob
 
 from setuptools import find_packages, setup

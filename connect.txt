@@ -26,15 +26,14 @@ perception_fusion（quadruped_perception）
   同步：在两个有界队列中全局选择 Header 时间差最小的一对，默认最大差 0.10 s；支持
   回调乱序，每条消息只使用一次，零时间戳或不同步就不发布融合结果。
 
-obstacle_crossing_manager（quadruped_planning）
+terrain_safety_assessor（quadruped_planning）
   首选输入：/perception/fused_obstacle（vision=true）。
   兼容输入：/terrain/features、/vision/obstacle_evidence（vision=false 时使用点云路径）。
-  输出：/crossing/mode、/crossing/action、/crossing/speed_scale、
-  /crossing/visual_assist_active。
-  注意：这是感知决策节点，不是腿部越障控制器；STEP/CLIMB 目前输出零速度。
+  输出：/terrain/navigation_mode、/terrain/speed_limit、/terrain/visual_assist_active。
+  注意：这是导航约束节点，不发布动作、Action 或关节命令；STEP/CLIMB 的速度上限为零。
 
-quadruped_cmd_vel_gate（quadruped_planning）
-  输入：/cmd_vel_smoothed、/crossing/speed_scale。
+navigation_speed_gate（quadruped_planning）
+  输入：/cmd_vel_smoothed、/terrain/speed_limit。
   输出：/cmd_vel_terrain_safe。Nav2 命令或决策任一超时即持续输出零 Twist。
 
 nav2_readiness_monitor（slam）
@@ -51,7 +50,7 @@ SLAM Toolbox
 Nav2
   输入：/map、/scan、/perception/obstacle_points、/odom、TF 和目标位姿。
   输出链：controller/behavior -> /cmd_vel_nav -> velocity_smoother -> /cmd_vel_smoothed
-  -> quadruped_cmd_vel_gate -> /cmd_vel_terrain_safe -> collision_monitor -> /cmd_vel。
+  -> navigation_speed_gate -> /cmd_vel_terrain_safe -> collision_monitor -> /cmd_vel。
   `/cmd_vel` 当前没有硬件消费者。
 
 robot_state_publisher
@@ -113,22 +112,19 @@ robot_state_publisher
 
 五、决策和速度接口
 --------------
-/crossing/mode，std_msgs/msg/String
+/terrain/navigation_mode，std_msgs/msg/String
   WALK：地形允许 Nav2；STEP/CLIMB：识别类别但当前必须停车；STOP：危险或数据无效。
 
-/crossing/action，std_msgs/msg/String
-  典型值：NAVIGATE、VERIFY_VISUAL_OBSTACLE_WITH_DEPTH、STOP_FOR_STEP、
-  STOP_FOR_CLIMB_OR_REPLAN、REPLAN_AROUND_PIT、REPLAN_AROUND_WALL、STOP_FOR_LOW_BAR、
-  NAVIGATE_AROUND_POLE、WAIT_FOR_TERRAIN、WAIT_FOR_SYNCHRONIZED_PERCEPTION。
-  它是说明文本，不是执行命令。
-
-/crossing/speed_scale，std_msgs/msg/Float32
+/terrain/speed_limit，std_msgs/msg/Float32
   0..1。无地形心跳默认 0；WALK 通常 1；视觉复核和立柱绕行会限速；STEP/CLIMB/STOP 为 0。
 
 /cmd_vel_nav、/cmd_vel_smoothed、/cmd_vel_terrain_safe、/cmd_vel
   类型均为 geometry_msgs/msg/Twist。分别表示 Nav2 原始、平滑后、地形门后、碰撞监控后。
 
 /navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
+
+/terrain/visual_assist_active，std_msgs/msg/Bool
+  表示当前速度上限是否受稳定视觉证据限制，仅供调试和 rosbag 统计。
 
 六、设备替换合同
 ------------

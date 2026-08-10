@@ -142,14 +142,17 @@ class PerceptionFusion(Node):
         )
 
     def terrain_callback(self, msg: TerrainFeatures) -> None:
+        """缓存一条带采样时间的点云几何摘要并尝试配对。"""
         self.terrain_queue.append(msg)
         self._try_pair()
 
     def vision_callback(self, msg: VisionObstacle) -> None:
+        """缓存一条稳定视觉证据并尝试配对。"""
         self.vision_queue.append(msg)
         self._try_pair()
 
     def _try_pair(self) -> None:
+        """发布至多一对同步观测，并丢弃已经消费的旧消息。"""
         if not self.terrain_queue or not self.vision_queue:
             return
         pair = find_synchronized_pair(
@@ -190,6 +193,7 @@ class PerceptionFusion(Node):
         self._diagnostic(DiagnosticStatus.OK, "camera/cloud synchronized", skew)
 
     def _diagnostic(self, level: int, message: str, skew: float) -> None:
+        """通过标准 diagnostics 报告同步状态和当前时间差。"""
         status = DiagnosticStatus(
             level=level,
             name="quadruped/perception_fusion",
@@ -204,6 +208,7 @@ class PerceptionFusion(Node):
 
 
 def main(args=None):
+    """启动相机—点云时间同步融合节点。"""
     rclpy.init(args=args)
     node = PerceptionFusion()
     try:

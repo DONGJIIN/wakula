@@ -8,6 +8,7 @@ from quadruped_perception.perception_fusion import (
 
 
 def terrain(obstacle_type=TerrainFeatures.STEP):
+    """构造一条有效点云几何测试消息。"""
     msg = TerrainFeatures()
     msg.valid = True
     msg.obstacle_type = obstacle_type
@@ -21,6 +22,7 @@ def terrain(obstacle_type=TerrainFeatures.STEP):
 
 
 def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
+    """同类视觉提高置信度但不能替代几何有效位。"""
     cloud = terrain(TerrainFeatures.WALL)
     camera = VisionObstacle(obstacle_type=VisionObstacle.WALL, confidence=0.8)
     result = fuse_observations(cloud, camera, 0.03, 0.55)
@@ -33,6 +35,7 @@ def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
 
 
 def test_visual_bar_only_refines_existing_positive_geometry():
+    """横杆细分类必须同时满足点云离地净空。"""
     camera = VisionObstacle(
         obstacle_type=VisionObstacle.HEIGHT_BAR,
         confidence=0.9,
@@ -54,6 +57,7 @@ def test_visual_bar_only_refines_existing_positive_geometry():
 
 
 def _stamp(msg, seconds, nanoseconds=0):
+    """为测试消息写入 ROS Header 时间戳。"""
     msg.header.stamp.sec = seconds
     msg.header.stamp.nanosec = nanoseconds
     return msg
@@ -75,6 +79,7 @@ def test_pairing_handles_out_of_order_callbacks_and_uses_each_stamp():
 
 
 def test_pairing_rejects_zero_or_out_of_window_timestamps():
+    """零时间戳和超出同步窗口的消息不能融合。"""
     assert find_synchronized_pair([terrain()], [VisionObstacle()], 0.10) is None
     cloud = _stamp(terrain(), 20)
     image = _stamp(VisionObstacle(), 21)

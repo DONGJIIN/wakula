@@ -15,7 +15,7 @@ def package_file(package: str, folder: str, filename: str):
 
 
 def generate_launch_description():
-    """Declare the sensor-only stack shared by SLAM and Nav2."""
+    """声明感知、地形安全评估和 Nav2 速度约束的公共启动入口。"""
     use_sim_time = LaunchConfiguration("use_sim_time")
     vision = LaunchConfiguration("vision")
     robot_model = LaunchConfiguration("robot_model")
@@ -23,7 +23,9 @@ def generate_launch_description():
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
     terrain_params_file = LaunchConfiguration("terrain_params_file")
     vision_params_file = LaunchConfiguration("vision_params_file")
-    crossing_params_file = LaunchConfiguration("crossing_params_file")
+    terrain_navigation_params_file = LaunchConfiguration(
+        "terrain_navigation_params_file"
+    )
 
     description_file = package_file(
         "quadruped_description", "urdf", "quadruped.urdf.xacro"
@@ -54,9 +56,9 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
-                "crossing_params_file",
+                "terrain_navigation_params_file",
                 default_value=package_file(
-                    "quadruped_planning", "config", "crossing.yaml"
+                    "quadruped_planning", "config", "terrain_navigation.yaml"
                 ),
             ),
             Node(
@@ -96,10 +98,10 @@ def generate_launch_description():
             ),
             Node(
                 package="quadruped_planning",
-                executable="obstacle_crossing_manager",
+                executable="terrain_safety_assessor",
                 output="screen",
                 parameters=[
-                    crossing_params_file,
+                    terrain_navigation_params_file,
                     {
                         "prefer_fused_obstacle": ParameterValue(
                             vision, value_type=bool
@@ -110,9 +112,9 @@ def generate_launch_description():
             ),
             Node(
                 package="quadruped_planning",
-                executable="cmd_vel_gate",
+                executable="navigation_speed_gate",
                 output="screen",
-                parameters=[crossing_params_file, common_time],
+                parameters=[terrain_navigation_params_file, common_time],
             ),
         ]
     )

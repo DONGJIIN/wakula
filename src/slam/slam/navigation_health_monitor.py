@@ -49,7 +49,7 @@ def navigation_failures(
     tf_valid: bool,
     odom_jump: bool,
 ):
-    """返回确定顺序的失效原因，供在线监控与故障注入测试共用。"""
+    """返回确定顺序的失效原因，供在线监控与异常场景回归测试共用。"""
     checks = {
         "scan": bool(scan_fresh_and_valid),
         "odom": bool(odom_fresh_and_valid),
@@ -100,10 +100,12 @@ class NavigationHealthMonitor(Node):
         self.create_timer(0.1, self.evaluate)
 
     def scan_callback(self, msg: LaserScan) -> None:
+        """缓存激光有效率判定和接收时间。"""
         self.scan_valid = scan_is_valid(msg.ranges, self.minimum_scan_valid_ratio)
         self.last_scan_time = self.get_clock().now()
 
     def odom_callback(self, msg: Odometry) -> None:
+        """缓存里程计有限性、协方差、跳变判定和接收时间。"""
         xy = (float(msg.pose.pose.position.x), float(msg.pose.pose.position.y))
         self.odom_jump = self.previous_xy is not None and math.hypot(
             xy[0] - self.previous_xy[0], xy[1] - self.previous_xy[1]
@@ -113,11 +115,13 @@ class NavigationHealthMonitor(Node):
         self.last_odom_time = self.get_clock().now()
 
     def _fresh(self, stamp) -> bool:
+        """判断输入是否未超过配置的健康超时。"""
         return stamp is not None and 0.0 <= (
             self.get_clock().now() - stamp
         ).nanoseconds / 1e9 <= self.timeout
 
     def evaluate(self) -> None:
+        """汇总传感器、TF 和漂移检查并发布健康状态。"""
         tf_valid = self.tf_buffer.can_transform(
             self.global_frame,
             self.base_frame,
@@ -137,7 +141,10 @@ class NavigationHealthMonitor(Node):
             name="quadruped/navigation_health",
             hardware_id="navigation_inputs",
             message="healthy" if healthy else "failed: " + ",".join(failed),
-            values=[KeyValue(key=name, value=str(passed).lower()) for name, passed in checks.items()],
+            values=[
+                KeyValue(key=name, value=str(passed).lower())
+                for name, passed in checks.items()
+            ],
         )
         array = DiagnosticArray()
         array.header.stamp = self.get_clock().now().to_msg()
@@ -146,6 +153,7 @@ class NavigationHealthMonitor(Node):
 
 
 def main(args=None):
+    """启动导航输入健康监控节点。"""
     rclpy.init(args=args)
     node = NavigationHealthMonitor()
     try:

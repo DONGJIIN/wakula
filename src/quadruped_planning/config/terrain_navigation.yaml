@@ -1,0 +1,34 @@
+# Pure navigation-safety parameters. Nothing in this file commands joints or legs.
+terrain_safety_assessor:
+  ros__parameters:
+    # Height classes are perception labels in metres, not executable gait modes.
+    step_threshold: 0.08
+    climb_threshold: 0.18
+    stop_threshold: 0.32
+    # Legacy array slope is dz/dx; roughness is metres of robust ground residual.
+    max_slope: 0.45
+    max_roughness: 0.06
+    min_points: 30
+    sensor_timeout: 0.7
+    # vision=true makes the timestamped fused message authoritative. With
+    # vision=false, launch disables this and uses /terrain/features directly.
+    prefer_fused_obstacle: true
+    fused_min_confidence: 0.25
+    # STOP is immediate. Lower hazards and recovery require consecutive frames.
+    clear_confirmation_frames: 5
+    hazard_confirmation_frames: 3
+    # Monocular vision can only reduce a WALK speed limit pending depth evidence.
+    vision_assist_enabled: true
+    vision_timeout: 0.6
+    vision_min_confidence: 0.55
+    vision_center_margin: 0.20
+    vision_speed_scale: 0.35
+
+navigation_speed_gate:
+  ros__parameters:
+    # Nav2 remains the command source; this node only enforces a fresh 0..1 limit.
+    input_topic: /cmd_vel_smoothed
+    output_topic: /cmd_vel_terrain_safe
+    command_timeout: 0.5
+    assessment_timeout: 0.7
+    default_speed_limit: 0.0

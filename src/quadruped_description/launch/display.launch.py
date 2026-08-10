@@ -1,3 +1,5 @@
+"""在 RViz 中显示未标定外形和传感器占位 TF，不启动任何控制器。"""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
@@ -7,6 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    """声明模型/RViz 调试入口；关节状态必须由外部真实系统提供。"""
     package_share = FindPackageShare("quadruped_description")
     model = LaunchConfiguration("model")
     rviz_config = LaunchConfiguration("rviz_config")

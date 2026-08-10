@@ -142,7 +142,7 @@ wakula/
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
 | `quadruped_interfaces` | 带时间戳的地形、视觉和融合强类型合同 | 三个 `msg/` 接口 |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
-| `quadruped_planning` | `WALK/STEP/CLIMB/STOP` 保守分类和 Nav2 速度门 | 两个规划节点 |
+| `quadruped_planning` | 地形风险分类、Nav2 速度上限和失效安全门 | 两个导航辅助节点 |
 | `quadruped_tools` | rosbag 标注匹配与准确率报告 | `perception_bag_evaluator` |
 | `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
 
@@ -151,10 +151,10 @@ wakula/
 - `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并用曝光/清晰度、投票率和目标框 IoU 做多帧确认。
 - `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格和连通域估计台阶、坡度、坑洞、墙、横杆和立柱。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；点云始终掌握尺度权限。
-- `obstacle_crossing_manager`：优先读取按时间戳配对的强类型融合观测，生成地形模式、处理建议和速度倍率；不输出腿部动作。
+- `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，只生成地形模式和 Nav2 速度上限。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳。
 - `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
-- `cmd_vel_gate`：检查 Nav2 命令和地形决策心跳，任一失效立即输出零速。
+- `navigation_speed_gate`：检查 Nav2 命令和地形评估心跳，任一失效立即输出零速。
 - `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
@@ -169,10 +169,10 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
 深度点云 ──> 地面分割 ──> /terrain/features_stamped┘       │
                           └─> /terrain/features（无相机兼容）│
                      /perception/fused_obstacle <───────────┘
-                                      └─> crossing manager + rosbag
+                                      └─> terrain safety assessor + rosbag
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
 
-Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
+Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
      ─> collision_monitor ─> /cmd_vel ─> 未来真机底盘接口
 
 /scan + /odom + TF ─> navigation health + Nav2 readiness
@@ -455,15 +455,15 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 
 | 模式/类别 | 当前处理 | 是否执行腿部动作 |
 |---|---|---|
-| `WALK` | 允许 Nav2 速度通过；视觉证据可要求减速复核 | 否 |
-| `POLE` | 低速交给 Nav2 绕行 | 否 |
-| `STEP` | 发布 `STOP_FOR_STEP` 并将速度比例置零 | 否 |
-| `CLIMB` | 发布 `STOP_FOR_CLIMB_OR_REPLAN` 并停车 | 否 |
-| `PIT` / `WALL` / `BAR` | 停车并请求重规划或未来控制器处理 | 否 |
-| 数据断流、TF 失败或字段非法 | `WAIT_FOR_TERRAIN`，保持停车 | 否 |
+| `WALK` | Nav2 速度上限为 1；视觉证据可将上限降至 0.35 | 否 |
+| `POLE` | 速度上限为 0.35，由 Nav2 代价地图规划绕行 | 否 |
+| `STEP` / `CLIMB` | 仅发布地形类别，速度上限为零 | 否 |
+| `PIT` / `WALL` / `BAR` | 发布 `STOP` 和零速度上限 | 否 |
+| 数据断流、TF 失败或字段非法 | 发布 `STOP` 和零速度上限 | 否 |
 
-`/crossing/action` 是给日志和后续开发者看的文字建议，不是运动命令。当前没有
-`TraverseObstacle` Action、SDK 网关、关节轨迹或越障控制器；待真机运动控制稳定后再设计。
+当前接口没有动作建议或执行含义，只发布 `/terrain/navigation_mode`、
+`/terrain/speed_limit` 和诊断信息。仓库没有 `TraverseObstacle` Action、SDK 网关、
+关节轨迹或越障控制器；待真机运动控制稳定后再单独设计。
 
 ## 9. 点云地形与 Nav2 融合
 
@@ -544,7 +544,7 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 
 - Nav2 controller 只发布 `/cmd_vel_nav`。
 - Velocity Smoother 限制加速度并发布 `/cmd_vel_smoothed`。
-- `cmd_vel_gate` 应用 `/crossing/speed_scale`，同时检查命令和决策心跳。
+- `navigation_speed_gate` 应用 `/terrain/speed_limit`，同时检查命令和评估心跳。
 - Collision Monitor 读取 `/scan`，并作为 `/cmd_vel` 唯一发布者。
 
 规划命令或地形决策心跳任意一项超时，速度门都会发布零速度。这只是导航软件层的失效
@@ -570,7 +570,7 @@ NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通�
 | 足端接触限制和台阶计分 | 真实足端力/接触检测完成 |
 | Nav2 与越障控制切换 | 基础步态、急停和全身控制通过台架验收 |
 
-当前仓库不发布 `/competition/*` 话题，也没有比赛状态机或调试航点，避免在缺少真机反馈
+当前仓库不发布 `/competition/*` 话题，也没有比赛状态机、Waypoint Follower 或调试航点，避免在缺少真机反馈
 时把计时流程误认为完整任务能力。
 
 ## 12. 配置文件索引
@@ -581,7 +581,7 @@ NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通�
 | `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
-| `quadruped_planning/config/crossing.yaml` | 地形分类阈值、视觉辅助和速度门超时 |
+| `quadruped_planning/config/terrain_navigation.yaml` | 地形分类阈值、视觉辅助和速度门超时 |
 | `quadruped_tools/perception_bag_evaluator.py` | rosbag 标签、指标和参数搜索 |
 | `.github/workflows/ros2-ci.yaml` | Ubuntu 24.04 + ROS 2 Jazzy 自动构建测试 |
 | `slam/config/slam.yaml` | SLAM Toolbox |

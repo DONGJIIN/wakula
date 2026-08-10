@@ -1,3 +1,5 @@
+"""ament_python 安装元数据：只安装统一启动入口。"""
+
 from setuptools import find_packages, setup
 from glob import glob
 

@@ -65,20 +65,24 @@ class Nav2ReadinessMonitor(Node):
         )
 
     def _scan_callback(self, _msg: LaserScan) -> None:
+        """记录最新激光接收时间，不在此节点重复解析量测。"""
         self.scan_received = True
         self.last_scan_time = self.get_clock().now()
 
     def _odom_callback(self, _msg: Odometry) -> None:
+        """记录最新里程计接收时间，质量由健康监控另行检查。"""
         self.odom_received = True
         self.last_odom_time = self.get_clock().now()
 
     def _sensor_is_fresh(self, stamp) -> bool:
+        """按节点 ROS 时钟判断输入是否仍在启动允许窗口内。"""
         if stamp is None:
             return False
         age = (self.get_clock().now() - stamp).nanoseconds / 1e9
         return 0.0 <= age <= self.sensor_timeout
 
     def _check_readiness(self) -> None:
+        """仅在 scan、odom 和 map→base_link TF 同时就绪时启动 Nav2。"""
         if self.startup_requested:
             return
         # 不只检查“曾经收到”，还检查传感器正在持续更新。
@@ -118,6 +122,7 @@ class Nav2ReadinessMonitor(Node):
         self.get_logger().info("Inputs ready; requesting Nav2 activation")
 
     def _startup_response(self, future) -> None:
+        """处理 lifecycle STARTUP 服务结果，并允许失败后重试。"""
         try:
             response = future.result()
         except Exception as exc:

@@ -14,6 +14,7 @@ from quadruped_tools.perception_bag_evaluator import (
 
 
 def test_classification_metrics_include_confusion_and_macro_f1():
+    """报告包含准确率、macro-F1 和混淆矩阵。"""
     metrics = classification_metrics(
         ["poles", "poles", "none"], ["poles", "none", "none"]
     )
@@ -25,6 +26,7 @@ def test_classification_metrics_include_confusion_and_macro_f1():
 
 
 def test_optimizers_recover_separable_vision_and_terrain_samples():
+    """网格搜索能从可分样本恢复合理阈值。"""
     vision = [
         (TimedRecord(1, (1.0, 0.80)), "poles"),
         (TimedRecord(2, (1.0, 0.70)), "poles"),
@@ -46,6 +48,7 @@ def test_optimizers_recover_separable_vision_and_terrain_samples():
 
 
 def test_evaluate_aligns_labels_and_returns_yaml_parameters():
+    """评估器按时间对齐标签并生成参数建议。"""
     labels = [
         GroundTruth(1_000_000_000, "poles", "STEP"),
         GroundTruth(2_000_000_000, "none", "WALK"),
@@ -68,6 +71,7 @@ def test_evaluate_aligns_labels_and_returns_yaml_parameters():
 
 
 def test_chronological_holdout_keeps_newest_samples_for_validation():
+    """时间切分把最新样本留作独立验证集。"""
     """Calibration and validation must not score the exact same time samples."""
     samples = [(TimedRecord(stamp, ()), "none") for stamp in range(10)]
     training, validation = chronological_split(samples, 0.30)
@@ -76,6 +80,7 @@ def test_chronological_holdout_keeps_newest_samples_for_validation():
 
 
 def test_label_template_and_csv_validation(tmp_path):
+    """标注模板可生成且非法类别会被拒绝。"""
     output = tmp_path / "labels.csv"
     records = [TimedRecord(1_000_000_000, ()), TimedRecord(2_000_000_000, ())]
     assert write_label_template(output, records, [], 0.5) == 2

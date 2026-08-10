@@ -101,13 +101,13 @@ SLAM 产生 map -> odom。启用地形感知还需：
   ros2 topic hz /odom
   ros2 topic hz /terrain/features_stamped
   ros2 topic hz /vision/obstacle_stamped
-  ros2 topic echo /crossing/mode
-  ros2 topic echo /crossing/speed_scale
+  ros2 topic echo /terrain/navigation_mode
+  ros2 topic echo /terrain/speed_limit
   ros2 run tf2_ros tf2_echo base_link <点云frame>
   ros2 run tf2_ros tf2_echo map base_link
   ./scripts/diagnose.sh
 
-正常现象：vision=true 时没有同步的相机—点云消息会保持 speed_scale=0；识别 CLEAR 且
+正常现象：vision=true 时没有同步的相机—点云消息会保持 speed_limit=0；识别 CLEAR 且
 数据持续新鲜后为 1；STEP/CLIMB/PIT/WALL/BAR 为 0；相机证据只能在 WALK 时减速，
 不能触发腿部动作。只有点云时使用 vision:=false，决策会自动采用兼容路径。
 

@@ -1,6 +1,7 @@
 """Nav2 与底盘之间的失效安全速度门。
 
-只有 Nav2 速度命令和越障决策两条独立心跳都新鲜时才允许非零输出。节点本身不替代
+只有 Nav2 速度命令和地形安全评估两条独立心跳都新鲜时才允许非零输出。节点不规划
+路线、不创建新的运动意图，只约束 Nav2 已经计算出的 Twist。它也不替代
 硬件急停、驱动器看门狗或姿态保护，它只是防止 ROS 节点失联后沿用最后一条速度。
 """
 
@@ -15,57 +16,74 @@ from std_msgs.msg import Float32
 
 def gated_twist(
     source: Twist,
-    scale: float,
+    limit: float,
     command_fresh: bool,
     decision_fresh: bool,
 ) -> Twist:
-    """仅在 Nav2 与地形判断心跳都有效时缩放 Twist，否则输出零。"""
+    """仅在 Nav2 与评估心跳均有效时按 0～1 上限缩放 Twist。"""
     output = Twist()
     # 两条独立心跳任一失效都输出默认构造的零 Twist。
     if (
         not command_fresh
         or not decision_fresh
-        or scale <= 0.0
+        or not isfinite(limit)
+        or limit <= 0.0
     ):
         return output
-    output.linear.x = source.linear.x * scale
-    output.linear.y = source.linear.y * scale
-    output.linear.z = source.linear.z * scale
-    output.angular.x = source.angular.x * scale
-    output.angular.y = source.angular.y * scale
-    output.angular.z = source.angular.z * scale
+    safe_limit = min(1.0, limit)
+    output.linear.x = source.linear.x * safe_limit
+    output.linear.y = source.linear.y * safe_limit
+    output.linear.z = source.linear.z * safe_limit
+    output.angular.x = source.angular.x * safe_limit
+    output.angular.y = source.angular.y * safe_limit
+    output.angular.z = source.angular.z * safe_limit
     return output
 
 
-class CmdVelGate(Node):
-    """以 20 Hz 重算安全速度，规划或地形决策任一超时即停车。"""
+class NavigationSpeedGate(Node):
+    """以 20 Hz 重算导航速度，命令或地形评估任一超时即归零。"""
 
     def __init__(self):
-        super().__init__("quadruped_cmd_vel_gate")
+        super().__init__("navigation_speed_gate")
         self.declare_parameter("input_topic", "/cmd_vel_smoothed")
         self.declare_parameter("output_topic", "/cmd_vel_terrain_safe")
         self.declare_parameter("command_timeout", 0.5)
-        self.declare_parameter("decision_timeout", 0.7)
-        self.declare_parameter("default_speed_scale", 0.0)
+        self.declare_parameter("assessment_timeout", 0.7)
+        self.declare_parameter("default_speed_limit", 0.0)
 
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value
-        self.timeout = float(self.get_parameter("command_timeout").value)
-        self.decision_timeout = float(
-            self.get_parameter("decision_timeout").value
+        configured_command_timeout = float(
+            self.get_parameter("command_timeout").value
         )
-        self.speed_scale = max(
-            0.0,
-            min(1.0, float(self.get_parameter("default_speed_scale").value)),
+        configured_assessment_timeout = float(
+            self.get_parameter("assessment_timeout").value
+        )
+        self.command_timeout = (
+            configured_command_timeout
+            if isfinite(configured_command_timeout) and configured_command_timeout > 0.0
+            else 0.5
+        )
+        self.assessment_timeout = (
+            configured_assessment_timeout
+            if isfinite(configured_assessment_timeout)
+            and configured_assessment_timeout > 0.0
+            else 0.7
+        )
+        configured_limit = float(self.get_parameter("default_speed_limit").value)
+        self.speed_limit = (
+            max(0.0, min(1.0, configured_limit))
+            if isfinite(configured_limit)
+            else 0.0
         )
         self.latest_cmd = Twist()
         self.last_cmd_time = self.get_clock().now()
-        self.last_decision_time = self.get_clock().now()
+        self.last_assessment_time = self.get_clock().now()
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
         self.create_subscription(
-            Float32, "/crossing/speed_scale", self.scale_callback, 10
+            Float32, "/terrain/speed_limit", self.limit_callback, 10
         )
         self.timer = self.create_timer(0.05, self.publish_safe_command)
         self.get_logger().info(f"Velocity gate: {input_topic} -> {output_topic}")
@@ -75,30 +93,31 @@ class CmdVelGate(Node):
         self.latest_cmd = msg
         self.last_cmd_time = self.get_clock().now()
 
-    def scale_callback(self, msg: Float32) -> None:
-        """接收 0～1 速度比例；NaN/Inf 或越界值按安全范围处理。"""
+    def limit_callback(self, msg: Float32) -> None:
+        """接收 0～1 速度上限；NaN/Inf 按零处理。"""
         value = float(msg.data)
-        self.speed_scale = max(0.0, min(1.0, value)) if isfinite(value) else 0.0
-        self.last_decision_time = self.get_clock().now()
+        self.speed_limit = max(0.0, min(1.0, value)) if isfinite(value) else 0.0
+        self.last_assessment_time = self.get_clock().now()
 
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
         command_age = (now - self.last_cmd_time).nanoseconds / 1e9
-        decision_age = (now - self.last_decision_time).nanoseconds / 1e9
+        assessment_age = (now - self.last_assessment_time).nanoseconds / 1e9
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
             self.latest_cmd,
-            self.speed_scale,
-            command_age <= self.timeout,
-            decision_age <= self.decision_timeout,
+            self.speed_limit,
+            command_age <= self.command_timeout,
+            assessment_age <= self.assessment_timeout,
         )
         self.pub.publish(output)
 
 
 def main(args=None):
+    """启动 Nav2 速度安全门。"""
     rclpy.init(args=args)
-    node = CmdVelGate()
+    node = NavigationSpeedGate()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

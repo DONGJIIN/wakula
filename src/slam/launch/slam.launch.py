@@ -1,7 +1,13 @@
 """一键启动 Wakula 的 SLAM、Nav2、OpenCV 与点云感知栈。"""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, LogInfo, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    LogInfo,
+    OpaqueFunction,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -42,7 +48,9 @@ def _launch_complete_stack(context):
             "point_cloud_topic": topics["point_cloud_topic"],
             "terrain_params_file": LaunchConfiguration("terrain_params_file"),
             "vision_params_file": LaunchConfiguration("vision_params_file"),
-            "crossing_params_file": LaunchConfiguration("crossing_params_file"),
+            "terrain_navigation_params_file": LaunchConfiguration(
+                "terrain_navigation_params_file"
+            ),
         }.items(),
     )
     slam_toolbox = IncludeLaunchDescription(
@@ -130,8 +138,10 @@ def generate_launch_description():
                 default_value=package_file("quadruped_perception", "config", "terrain.yaml"),
             ),
             DeclareLaunchArgument(
-                "crossing_params_file",
-                default_value=package_file("quadruped_planning", "config", "crossing.yaml"),
+                "terrain_navigation_params_file",
+                default_value=package_file(
+                    "quadruped_planning", "config", "terrain_navigation.yaml"
+                ),
             ),
             DeclareLaunchArgument(
                 "rviz_config_file", default_value=package_file("slam", "rviz", "slam.rviz")

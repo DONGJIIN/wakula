@@ -1,4 +1,8 @@
-"""Minimal Nav2 runtime without unused routing or docking processes."""
+"""只启动当前建图导航链实际需要的 Nav2 生命周期节点。
+
+不启动 Docking、Route Server 或 Waypoint Follower；这些属于以后任务层需求。控制器仍只
+产生标准 ``Twist``，由速度平滑、地形速度门和 Collision Monitor 依次约束。
+"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, SetEnvironmentVariable
@@ -23,6 +27,7 @@ def nav2_node(package, executable, parameters, log_level, remappings, name=None)
 
 
 def generate_launch_description():
+    """创建最小 Nav2 节点集、生命周期管理和输入健康监控。"""
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     params_file = LaunchConfiguration("params_file")
@@ -41,7 +46,6 @@ def generate_launch_description():
         "velocity_smoother",
         "collision_monitor",
         "bt_navigator",
-        "waypoint_follower",
     ]
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -104,13 +108,6 @@ def generate_launch_description():
         nav2_node(
             "nav2_bt_navigator",
             "bt_navigator",
-            configured_params,
-            log_level,
-            tf_remaps,
-        ),
-        nav2_node(
-            "nav2_waypoint_follower",
-            "waypoint_follower",
             configured_params,
             log_level,
             tf_remaps,

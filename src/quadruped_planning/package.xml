@@ -2,7 +2,7 @@
 <package format="3">
   <name>quadruped_planning</name>
   <version>0.1.0</version>
-  <description>Conservative terrain decision and Nav2 velocity gate.</description>
+  <description>Terrain safety assessment and a fail-closed Nav2 speed limit gate.</description>
   <maintainer email="developer@example.com">Quadruped Developer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>

@@ -15,7 +15,7 @@
       "problemMatcher": []
     },
     {
-      "label": "ROS: launch quadruped",
+      "label": "ROS: launch perception + terrain safety",
       "type": "shell",
       "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_bringup bringup.launch.py'",
       "problemMatcher": []

@@ -1,3 +1,5 @@
+"""ament_python 安装元数据：地形安全评估与 Nav2 速度门。"""
+
 from setuptools import find_packages, setup
 
 package_name = "quadruped_planning"
@@ -9,7 +11,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/config", ["config/crossing.yaml"]),
+        ("share/" + package_name + "/config", ["config/terrain_navigation.yaml"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -20,9 +22,9 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "obstacle_crossing_manager = "
-            "quadruped_planning.obstacle_crossing_manager:main",
-            "cmd_vel_gate = quadruped_planning.cmd_vel_gate:main",
+            "terrain_safety_assessor = "
+            "quadruped_planning.terrain_safety_assessor:main",
+            "navigation_speed_gate = quadruped_planning.cmd_vel_gate:main",
         ],
     },
 )

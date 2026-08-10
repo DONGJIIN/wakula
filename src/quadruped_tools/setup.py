@@ -1,3 +1,5 @@
+"""ament_python 安装元数据：rosbag 感知标注与准确率评估工具。"""
+
 from setuptools import find_packages, setup
 
 package_name = "quadruped_tools"

@@ -37,7 +37,7 @@ vision_obstacle_detector:
     min_temporal_iou: 0.20
     # Lock one default topic; fail over only when it has stopped publishing.
     source_switch_timeout: 2.0
-    # OpenCV HSV ranges; recalibrate under venue lighting before competition.
+    # OpenCV HSV ranges; recalibrate for the actual camera and venue lighting.
     orange_hsv_lower: [5, 80, 70]
     orange_hsv_upper: [25, 255, 255]
     blue_hsv_lower: [90, 70, 50]

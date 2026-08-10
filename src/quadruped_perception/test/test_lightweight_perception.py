@@ -219,6 +219,7 @@ def test_sensor_topic_selection_locks_and_fails_over():
 
 
 def test_xyz_transform_handles_rotation_translation_and_invalid_quaternion():
+    """XYZ 变换正确应用刚体位姿并拒绝退化四元数。"""
     points = np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 2.0]], dtype=np.float32)
     half = np.sqrt(0.5)
     transformed = transform_xyz(points, (1.0, 2.0, 3.0), (0.0, 0.0, half, half))
@@ -241,6 +242,7 @@ def _dense_floor(z=0.0):
 
 
 def test_grid_ground_segmentation_detects_wall_without_biasing_plane():
+    """墙面不能把稳健地面平面拉成斜坡。"""
     floor = _dense_floor()
     wall = np.asarray(
         [
@@ -259,6 +261,7 @@ def test_grid_ground_segmentation_detects_wall_without_biasing_plane():
 
 
 def test_grid_ground_segmentation_requires_real_low_returns_for_pit():
+    """坑洞分类必须由真实低处回波支持。"""
     floor = _dense_floor()
     pit = np.asarray(
         [

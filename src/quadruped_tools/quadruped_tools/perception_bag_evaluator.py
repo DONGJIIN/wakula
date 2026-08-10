@@ -16,7 +16,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 import yaml
 
-from quadruped_planning.obstacle_crossing_manager import select_terrain_decision
+from quadruped_planning.terrain_safety_assessor import select_terrain_assessment
 
 
 VISION_CODES = {
@@ -142,7 +142,7 @@ def terrain_prediction(
     points = float(data[3])
     slope = abs(float(data[4])) if len(data) > 4 else 0.0
     roughness = float(data[5]) if len(data) > 5 else 0.0
-    return select_terrain_decision(
+    return select_terrain_assessment(
         height,
         points,
         slope,
@@ -473,6 +473,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    """解析 CLI，生成标注模板或输出评估报告与参数建议。"""
     args = build_argument_parser().parse_args(argv)
     records = read_rosbag(args.bag, args.vision_topic, args.terrain_topic)
     vision_records = records[args.vision_topic]
@@ -501,7 +502,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     args.suggestions.write_text(
         yaml.safe_dump(
-            {"obstacle_crossing_manager": {"ros__parameters": suggestions}},
+            {"terrain_safety_assessor": {"ros__parameters": suggestions}},
             sort_keys=False,
             allow_unicode=True,
         ),

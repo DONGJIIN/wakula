@@ -22,7 +22,7 @@ def test_bringup_launch_description_is_constructible():
     assert {
         "vision_params_file",
         "terrain_params_file",
-        "crossing_params_file",
+        "terrain_navigation_params_file",
         "robot_model",
         "camera_topic",
         "point_cloud_topic",

@@ -39,13 +39,13 @@ Wakula 算法说明
    分别满足点云净空/窄宽度，冲突时不覆盖几何类别。
 
 3. quadruped_planning
-   obstacle_crossing_manager.py：历史名称保留以兼容话题。vision=true 时优先使用同步后的
-   FusedObstacle，vision=false 时使用旧数组路径；两种路径都转换为 WALK/STEP/CLIMB/
-   STOP、文字建议和速度比例。STOP 立即生效；风险降低和 STEP/CLIMB 分类需多帧确认。
-   现阶段 STEP/CLIMB 的速度比例均为 0。
+   terrain_safety_assessor.py：vision=true 时优先使用同步后的 FusedObstacle，vision=false
+   时使用旧数组路径；两种路径都只转换为 WALK/STEP/CLIMB/STOP 地形模式和 0～1 Nav2
+   速度上限。STOP 立即生效；风险降低和 STEP/CLIMB 分类需多帧确认。不发布动作建议。
 
-   cmd_vel_gate.py：同时要求 Nav2 命令和地形决策心跳新鲜，按速度比例缩放；任一路断流
-   或比例为零就输出零 Twist。它是 ROS 层保护，不替代未来驱动器急停和硬件看门狗。
+   cmd_vel_gate.py（可执行名 navigation_speed_gate）：同时要求 Nav2 命令和地形评估心跳
+   新鲜，按速度上限缩放；任一路断流或上限为零就输出零 Twist。它是导航软件保护，不
+   替代未来驱动器急停和硬件看门狗。
 
 4. quadruped_tools
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类
