@@ -60,7 +60,7 @@ class ObstacleEvidence:
     height: float = 0.0
 
     def as_array(self) -> List[float]:
-        """Return a compact atomic ROS array representation."""
+        """返回紧凑且字段同时更新的 ROS 数组兼容表示。"""
         return [
             HINT_CODES.get(self.hint, 0.0),
             self.confidence,
@@ -141,12 +141,12 @@ def adaptive_canny_thresholds(
 
 
 def box_fill_ratio(box: ContourBox) -> float:
-    """Return contour rectangularity in its bounding box."""
+    """计算轮廓面积占外接矩形的比例，用于剔除极细碎边缘。"""
     return box[4] / max(1.0, float(box[2] * box[3]))
 
 
 def mask_density(mask: np.ndarray, box: ContourBox) -> float:
-    """Measure supporting pixels inside a candidate bounding box."""
+    """计算候选框内有效掩膜像素密度，过滤大框内的稀疏反光。"""
     x, y, width, height, _ = box
     region = mask[y : y + height, x : x + width]
     return float(cv2.countNonZero(region)) / max(1.0, float(width * height))
@@ -203,7 +203,7 @@ def best_pole_pair(
 
 
 def largest_color_feature(mask: np.ndarray, min_area: float) -> ColorFeature:
-    """Return area and normalized bounding box for the largest valid contour."""
+    """返回最大有效色块的面积与归一化外接框。"""
     boxes = contour_boxes(mask, min_area)
     if not boxes:
         return 0.0, 0.0, 0.0, 0.0, 0.0
@@ -225,7 +225,7 @@ def evidence_from_boxes(
     image_width: int,
     image_height: int,
 ) -> ObstacleEvidence:
-    """Create normalized evidence covering one or more related regions."""
+    """合并一个或多个相关区域，生成覆盖它们的归一化障碍证据。"""
     left = min(box[0] for box in boxes)
     top = min(box[1] for box in boxes)
     right = max(box[0] + box[2] for box in boxes)
@@ -527,8 +527,7 @@ def stabilize_evidence(
     )
     return ObstacleEvidence(
         hint=hint,
-        # Repetition is already enforced by minimum_matches. Keep a small
-        # consistency penalty without suppressing a valid 3-of-5 result.
+        # minimum_matches 已保证重复出现；这里只施加小幅一致性惩罚，不能压掉有效的 3/5 投票。
         confidence=confidence
         * (0.8 + 0.2 * consistency)
         * (0.85 + 0.10 * spatial_consistency + 0.05 * minimum_overlap),
@@ -543,6 +542,11 @@ class VisionObstacleDetector(Node):
     """从常见相机话题选择单一数据源，并发布经过时序确认的辅助证据。"""
 
     def __init__(self):
+        """加载可标定参数，创建候选相机订阅和视觉证据发布器。
+
+        参数分为图像质量、颜色、轮廓和时序确认四组。换相机时应通过 YAML 调参，不能把
+        场地颜色或分辨率常量写回检测函数，确保在线节点和离线评估使用同一算法。
+        """
         super().__init__("vision_obstacle_detector")
         self.declare_parameter("image_topic", "")
         self.declare_parameter("image_topic_candidates", DEFAULT_IMAGE_TOPICS)
@@ -725,7 +729,7 @@ class VisionObstacleDetector(Node):
         return values.astype(np.uint8)
 
     def image_callback(self, msg: Image, source: str) -> None:
-        """Keep one newest frame so camera rate cannot create a backlog."""
+        """只保存最新图像，避免相机帧率高于处理能力时形成积压。"""
         now = self.get_clock().now()
         active_age = (
             float("inf")
@@ -898,7 +902,7 @@ class VisionObstacleDetector(Node):
 
 
 def main(args=None):
-    """Run the bounded-rate OpenCV perception node."""
+    """运行有算力上限的 OpenCV 障碍辅助节点。"""
     rclpy.init(args=args)
     node = VisionObstacleDetector()
     try:

@@ -112,6 +112,11 @@ class NavigationHealthMonitor(Node):
     """持续发布可锁存的导航健康状态；任何必需输入断流都变为 false。"""
 
     def __init__(self):
+        """建立导航输入健康状态和 transient-local 健康话题。
+
+        transient-local 使稍后启动的速度门能立即获得最近状态，而不必在未知状态下等待一个
+        完整检测周期；内部默认值仍为 false，满足失效安全原则。
+        """
         super().__init__("navigation_health_monitor")
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("base_frame", "base_link")

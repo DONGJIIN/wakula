@@ -1,4 +1,4 @@
-"""Start Nav2 only after the minimum sensor and TF inputs are ready."""
+"""在最小传感器与定位 TF 就绪后才启动 Nav2 生命周期节点。"""
 
 import rclpy
 from nav2_msgs.srv import ManageLifecycleNodes
@@ -13,9 +13,10 @@ from tf2_ros import Buffer, TransformListener
 
 
 class Nav2ReadinessMonitor(Node):
-    """Request Nav2 startup only when localization prerequisites exist."""
+    """把 Nav2 激活条件集中到一个节点，避免各服务器在输入缺失时反复报错。"""
 
     def __init__(self):
+        """订阅雷达/里程计心跳并建立生命周期管理服务客户端。"""
         super().__init__("nav2_readiness_monitor")
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("base_frame", "base_link")
@@ -138,7 +139,7 @@ class Nav2ReadinessMonitor(Node):
 
 
 def main(args=None):
-    """Run the sensor and localization readiness monitor."""
+    """运行传感器与定位就绪监控节点。"""
     rclpy.init(args=args)
     node = Nav2ReadinessMonitor()
     try:

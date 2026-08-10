@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# 记录算法复现所需的原始输入、中间证据、最终约束和 TF。
 set -euo pipefail
 
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 第一个参数可指定外置硬盘目录；省略时写入工作空间 bags/。
 bag_root="${1:-${workspace_dir}/bags}"
 mkdir -p "$bag_root"
 bag_name="wakula_$(date +%Y%m%d_%H%M%S)"

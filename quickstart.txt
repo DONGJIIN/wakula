@@ -144,6 +144,8 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
 修改算法时同步更新 README.md、instruction.txt、connect.txt、quickstart.txt。新增通信接口先
 更新 connect.txt；改变参数或流程更新 instruction.txt；新增启动方式更新 quickstart.txt。
+新增模块或修改关键算法时同步维护模块/函数 docstring、参数分组、单位、坐标系、失效行为和
+“为何采用该策略”的注释；不要用逐行复述代码的注释制造阅读噪声。
 
 八、真机出来后的接入顺序
 --------------------

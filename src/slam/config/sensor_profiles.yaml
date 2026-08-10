@@ -1,5 +1,5 @@
-# Hardware names are convenience presets only. The algorithm-side contract stays
-# /scan, /odom, sensor_msgs/Image and sensor_msgs/PointCloud2.
+# 设备名只是常见话题的便捷预设。算法侧合同仍固定为 /scan、/odom、
+# sensor_msgs/Image 和 sensor_msgs/PointCloud2；profile 不安装或启动任何厂家驱动。
 profiles:
   ros_default:
     scan_topic: /scan
@@ -7,7 +7,7 @@ profiles:
     camera_topic: ""
     point_cloud_topic: ""
 
-  # Most ROS 2 drivers for these 2D lidars already publish the standard /scan.
+  # 这些 2D 雷达的大多数 ROS 2 驱动本身就发布标准 /scan。
   rplidar:
     scan_topic: /scan
     odom_topic: /odom
@@ -29,8 +29,7 @@ profiles:
     camera_topic: ""
     point_cloud_topic: ""
 
-  # Camera namespaces vary with driver launch arguments. Explicit launch
-  # overrides always take priority over these common starting points.
+  # 相机命名空间会随驱动启动参数变化；显式 launch 覆盖始终优先于这里的常见初值。
   realsense_d400:
     scan_topic: /scan
     odom_topic: /odom
@@ -52,8 +51,8 @@ profiles:
     camera_topic: /oak/rgb/image_raw
     point_cloud_topic: /oak/stereo/points
 
-  # A 3D lidar profile feeds the terrain/local-costmap PointCloud2 input. A
-  # separate LaserScan is still required for the current 2D SLAM pipeline.
+  # 3D 雷达 profile 只接入地形分析/局部代价地图 PointCloud2。当前 2D SLAM 仍需独立
+  # LaserScan，可由 2D 雷达或 pointcloud_to_laserscan 提供。
   velodyne:
     scan_topic: /scan
     odom_topic: /odom

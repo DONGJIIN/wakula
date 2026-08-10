@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 以 /clock 重放录制数据；算法端必须使用 use_sim_time:=true 才能正确判断消息新鲜度。
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then

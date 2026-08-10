@@ -198,6 +198,11 @@ class PerceptionFusion(Node):
     """缓存少量消息并只融合时间差在阈值内的最近观测。"""
 
     def __init__(self):
+        """建立两个有界输入队列以及融合结果/诊断发布器。
+
+        节点不使用 message_filters，是为了明确控制乱序消息的配对、消费和丢弃规则；
+        这样 rosbag 回放发生突发到达时，也不会重复使用同一帧证据。
+        """
         super().__init__("perception_fusion")
         self.declare_parameter("sync_slop", 0.10)
         self.declare_parameter("queue_size", 10)

@@ -1,3 +1,7 @@
+# Wakula 的保守 Nav2 基线。所有速度和机器人尺寸都是未标定初值，真机只能在低速、
+# 有保护条件下根据实测能力调整。速度话题完整链路见 connect.txt。
+
+# ---------- 局部路径跟踪：全局路径 -> /cmd_vel_nav ----------
 controller_server:
   ros__parameters:
     use_sim_time: false
@@ -12,6 +16,7 @@ controller_server:
     controller_plugins: ["FollowPath"]
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
+      # 15 s 内移动不足 0.25 m 视为受困，触发行为空间中的恢复流程。
       required_movement_radius: 0.25
       movement_time_allowance: 15.0
     goal_checker:
@@ -32,6 +37,7 @@ controller_server:
       acc_lim_x: 0.5
       acc_lim_y: 0.0
       acc_lim_theta: 1.0
+      # 减速度在 Nav2 中使用负数表示允许速度向零方向变化。
       decel_lim_x: -0.5
       decel_lim_y: 0.0
       decel_lim_theta: -1.0
@@ -39,6 +45,7 @@ controller_server:
       vy_samples: 1
       vtheta_samples: 20
       sim_time: 1.7
+      # 采样轨迹的空间/角度步长；越小越精细，但计算量越高。
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
@@ -47,6 +54,7 @@ controller_server:
       short_circuit_trajectory_evaluation: true
       stateful: true
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      # critic scale 是 DWB 轨迹评分权重，不是米制距离或安全阈值。
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
@@ -58,6 +66,7 @@ controller_server:
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
 
+# ---------- 全局规划：地图与目标 -> 全局路径 ----------
 planner_server:
   ros__parameters:
     use_sim_time: false
@@ -67,8 +76,10 @@ planner_server:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
       use_astar: false
+      # 建图过程中允许穿过尚未探索区域，否则前沿目标可能无路可达。
       allow_unknown: true
 
+# ---------- 恢复行为服务器：供行为树按需调用 ----------
 behavior_server:
   ros__parameters:
     use_sim_time: false
@@ -90,6 +101,7 @@ behavior_server:
     transform_tolerance: 0.2
     simulate_ahead_time: 2.0
 
+# ---------- 行为树总调度：规划、跟踪、重规划与恢复 ----------
 bt_navigator:
   ros__parameters:
     use_sim_time: false
@@ -99,12 +111,14 @@ bt_navigator:
     default_nav_to_pose_bt_xml: "$(find-pkg-share slam)/behavior_trees/navigate_to_pose_wakula.xml"
     default_nav_through_poses_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
 
+# ---------- 速度平滑：/cmd_vel_nav -> /cmd_vel_smoothed ----------
 velocity_smoother:
   ros__parameters:
     use_sim_time: false
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
+    # [x, y, yaw]；当前基线禁止横移，避免假设未知四足底盘支持全向速度。
     max_velocity: [0.5, 0.0, 0.8]
     min_velocity: [-0.3, 0.0, -0.8]
     max_accel: [0.5, 0.0, 1.0]
@@ -115,6 +129,7 @@ velocity_smoother:
     deadband_velocity: [0.0, 0.0, 0.0]
     enable_stamped_cmd_vel: false
 
+# ---------- 局部代价地图：实时雷达 + 点云前向障碍 ----------
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -126,6 +141,7 @@ local_costmap:
       height: 4
       resolution: 0.05
       robot_radius: 0.30
+      # 真机外形确定后应改为实测 footprint；圆半径只是硬件无关占位值。
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -140,6 +156,7 @@ local_costmap:
         terrain_points:
           topic: /perception/obstacle_points
           data_type: "PointCloud2"
+          # 点云只标障不清障，避免稀疏深度帧把 2D 激光确认的障碍错误清除。
           clearing: false
           marking: true
           min_obstacle_height: 0.05
@@ -149,6 +166,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45
 
+# ---------- 全局代价地图：静态 SLAM 地图 + 2D 激光动态标障 ----------
 global_costmap:
   global_costmap:
     ros__parameters:
@@ -161,6 +179,7 @@ global_costmap:
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        # 后启动的 Nav2 也能收到 SLAM Toolbox 最近发布的地图。
         map_subscribe_transient_local: true
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -174,6 +193,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45
 
+# ---------- 最后一层碰撞保护：/cmd_vel_terrain_safe -> /cmd_vel ----------
 collision_monitor:
   ros__parameters:
     use_sim_time: false
@@ -191,6 +211,7 @@ collision_monitor:
       type: polygon
       action_type: approach
       footprint_topic: local_costmap/published_footprint
+      # 按当前速度预测 1.2 s 内是否会碰撞；不是实际制动距离标定值。
       time_before_collision: 1.2
       simulation_time_step: 0.1
       min_points: 6
@@ -205,6 +226,7 @@ collision_monitor:
       max_height: 2.0
       enabled: true
 
+# ---------- Wakula 自定义输入健康检查 ----------
 navigation_health_monitor:
   ros__parameters:
     global_frame: map
@@ -215,6 +237,7 @@ navigation_health_monitor:
     max_odom_jump: 0.75
     future_stamp_tolerance: 0.10
 
+# ---------- 满足 scan/odom/定位 TF 后才激活 Nav2 ----------
 nav2_readiness_monitor:
   ros__parameters:
     global_frame: map

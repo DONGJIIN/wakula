@@ -115,3 +115,11 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 5. 新硬件先录 rosbag 离线调参，再断开执行器运行全栈，最后才由硬件团队低速接入 /cmd_vel。
 6. 查节点作用、归属和关键输入输出时，以 connect.txt 第二节为速查入口；消息字段、类型和
    真机要求继续查看该文件后续章节，不要只根据 ros2 topic list 猜测节点职责。
+
+八、推荐代码阅读顺序
+----------------
+1. 先看 slam/launch/slam.launch.py，理解完整栈如何组合和 remap。
+2. 再看 quadruped_perception 的模块级说明和纯函数，理解 OpenCV、点云与融合算法。
+3. 然后看 quadruped_planning，理解感知如何变成模式、限速和失效安全速度。
+4. 最后结合 config/*.yaml 注释、行为树 XML 和 quadruped_interfaces/msg 核对参数与接口。
+5. 注释解释“为什么这样做”和安全边界；实际运行合同仍以代码、消息定义和 connect.txt 为准。

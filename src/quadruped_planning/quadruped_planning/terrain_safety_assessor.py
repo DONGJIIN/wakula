@@ -57,6 +57,7 @@ class ConservativeAssessmentFilter:
     def __init__(
         self, clear_frames: int, initial: Assessment, hazard_frames: int = 2
     ):
+        """初始化非对称迟滞；恢复所需帧数通常大于危险确认帧数。"""
         self.clear_frames = max(1, int(clear_frames))
         self.hazard_frames = max(1, int(hazard_frames))
         self.current = initial
@@ -323,6 +324,11 @@ class TerrainSafetyAssessor(Node):
     """持续发布地形模式和 Nav2 速度上限，并监控感知心跳。"""
 
     def __init__(self):
+        """加载安全阈值并连接强类型融合接口与旧数组兼容接口。
+
+        ``prefer_fused_obstacle`` 为真时融合消息是唯一权威输入；旧数组仍被订阅只是为了
+        兼容关闭视觉的点云路径，不能让两条路径同时争抢当前状态。
+        """
         super().__init__("terrain_safety_assessor")
         for name, default in (
             ("step_threshold", 0.08),

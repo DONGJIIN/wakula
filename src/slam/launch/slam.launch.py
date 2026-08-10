@@ -1,4 +1,8 @@
-"""一键启动 Wakula 的 SLAM、Nav2、OpenCV 与点云感知栈。"""
+"""一键启动 Wakula 的 SLAM、Nav2、OpenCV 与点云感知栈。
+
+本文件只负责组合模块和统一 remap，不复制子节点参数。启动顺序由 ROS 2 launch 管理，
+Nav2 是否真正激活则由 readiness monitor 根据 /scan、/odom 和 TF 决定。
+"""
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -24,6 +28,7 @@ def package_file(package: str, folder: str, filename: str):
 
 def _launch_complete_stack(context):
     """解析传感器 profile 后创建硬件无关的完整导航栈。"""
+    # OpaqueFunction 让我们在运行期取得字符串值，再执行 YAML profile 校验与覆盖合并。
     profile_name = LaunchConfiguration("sensor_profile").perform(context)
     profiles_file = LaunchConfiguration("sensor_profiles_file").perform(context)
     topics = resolve_sensor_topics(
@@ -36,6 +41,7 @@ def _launch_complete_stack(context):
     )
     use_sim_time = LaunchConfiguration("use_sim_time")
 
+    # 三个 Include 的职责互不重叠：感知安全链、SLAM Toolbox、Nav2 在线节点组。
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             package_file("quadruped_bringup", "launch", "bringup.launch.py")
@@ -104,47 +110,91 @@ def _launch_complete_stack(context):
 
 def generate_launch_description():
     """声明公共入口参数；本文件不启动仿真、底盘或关节控制。"""
+    # 空 camera/point_cloud 参数表示由感知节点从常见候选话题中自动锁定一个来源；
+    # scan/odom 始终必须由 profile 或显式参数解析为非空标准接口。
     return LaunchDescription(
         [
-            DeclareLaunchArgument("sensor_profile", default_value="ros_default"),
+            DeclareLaunchArgument(
+                "sensor_profile",
+                default_value="ros_default",
+                description="sensor_profiles.yaml 中的话题预设名称",
+            ),
             DeclareLaunchArgument(
                 "sensor_profiles_file",
                 default_value=package_file("slam", "config", "sensor_profiles.yaml"),
-            ),
-            DeclareLaunchArgument("scan_topic", default_value=""),
-            DeclareLaunchArgument("odom_topic", default_value=""),
-            DeclareLaunchArgument("camera_topic", default_value=""),
-            DeclareLaunchArgument("point_cloud_topic", default_value=""),
-            DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("slam_enabled", default_value="true"),
-            DeclareLaunchArgument("nav2_enabled", default_value="true"),
-            DeclareLaunchArgument("nav2_autostart", default_value="true"),
-            DeclareLaunchArgument("vision", default_value="true"),
-            DeclareLaunchArgument("robot_model", default_value="true"),
-            DeclareLaunchArgument("rviz", default_value="true"),
-            DeclareLaunchArgument("nav2_log_level", default_value="info"),
-            DeclareLaunchArgument(
-                "slam_params_file", default_value=package_file("slam", "config", "slam.yaml")
+                description="传感器话题 profile YAML 的路径",
             ),
             DeclareLaunchArgument(
-                "nav2_params_file", default_value=package_file("slam", "config", "nav2.yaml")
+                "scan_topic", default_value="", description="非空时覆盖 profile 的 LaserScan 话题"
+            ),
+            DeclareLaunchArgument(
+                "odom_topic", default_value="", description="非空时覆盖 profile 的 Odometry 话题"
+            ),
+            DeclareLaunchArgument(
+                "camera_topic", default_value="", description="非空时固定 Image 输入；空值自动选源"
+            ),
+            DeclareLaunchArgument(
+                "point_cloud_topic",
+                default_value="",
+                description="非空时固定 PointCloud2 输入；空值自动选源",
+            ),
+            DeclareLaunchArgument(
+                "use_sim_time", default_value="false", description="使用 /clock；rosbag 回放时设为 true"
+            ),
+            DeclareLaunchArgument(
+                "slam_enabled", default_value="true", description="是否启动在线 SLAM Toolbox"
+            ),
+            DeclareLaunchArgument(
+                "nav2_enabled", default_value="true", description="是否启动 Nav2 节点组和健康监控"
+            ),
+            DeclareLaunchArgument(
+                "nav2_autostart",
+                default_value="true",
+                description="输入就绪后是否由 readiness monitor 自动激活 Nav2",
+            ),
+            DeclareLaunchArgument(
+                "vision", default_value="true", description="是否启动 OpenCV 与相机/点云融合节点"
+            ),
+            DeclareLaunchArgument(
+                "robot_model", default_value="true", description="是否发布仓库内占位 URDF/TF"
+            ),
+            DeclareLaunchArgument(
+                "rviz", default_value="true", description="是否启动 RViz；无显示器部署应关闭"
+            ),
+            DeclareLaunchArgument(
+                "nav2_log_level", default_value="info", description="Nav2 节点的 ROS 日志等级"
+            ),
+            DeclareLaunchArgument(
+                "slam_params_file",
+                default_value=package_file("slam", "config", "slam.yaml"),
+                description="SLAM Toolbox 参数 YAML",
+            ),
+            DeclareLaunchArgument(
+                "nav2_params_file",
+                default_value=package_file("slam", "config", "nav2.yaml"),
+                description="Nav2 与导航监控参数 YAML",
             ),
             DeclareLaunchArgument(
                 "vision_params_file",
                 default_value=package_file("quadruped_perception", "config", "vision.yaml"),
+                description="OpenCV 障碍检测参数 YAML",
             ),
             DeclareLaunchArgument(
                 "terrain_params_file",
                 default_value=package_file("quadruped_perception", "config", "terrain.yaml"),
+                description="点云地形分析参数 YAML",
             ),
             DeclareLaunchArgument(
                 "terrain_navigation_params_file",
                 default_value=package_file(
                     "quadruped_planning", "config", "terrain_navigation.yaml"
                 ),
+                description="地形安全决策和速度门参数 YAML",
             ),
             DeclareLaunchArgument(
-                "rviz_config_file", default_value=package_file("slam", "rviz", "slam.rviz")
+                "rviz_config_file",
+                default_value=package_file("slam", "rviz", "slam.rviz"),
+                description="RViz 显示配置路径",
             ),
             OpaqueFunction(function=_launch_complete_stack),
         ]

@@ -60,17 +60,14 @@ DEFAULT_POINT_CLOUD_TOPICS = [
 
 
 def transform_xyz(xyz: np.ndarray, translation, quaternion) -> np.ndarray:
-    """Transform only XYZ while accepting arbitrary extra PointCloud2 fields.
+    """只变换 XYZ，同时允许 PointCloud2 携带任意其他字段。
 
-    Several RGB-D drivers append packed RGB, intensity, ring or padding fields.
-    Rebuilding the complete structured record through ``tf2_sensor_msgs`` can
-    fail when those fields have vendor-specific alignment.  Terrain analysis
-    needs XYZ only, so this bounded NumPy transform deliberately decouples
-    geometry from unrelated fields.
+    不同 RGB-D/雷达驱动可能追加 packed RGB、intensity、ring 或对齐填充。用
+    ``tf2_sensor_msgs`` 重建完整结构时可能因厂商字段布局失败，而地形分析只需要 XYZ，
+    因此这里用有界 NumPy 变换主动解除几何算法与无关字段的耦合。
     """
     points = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
-    # GPU depth sensors use +/-Inf for pixels without a return; discard them
-    # before matrix multiplication to avoid warnings and needless CPU work.
+    # GPU 深度相机会用 +/-Inf 表示无回波像素；矩阵乘法前剔除，避免告警和无效计算。
     points = points[np.isfinite(points).all(axis=1)]
     tx, ty, tz = (float(value) for value in translation)
     qx, qy, qz, qw = (float(value) for value in quaternion)
@@ -261,6 +258,11 @@ class TerrainAnalyzer(Node):
     """限频处理最新点云并发布地形特征、Nav2 障碍点和诊断信息。"""
 
     def __init__(self):
+        """声明地形参数并建立“最新帧覆盖”式点云处理流水线。
+
+        订阅回调只保存最新消息，定时器才执行 TF 和几何分析。这种结构会主动丢弃处理不过来
+        的旧帧，避免 RK3588 在高频点云下积压并输出过时的安全判断。
+        """
         super().__init__("terrain_analyzer")
         self.declare_parameter("input_topic", "")
         self.declare_parameter(
@@ -572,7 +574,7 @@ class TerrainAnalyzer(Node):
 
 
 def main(args=None):
-    """Run the bounded-rate terrain analyzer."""
+    """运行有算力上限的点云地形分析节点。"""
     rclpy.init(args=args)
     node = TerrainAnalyzer()
     try:

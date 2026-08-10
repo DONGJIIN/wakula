@@ -31,7 +31,7 @@ TERRAIN_LABELS = {"WALK", "STEP", "CLIMB", "STOP"}
 
 @dataclass(frozen=True)
 class TimedRecord:
-    """A decoded topic sample with its rosbag receive timestamp."""
+    """一条已解码的话题记录，时间采用 rosbag 接收时间。"""
 
     stamp_ns: int
     data: Tuple[float, ...]
@@ -39,7 +39,7 @@ class TimedRecord:
 
 @dataclass(frozen=True)
 class GroundTruth:
-    """Human label aligned to the rosbag clock."""
+    """与 rosbag 时钟对齐的一条人工真值标签。"""
 
     stamp_ns: int
     vision_label: str = ""
@@ -117,7 +117,7 @@ def classification_metrics(
 
 
 def vision_prediction(record: TimedRecord, confidence_threshold: float) -> str:
-    """Decode one atomic visual-evidence record at a candidate threshold."""
+    """用候选置信度阈值解码一条原子视觉证据记录。"""
     if len(record.data) < 2:
         return "none"
     code = int(round(record.data[0]))
@@ -134,7 +134,7 @@ def terrain_prediction(
     max_slope: float = 0.45,
     max_roughness: float = 0.06,
 ) -> str:
-    """Re-run the production terrain decision against one feature record."""
+    """对一条特征记录复用线上地形决策函数，避免离线指标与真机逻辑不一致。"""
     data = record.data
     if len(data) < 4:
         return "STOP"
@@ -213,7 +213,7 @@ def optimize_terrain_thresholds(
                     for record, _ in samples
                 ]
                 metrics = classification_metrics(expected, predicted)
-                # Prefer a high score, then thresholds near conservative defaults.
+                # 分数相同时优先靠近保守默认值的阈值，避免小样本把参数推向极端。
                 distance = abs(step - 0.08) + abs(climb - 0.18) + abs(stop - 0.32)
                 score = (metrics["macro_f1"], metrics["accuracy"], -distance)
                 if best is None or score > best[0]:
@@ -235,7 +235,7 @@ def chronological_split(samples, validation_fraction: float):
 
 
 def load_labels(path: Path) -> List[GroundTruth]:
-    """Load the documented CSV label format and validate class names."""
+    """读取约定的 CSV 标签格式，并校验类别名称和时间戳。"""
     labels = []
     with path.open(newline="", encoding="utf-8") as stream:
         for row in csv.DictReader(stream):
@@ -254,7 +254,7 @@ def load_labels(path: Path) -> List[GroundTruth]:
 def read_rosbag(
     bag_path: Path, vision_topic: str, terrain_topic: str
 ) -> Dict[str, List[TimedRecord]]:
-    """Decode only the two low-bandwidth result topics from a rosbag2 bag."""
+    """只从 rosbag2 解码两路低带宽结果话题，避免加载原始图像/点云占用大量内存。"""
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message

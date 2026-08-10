@@ -1,11 +1,14 @@
 <!-- 四足保守恢复树：持续重规划；先清图和等待，再小距离后退，最后才原地小角度旋转。 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
+    <!-- 外层 RecoveryNode 最多重试 4 轮；GoalUpdated 可随时打断恢复并接受新目标。 -->
     <RecoveryNode number_of_retries="4" name="WakulaNavigateRecovery">
+      <!-- PipelineSequence 允许规划器以 1 Hz 更新路径，同时控制器持续跟踪最近路径。 -->
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
         <RateController hz="1.0">
+          <!-- 规划失败先清全局代价地图，再给规划器一次重试机会。 -->
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
             <Sequence>
@@ -17,6 +20,7 @@
         <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
           <Sequence>
+            <!-- 仅当错误类型适合恢复时清局部代价地图，避免掩盖不可恢复配置错误。 -->
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalContext" service_name="local_costmap/clear_entirely_local_costmap"/>
           </Sequence>
@@ -30,6 +34,7 @@
         <ReactiveFallback>
           <GoalUpdated/>
           <RoundRobin>
+            <!-- 恢复动作按“低风险到高风险”轮换：清图、等待、短后退、小角度旋转。 -->
             <Sequence>
               <ClearEntireCostmap name="ClearLocal" service_name="local_costmap/clear_entirely_local_costmap"/>
               <ClearEntireCostmap name="ClearGlobal" service_name="global_costmap/clear_entirely_global_costmap"/>

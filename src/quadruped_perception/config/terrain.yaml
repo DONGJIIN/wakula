@@ -1,16 +1,23 @@
 terrain_analyzer:
   ros__parameters:
+    # ---------- 输入、坐标系与算力上限 ----------
+    # input_topic 为空时按候选顺序锁定首个活跃 PointCloud2；不同时处理多路点云。
     input_topic: ""
     input_topic_candidates: [/camera/depth/points, /camera/depth/color/points, /camera/points, /points]
     target_frame: base_link
     processing_hz: 10.0
     transform_timeout: 0.05
+    # 节点只处理最新帧；max_points 限制几何计算量，避免高线数雷达拖慢 RK3588。
     max_points: 30000
-    # Downsampled base_link cloud used by the Nav2 local obstacle layer.
+    # 发布给 Nav2 局部代价地图的 base_link 降采样障碍点数上限。
     nav2_cloud_max_points: 5000
+
+    # ---------- 机器人前方检测区域（单位 m） ----------
     front_x_min: 0.10
     front_x_max: 1.50
     lateral_half_width: 0.45
+
+    # ---------- 旧特征接口与通行性阈值 ----------
     ground_percentile: 0.10
     warning_height: 0.12
     critical_height: 0.28
@@ -18,14 +25,16 @@ terrain_analyzer:
     max_roughness: 0.06
     min_valid_points: 30
     source_switch_timeout: 2.0
-    # 高度图地面分割；不同深度相机只需用 rosbag 调这组参数。
+
+    # ---------- 高度图地面分割与障碍分类 ----------
+    # 不同深度相机/3D 雷达优先使用 rosbag 调整这组参数。
     grid_cell_size: 0.05
     ground_height_bin: 0.03
     pit_depth_threshold: 0.08
     wall_height_threshold: 0.25
-    # Competition bar bottom is about 0.30 m; keep margin for depth/TF error.
+    # 横杆底部预期约 0.30 m；此值留出深度噪声和外参误差余量。
     bar_min_clearance: 0.18
-    # Reject isolated depth speckles: hazards must form an 8-connected XY region.
+    # 危险区域必须在 XY 高度图中形成 8 邻域连通块，以过滤孤立飞点。
     min_connected_region_cells: 3
-    # A connected patch also needs enough raw returns; rejects clustered flying pixels.
+    # 连通块还必须有足够原始回波，防止一小团聚集飞点被误认为真实障碍。
     min_connected_region_points: 12

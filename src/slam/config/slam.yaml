@@ -1,13 +1,17 @@
+# SLAM Toolbox 在线异步建图基线。真实部署前必须按雷达量程、/odom 噪声和比赛场地 rosbag
+# 调参；本文件不会生成里程计，odom -> base_link 必须由外部状态估计提供。
 slam_toolbox:
   ros__parameters:
     use_sim_time: false
     mode: mapping
 
+    # ---------- 标准 ROS 导航坐标系与激光输入 ----------
     map_frame: map
     odom_frame: odom
     base_frame: base_link
     scan_topic: /scan
 
+    # ---------- 地图更新、TF 与计算频率 ----------
     resolution: 0.05
     max_laser_range: 20.0
     minimum_time_interval: 0.2
@@ -16,12 +20,14 @@ slam_toolbox:
     transform_timeout: 0.2
     tf_buffer_duration: 30.0
 
+    # ---------- 扫描匹配和关键帧选择 ----------
     use_scan_matching: true
     use_scan_barycenter: true
     minimum_travel_distance: 0.15
     minimum_travel_heading: 0.15
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
+    # 匹配响应越高要求越严格；过低易错误闭环，过高可能错过真实闭环。
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
     loop_search_maximum_distance: 3.0
@@ -31,6 +37,8 @@ slam_toolbox:
     loop_match_minimum_response_coarse: 0.35
     loop_match_minimum_response_fine: 0.45
 
+    # ---------- 相关搜索窗口与评分惩罚 ----------
+    # 搜索窗口越大越能容忍初值误差，但 CPU 开销和错误匹配风险也越高。
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01
     correlation_search_space_smear_deviation: 0.1

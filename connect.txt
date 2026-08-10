@@ -6,6 +6,8 @@ Wakula 通信合同
 ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法内部坐标目标为 base_link，
 导航 TF 树为 map -> odom -> base_link -> sensor_frame。话题显式覆盖优先于 profile；默认
 名称尽量遵循 ROS 2，以便更换设备时只 remap。
+通信字段以 msg/YAML/launch 中的中文注释为代码侧依据；本文件负责跨节点速查，避免重复抄写
+全部内部实现。
 
 二、节点信息
 ----------

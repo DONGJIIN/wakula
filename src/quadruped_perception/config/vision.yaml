@@ -1,50 +1,58 @@
 vision_obstacle_detector:
   ros__parameters:
-    # Empty means automatically subscribe to the common ROS camera defaults.
+    # ---------- 输入、输出与算力上限 ----------
+    # 为空时自动订阅常见 ROS 相机默认话题，并只锁定一个活跃来源。
     image_topic: ""
     image_topic_candidates: [/camera/image_raw, /camera/color/image_raw, /image_raw]
     debug_mask_topic: /vision/debug_mask
     publish_debug_mask: false
     processing_hz: 8.0
     resize_width: 640
+
+    # ---------- 轮廓面积与形态学去噪 ----------
     min_area_px: 300.0
-    # Effective area is max(pixel threshold, image area * ratio).
+    # 有效面积阈值取固定像素值和“图像面积×比例”中的较大值。
     min_area_ratio: 0.0008
     morphology_size: 5
     edge_low_threshold: 60
     edge_high_threshold: 160
-    # Use image brightness to adapt Canny while keeping the fixed values as bounds.
+    # ---------- 光照与边缘鲁棒性 ----------
+    # 根据图像亮度自适应 Canny；上面的固定值仍作为安全边界。
     adaptive_canny: true
     adaptive_canny_sigma: 0.33
-    # CLAHE improves HSV/Canny stability under shadows and uneven venue lighting.
+    # CLAHE 改善阴影及场馆明暗不均时 HSV/Canny 的稳定性。
     illumination_normalization: true
-    # Preserve original hue while also recovering colored regions in shadows.
+    # 同时使用原图和增强图颜色掩膜：保留原始色相，又恢复阴影中的色块。
     dual_illumination_color_mask: true
     clahe_clip_limit: 2.0
     clahe_grid_size: 8
-    # Suppress Canny edges caused by clipped white reflections and venue lamps.
+    # 抑制白色强反光和场馆灯具造成的伪 Canny 边缘。
     suppress_specular_glare: true
     glare_saturation_max: 25
     glare_value_min: 245
     glare_dilation_size: 7
-    # Ignore likely ceiling, robot-body and lens-border pixels.
+    # ---------- 有效画面区域与质量门控 ----------
+    # 忽略大概率属于天花板、机身和镜头边缘的像素。
     roi_top_ratio: 0.05
     roi_bottom_ratio: 0.95
     roi_side_margin_ratio: 0.02
-    # Reject sparse color reflections inside large bounding rectangles.
+    # 大矩形内部颜色过稀疏时视为反光而非实体色块。
     min_color_fill_ratio: 0.18
-    # Reject severely under/over-exposed or blurred frames before temporal voting.
+    # 严重欠曝、过曝或模糊帧在进入时序投票前即被拒绝。
     min_image_quality: 0.35
+
+    # ---------- 多帧确认：压制单帧反光、运动模糊和检测框跳变 ----------
     history_size: 5
     confirmation_frames: 3
-    # The same label must also stay at a similar image position and size.
+    # 同一类别还必须保持近似位置、尺寸与 IoU，不能只靠标签一致。
     max_temporal_center_jitter: 0.15
     max_temporal_size_jitter: 0.25
     temporal_match_ratio: 0.60
     min_temporal_iou: 0.20
-    # Lock one default topic; fail over only when it has stopped publishing.
+    # 当前来源失联达到此时间后才允许其他候选话题接管。
     source_switch_timeout: 2.0
-    # OpenCV HSV ranges; recalibrate for the actual camera and venue lighting.
+    # ---------- 场地颜色标定 ----------
+    # OpenCV HSV 范围；必须针对实际相机、曝光和比赛场馆用 rosbag 重新标定。
     orange_hsv_lower: [5, 80, 70]
     orange_hsv_upper: [25, 255, 255]
     blue_hsv_lower: [90, 70, 50]

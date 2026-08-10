@@ -14,7 +14,7 @@ from nav2_common.launch import RewrittenYaml
 
 
 def nav2_node(package, executable, parameters, log_level, remappings, name=None):
-    """Create one lifecycle node with consistent logging and TF remapping."""
+    """用统一日志等级、参数文件和 TF remap 创建一个 Nav2 生命周期节点。"""
     return Node(
         package=package,
         executable=executable,
@@ -39,6 +39,7 @@ def generate_launch_description():
         ("cmd_vel_smoothed", "/cmd_vel_smoothed"),
     ]
     lifecycle_nodes = [
+        # 顺序是生命周期管理器的配置/激活顺序；新增服务器时必须同步此列表。
         "controller_server",
         "smoother_server",
         "planner_server",
@@ -50,9 +51,8 @@ def generate_launch_description():
     configured_params = ParameterFile(
         RewrittenYaml(
             source_file=params_file,
-            # Rewrite every occurrence in nav2.yaml.  A GroupAction parameter
-            # alone can lose to node-local YAML values and split the stack
-            # between wall time and /clock.
+            # 重写 nav2.yaml 中每个同名参数。仅在 GroupAction 设置 use_sim_time 可能被节点
+            # 自己的 YAML 值覆盖，造成一部分节点用系统时间、另一部分使用 /clock。
             param_rewrites={
                 "autostart": autostart,
                 "use_sim_time": use_sim_time,
@@ -62,6 +62,9 @@ def generate_launch_description():
         allow_substs=True,
     )
 
+    # 速度链刻意分成三个命名话题，便于逐段定位“谁把速度归零”：
+    # controller -> cmd_vel_nav -> smoother -> cmd_vel_smoothed -> 地形门 ->
+    # cmd_vel_terrain_safe -> collision monitor -> cmd_vel。
     nodes = [
         nav2_node(
             "nav2_controller",
@@ -118,8 +121,7 @@ def generate_launch_description():
             name="lifecycle_manager_navigation",
             output="screen",
             parameters=[
-                # Activation is requested by the readiness monitor only after
-                # scan, odometry and localization TF are available.
+                # 固定关闭自动激活；readiness monitor 确认 scan、odom、定位 TF 后再请求启动。
                 {"autostart": False},
                 {"node_names": lifecycle_nodes},
             ],
@@ -141,10 +143,16 @@ def generate_launch_description():
     return LaunchDescription(
         [
             SetEnvironmentVariable("RCUTILS_LOGGING_BUFFERED_STREAM", "1"),
-            DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("autostart", default_value="true"),
-            DeclareLaunchArgument("params_file"),
-            DeclareLaunchArgument("log_level", default_value="info"),
+            DeclareLaunchArgument(
+                "use_sim_time", default_value="false", description="使用 /clock 作为 ROS 时间"
+            ),
+            DeclareLaunchArgument(
+                "autostart", default_value="true", description="输入就绪后允许自动激活 Nav2"
+            ),
+            DeclareLaunchArgument("params_file", description="Nav2 完整参数 YAML 路径"),
+            DeclareLaunchArgument(
+                "log_level", default_value="info", description="Nav2 节点日志等级"
+            ),
             GroupAction(actions=[SetParameter("use_sim_time", use_sim_time), *nodes]),
         ]
     )

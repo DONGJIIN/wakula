@@ -1,25 +1,25 @@
-# Pure navigation-safety parameters. Nothing in this file commands joints or legs.
+# 纯导航安全参数：本文件没有任何关节、腿部或真实越障动作命令。
 terrain_safety_assessor:
   ros__parameters:
-    # Height classes are perception labels in metres, not executable gait modes.
+    # 高度分类只表示感知标签（单位 m），不是可直接执行的步态模式。
     step_threshold: 0.08
     climb_threshold: 0.18
     stop_threshold: 0.32
-    # Legacy array slope is dz/dx; roughness is metres of robust ground residual.
+    # 旧数组的坡度为 dz/dx，粗糙度为稳健地面残差（单位 m）。
     max_slope: 0.45
     max_roughness: 0.06
     min_points: 30
     sensor_timeout: 0.7
-    # Reject delayed/replayed frames and timestamps too far ahead of the ROS clock.
+    # 拒绝延迟/重放帧，以及时间戳明显超前于当前 ROS 时钟的帧。
     future_stamp_tolerance: 0.10
-    # vision=true makes the timestamped fused message authoritative. With
-    # vision=false, launch disables this and uses /terrain/features directly.
+    # vision=true 时带时间戳融合消息是权威输入；vision=false 时 launch 将其关闭，
+    # 节点直接读取 /terrain/features。
     prefer_fused_obstacle: true
     fused_min_confidence: 0.25
-    # STOP is immediate. Lower hazards and recovery require consecutive frames.
+    # STOP 立即生效；较低危险与恢复到 WALK 都需要连续帧确认。
     clear_confirmation_frames: 5
     hazard_confirmation_frames: 3
-    # Monocular vision can only reduce a WALK speed limit pending depth evidence.
+    # 单目视觉只能在等待深度证据时降低 WALK 速度，不能独立批准越障。
     vision_assist_enabled: true
     vision_timeout: 0.6
     vision_min_confidence: 0.55
@@ -28,7 +28,7 @@ terrain_safety_assessor:
 
 navigation_speed_gate:
   ros__parameters:
-    # Nav2 remains the command source; this node only enforces a fresh 0..1 limit.
+    # Nav2 始终是速度来源；本节点只执行新鲜有效的 0..1 比例限制。
     input_topic: /cmd_vel_smoothed
     output_topic: /cmd_vel_terrain_safe
     command_timeout: 0.5

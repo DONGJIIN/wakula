@@ -48,6 +48,11 @@ class NavigationSpeedGate(Node):
     """以 20 Hz 重算导航速度，命令或地形评估任一超时即归零。"""
 
     def __init__(self):
+        """建立三路安全心跳，并以固定频率发布经过门控的 Twist。
+
+        这里保存消息接收时间而不是源 Header，因为 Twist/Float32/Bool 没有 Header。每次
+        定时回调都重新检查超时，所以发布者退出后不会永久沿用最后一条非零命令。
+        """
         super().__init__("navigation_speed_gate")
         self.declare_parameter("input_topic", "/cmd_vel_smoothed")
         self.declare_parameter("output_topic", "/cmd_vel_terrain_safe")

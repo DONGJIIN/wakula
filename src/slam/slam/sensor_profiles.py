@@ -1,4 +1,8 @@
-"""Load and validate replaceable sensor topic profiles."""
+"""读取并校验可替换传感器的话题 profile。
+
+profile 只解决厂商默认话题名不同的问题，不允许改变消息类型、坐标系语义或算法参数。
+因此换设备时可以只改 YAML/remap，而不会悄悄破坏 SLAM、Nav2 和感知节点间的合同。
+"""
 
 from pathlib import Path
 from typing import Dict, Mapping
@@ -15,10 +19,9 @@ TOPIC_KEYS = (
 
 
 def load_sensor_profiles(path: str) -> Dict[str, Dict[str, str]]:
-    """Return validated topic profiles from one YAML file.
+    """从一个 YAML 文件返回经过结构和必填项校验的话题 profile。
 
-    Profiles contain names only; message types and TF contracts remain fixed so
-    replacing a device cannot silently change the algorithm API.
+    profile 只能包含名称；消息类型与 TF 合同保持固定，防止换设备时无意改变算法接口。
     """
     with Path(path).open(encoding="utf-8") as stream:
         document = yaml.safe_load(stream) or {}
@@ -64,7 +67,7 @@ def resolve_sensor_topics(
     profile_name: str,
     overrides: Mapping[str, str],
 ) -> Dict[str, str]:
-    """Resolve a profile, applying only non-empty command-line overrides."""
+    """解析指定 profile，并用非空命令行参数覆盖相应话题。"""
     if profile_name not in profiles:
         available = ", ".join(sorted(profiles))
         raise ValueError(

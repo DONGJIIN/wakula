@@ -19,6 +19,8 @@ def generate_launch_description():
         value_type=str,
     )
 
+    # 不启动 joint_state_publisher_gui：它曾在当前 Ubuntu/Qt 组合上崩溃，而且占位模型的
+    # 关节角不应被误认为真实反馈。真机显示时由驱动发布 /joint_states。
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -26,14 +28,14 @@ def generate_launch_description():
                 default_value=PathJoinSubstitution(
                     [package_share, "urdf", "quadruped.urdf.xacro"]
                 ),
-                description="Absolute path to the quadruped Xacro model.",
+                description="四足机器人 Xacro 模型的绝对路径",
             ),
             DeclareLaunchArgument(
                 "rviz_config",
                 default_value=PathJoinSubstitution(
                     [package_share, "rviz", "quadruped.rviz"]
                 ),
-                description="Absolute path to the RViz configuration.",
+                description="RViz 配置文件的绝对路径",
             ),
             Node(
                 package="robot_state_publisher",
