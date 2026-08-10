@@ -239,9 +239,9 @@ STOP。该原则是“没有看到地形不等于地形安全”。
 注释重点解释地面包络、视觉辅助权限、迟滞和双重超时等“不明显的原因”。通信数组使用
 具名下标常量，修改顺序时必须同时修改感知、规划、离线工具和 connect.txt。
 
-节点职责以 connect.txt 第一节为主；其尾部只补充 RViz、joint_state_publisher_gui 和
-controller_manager spawner 等辅助节点。这些进程负责显示、URDF 调试或控制器装载，不得
-作为感知、越障成功或真机关节状态的权威来源。
+全部节点职责统一记录在 connect.txt 第一节，其中也包含 RViz、joint_state_publisher_gui
+和 controller_manager spawner 等辅助节点。这些进程负责显示、URDF 调试或控制器装载，
+不得作为感知、越障成功或真机关节状态的权威来源。
 
 视觉证据必须同时满足：
 

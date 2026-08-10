@@ -24,8 +24,16 @@ Action、Service、TF、QoS 和超时机制。接入相机、雷达、机器狗 
 robot_state_publisher
   读取 robot_description，根据 /joint_states 发布机器人关节 TF 和固定 TF。
 
+joint_state_publisher_gui
+  仅由模型 display.launch.py 启动，通过滑块发布模拟 /joint_states 以检查 URDF；不能与
+  真机 joint_state_broadcaster 或厂商 SDK 同时作为关节状态的权威来源。
+
 controller_manager
   管理 ros2_control 硬件接口、joint_state_broadcaster 和 leg_controller。
+
+controller_manager spawner
+  use_control:=true 时临时加载并激活 joint_state_broadcaster 和 leg_controller；完成后
+  进程可能退出，控制器继续由 controller_manager 托管。
 
 terrain_analyzer
   接收一个深度点云，转换到 base_link，发布地形特征和 Nav2 障碍点云。
@@ -63,6 +71,13 @@ lifecycle_manager_navigation
 
 nav2_readiness_monitor
   等待实时 /scan、/odom 和 map -> base_link TF，再调用生命周期启动服务。
+
+rviz2
+  显示 TF、机器人模型、激光、点云、地图、路径和 Nav2 状态；只用于可视化与目标交互，
+  关闭后不应影响 SLAM、导航或越障算法运行。
+
+不同 ROS 2 Jazzy 补丁版本可能生成额外的内部或临时节点名，实际运行时使用
+`ros2 node list | sort` 和 `ros2 node info /节点名` 核对。
 
 
 二、外部传感器输入
@@ -779,40 +794,3 @@ STEP/CLIMB/LOW_PROFILE 已使用带反馈、取消、结果和超时的 Traverse
 更新 connect.txt；改变算法或模块职责时更新 instruction.txt；改变安装、启动、目录结构
 或主要功能时更新 README.md；改变完成进度、限制或后续计划时更新 quickstart.txt。
 完成代码修改后应运行构建和测试，再直接提交并推送 main，禁止强制推送。
-
-
-十五、第一节未重复列出的辅助节点
---------------------------------
-
-第一节已经列出 Wakula 自研节点、SLAM Toolbox、Nav2、robot_state_publisher 和
-controller_manager，本节不重复它们，只补充启动文件中实际存在但此前未单列的辅助节点。
-
-rviz2
-  来源：rviz2/rviz2。
-  启动条件：`slam.launch.py` 的 `rviz:=true`（默认），或单独运行模型 display.launch.py。
-  作用：订阅 TF、RobotModel、LaserScan、PointCloud2、Map、Path 和 Nav2 状态进行可视化。
-  通信性质：只用于观察和交互目标；不是 SLAM、Nav2 或越障算法的判定依据。关闭后不应
-  影响机器人运行。实际订阅项由 RViz 配置文件决定。
-
-joint_state_publisher_gui
-  来源：joint_state_publisher_gui/joint_state_publisher_gui。
-  启动条件：仅 `ros2 launch quadruped_description display.launch.py` 模型调试入口启动。
-  作用：通过滑块生成模拟 `/joint_states`，供 robot_state_publisher 和 RViz 检查 URDF 关节。
-  限制：不在一键 SLAM/Nav2 真机入口启动，不能与真实 joint_state_broadcaster 或厂商 SDK
-  同时作为 `/joint_states` 权威发布者，也不能代替真机关节反馈。
-
-controller_manager spawner（临时辅助进程）
-  来源：controller_manager/spawner。
-  启动条件：`slam.launch.py use_control:=true` 时，bringup 分别为
-  `joint_state_broadcaster` 和 `leg_controller` 启动一个 spawner。
-  作用：通过 `/controller_manager` 服务加载、配置并激活对应控制器；完成后进程可以退出，
-  因此不保证长期出现在 `ros2 node list`。控制器成功激活后由 controller_manager 托管，
-  其话题和 Action 见本文第九节。
-
-核对完整节点集合时使用：
-
-  ros2 node list | sort
-  ros2 node info /节点名
-
-注意：不同 ROS 2 Jazzy 补丁版本可能为 Nav2 内部插件、RViz 或 spawner 生成额外节点名；
-本文记录稳定的工程节点与职责，临时/内部名称以启动后的实际命令输出为准。
