@@ -89,7 +89,7 @@ Wakula 后续开发快速上手指南
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-当前基准为 33 项测试、0 error、0 failure。
+当前基准为 34 项测试、0 error、0 failure。
 
 8. 查看机器人模型：
 
@@ -630,9 +630,22 @@ OpenCV：
   8 个 ROS 2 包可编译。
   slam.launch.py 保持 ROS 2 内部默认名称，并集中处理 profile 和显式覆盖。
   常见 2D/3D 雷达及 RGB-D 相机 profile 可通过 YAML 扩展。
-  当前 33 项测试全部通过。
+  当前 34 项测试全部通过。
   README、算法原理、通信合同和快速上手文档齐全。
   以上只代表上层 ROS 2 感知、导航、决策雏形，不代表四足整机研发完成。
+
+建议的新成员源码阅读顺序：
+
+1. terrain_analyzer.py：理解 base_link、前向 ROI、地面包络和九字段输出。
+2. vision_obstacle_detector.py：理解 OpenCV 只提供减速复核证据的权限边界。
+3. obstacle_crossing_manager.py：理解几何主判据、非对称迟滞和失联 STOP。
+4. crossing_action_server.py：理解 UUID、双重超时、取消、进度和触地成功证据。
+5. cmd_vel_gate.py：理解 Nav2 命令与地形决策双心跳速度门。
+6. perception_bag_evaluator.py：理解阈值只能在训练集搜索、验证集验收。
+
+这些核心文件已补充职责、单位、算法原因和失效行为注释。若修改消息下标、坐标系、阈值
+含义或 Action 状态机，必须同步 README.md、instruction.txt、connect.txt、quickstart.txt
+以及相应单元测试。
 
 
 八、目前未完成的部分

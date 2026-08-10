@@ -1,4 +1,12 @@
-"""Bounded OpenCV obstacle evidence for lidar/depth navigation fusion."""
+"""使用轻量 OpenCV 为雷达/深度几何提供辅助障碍证据。
+
+流水线为：限频取最新图像 → CLAHE 亮度归一化 → HSV 颜色掩膜与 Canny 轮廓 →
+ROI/形态学去噪 → 几何启发式分类 → 多帧空间一致性确认。算法不恢复米制深度，
+因此输出只允许规划层减速并请求点云复核，不能独立触发 STEP/CLIMB。
+
+该实现面向 RK3588 的可解释、低算力基线。HSV、ROI 和像素面积均是相机相关参数，
+更换镜头、安装角度或比赛场地光照后必须用 debug mask 与 rosbag 重新标定。
+"""
 
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -36,7 +44,11 @@ HINT_CODES = {
 
 @dataclass(frozen=True)
 class ObstacleEvidence:
-    """One normalized image-space obstacle observation."""
+    """一条原子的归一化图像障碍观测。
+
+    坐标原点位于图像左上角，中心和宽高均除以图像尺寸，因此合法范围是 0～1。
+    ``confidence`` 是启发式一致性分数，不是统计校准后的真实概率。
+    """
 
     hint: str = "none"
     confidence: float = 0.0
@@ -58,7 +70,7 @@ class ObstacleEvidence:
 
 
 def contour_boxes(mask: np.ndarray, min_area: float) -> List[ContourBox]:
-    """Extract valid external contour bounding boxes."""
+    """提取面积达标的最外层轮廓框，忽略孔洞以控制计算量。"""
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = []
     for contour in contours:
@@ -73,7 +85,7 @@ def contour_boxes(mask: np.ndarray, min_area: float) -> List[ContourBox]:
 def enhance_illumination(
     bgr: np.ndarray, clip_limit: float = 2.0, grid_size: int = 8
 ) -> np.ndarray:
-    """Normalize brightness on one LAB channel while largely preserving color."""
+    """仅增强 LAB 亮度通道，尽量不改变 HSV 检测依赖的颜色关系。"""
     grid_size = max(2, int(grid_size))
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     lightness, channel_a, channel_b = cv2.split(lab)
@@ -93,7 +105,7 @@ def apply_detection_roi(
     bottom_ratio: float,
     side_margin_ratio: float,
 ) -> np.ndarray:
-    """Keep the configurable forward-view region and suppress image borders."""
+    """保留可配置前向画面区域，屏蔽天空、机身和镜头边缘。"""
     image_height, image_width = mask.shape[:2]
     top = int(np.clip(top_ratio, 0.0, 0.95) * image_height)
     bottom = int(np.clip(bottom_ratio, 0.05, 1.0) * image_height)
@@ -110,7 +122,7 @@ def apply_detection_roi(
 def adaptive_canny_thresholds(
     gray: np.ndarray, fallback_low: int, fallback_high: int, sigma: float
 ) -> Tuple[int, int]:
-    """Estimate stable Canny thresholds, with configured values as safe bounds."""
+    """按灰度中位数自适应 Canny 阈值，并受配置上下界约束。"""
     median = float(np.median(gray))
     if median < 20.0:
         return fallback_low, fallback_high
@@ -144,7 +156,11 @@ def best_pole_pair(
     image_height: int,
     min_fill_ratio: float = 0.0,
 ) -> Tuple[List[ContourBox], float]:
-    """Select two aligned pole-like boxes and return their geometry score."""
+    """选择最像成对立柱的两个框，并返回 0～1 几何一致性分数。
+
+    分数综合垂直重叠、高宽相似性和轮廓填充率；这里只比较图像几何关系，
+    不根据像素间距推断真实障碍宽度。
+    """
     candidates = [
         box
         for box in boxes
@@ -231,7 +247,12 @@ def detect_obstacle_evidence(
     min_area: float,
     min_color_fill_ratio: float = 0.18,
 ) -> ObstacleEvidence:
-    """Combine color and contour geometry into a conservative raw hint."""
+    """融合颜色与轮廓几何，产生一帧尚未时序确认的候选证据。
+
+    优先级依次为带颜色横杆、带颜色立柱、纯边缘立柱/横杆/墙、一般色块。
+    越靠后的分支歧义越大，因此置信度上限更低；同一帧只返回一个完整候选，避免
+    多话题字段在不同时间被规划层拼接。
+    """
     image_height, image_width = orange_mask.shape[:2]
     image_area = float(image_height * image_width)
     orange_boxes = contour_boxes(orange_mask, min_area)
@@ -333,7 +354,11 @@ def stabilize_evidence(
     max_center_jitter: float = 0.15,
     max_size_jitter: float = 0.25,
 ) -> ObstacleEvidence:
-    """Accept only a non-empty hint repeated across multiple recent frames."""
+    """仅接受在近期多帧重复且位置/尺寸变化合理的非空候选。
+
+    输出采用各字段中位数，降低单帧抖动影响。窗口内多数投票解决类别闪烁，中心与
+    尺寸极差约束则拒绝反光、运动模糊或多个不同目标碰巧同类的情况。
+    """
     # 多帧投票抑制反光、运动模糊和单帧噪声。
     hints = [item.hint for item in history if item.hint != "none"]
     if not hints:
@@ -371,7 +396,7 @@ def stabilize_evidence(
 
 
 class VisionObstacleDetector(Node):
-    """Publish temporally confirmed obstacle evidence from common camera topics."""
+    """从常见相机话题选择单一数据源，并发布经过时序确认的辅助证据。"""
 
     def __init__(self):
         super().__init__("vision_obstacle_detector")
@@ -506,6 +531,7 @@ class VisionObstacleDetector(Node):
         )
 
     def _hsv_parameter(self, name: str) -> np.ndarray:
+        """读取三通道 HSV 参数并夹紧到 OpenCV uint8 表示范围。"""
         values = np.asarray(self.get_parameter(name).value, dtype=np.int32)
         return np.clip(values, 0, 255).astype(np.uint8)
 
@@ -534,7 +560,7 @@ class VisionObstacleDetector(Node):
         self.latest_frame = (msg, source)
 
     def processing_callback(self) -> None:
-        """Process one unseen frame and publish stable obstacle evidence."""
+        """处理一帧新图像并发布颜色特征、稳定证据和可选调试掩膜。"""
         if self.latest_frame is None:
             return
         msg, source = self.latest_frame
@@ -641,6 +667,7 @@ class VisionObstacleDetector(Node):
             self.mask_pub.publish(debug_msg)
 
     def _clean_mask(self, mask: np.ndarray) -> np.ndarray:
+        """先开运算去孤立噪点，再闭运算填补同一色块的小孔洞。"""
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
         return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
 

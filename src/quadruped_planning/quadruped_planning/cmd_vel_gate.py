@@ -1,4 +1,8 @@
-"""Fail-safe speed gate between Nav2 smoothing and collision monitoring."""
+"""Nav2 与底盘之间的失效安全速度门。
+
+只有 Nav2 速度命令和越障决策两条独立心跳都新鲜时才允许非零输出。节点本身不替代
+硬件急停、驱动器看门狗或姿态保护，它只是防止 ROS 节点失联后沿用最后一条速度。
+"""
 
 from math import isfinite
 
@@ -12,7 +16,7 @@ from std_msgs.msg import Float32
 def gated_twist(
     source: Twist, scale: float, command_fresh: bool, decision_fresh: bool
 ) -> Twist:
-    """Return a scaled command only when both independent heartbeats are fresh."""
+    """仅在两条心跳有效时缩放 Twist，否则返回全零新消息。"""
     output = Twist()
     # 两条独立心跳任一失效都输出默认构造的零 Twist。
     if not command_fresh or not decision_fresh or scale <= 0.0:
@@ -27,7 +31,7 @@ def gated_twist(
 
 
 class CmdVelGate(Node):
-    """Stop motion whenever the planner or crossing decision becomes stale."""
+    """以 20 Hz 重算安全速度，规划或地形决策任一超时即停车。"""
 
     def __init__(self):
         super().__init__("quadruped_cmd_vel_gate")
@@ -60,15 +64,18 @@ class CmdVelGate(Node):
         self.get_logger().info(f"Velocity gate: {input_topic} -> {output_topic}")
 
     def cmd_callback(self, msg: Twist) -> None:
+        """缓存 Nav2 最新速度及本机接收时刻。"""
         self.latest_cmd = msg
         self.last_cmd_time = self.get_clock().now()
 
     def scale_callback(self, msg: Float32) -> None:
+        """接收 0～1 速度比例；NaN/Inf 或越界值按安全范围处理。"""
         value = float(msg.data)
         self.speed_scale = max(0.0, min(1.0, value)) if isfinite(value) else 0.0
         self.last_decision_time = self.get_clock().now()
 
     def publish_safe_command(self) -> None:
+        """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
         command_age = (now - self.last_cmd_time).nanoseconds / 1e9
         decision_age = (now - self.last_decision_time).nanoseconds / 1e9

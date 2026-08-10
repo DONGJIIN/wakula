@@ -1,4 +1,9 @@
-"""Evaluate and calibrate Wakula vision/terrain outputs from a ROS 2 bag."""
+"""从 ROS 2 rosbag 离线评估并标定 Wakula 感知阈值。
+
+工具只读取低带宽结果话题，将人工真值按时间戳匹配后计算分类指标。达到最低样本量时，
+较早数据用于搜索参数，最新数据留作独立验证，防止“同一数据既调参又评分”的泄漏。
+输出建议 YAML 不会覆盖正式配置；是否采用仍需结合各类别召回率和真机安全测试判断。
+"""
 
 import argparse
 import bisect
@@ -44,7 +49,11 @@ class GroundTruth:
 def classification_metrics(
     expected: Sequence[str], predicted: Sequence[str]
 ) -> Dict[str, object]:
-    """Return dependency-free accuracy, confusion matrix and per-class scores."""
+    """计算 accuracy、Wilson 95% 区间、混淆矩阵和逐类指标。
+
+    使用 macro-F1 作为主要调参目标，可避免样本多数为 WALK/none 时仅靠“总猜平地”
+    获得看似很高的 accuracy。Wilson 区间在小样本下比普通正态近似更可靠。
+    """
     if len(expected) != len(predicted):
         raise ValueError("expected and predicted lengths differ")
     labels = sorted(set(expected) | set(predicted))
@@ -153,7 +162,7 @@ def nearest_record(
     tolerance_ns: int,
     stamps: Sequence[int] | None = None,
 ) -> Tuple[TimedRecord, int] | Tuple[None, None]:
-    """Find the nearest record without repeatedly scanning a large bag."""
+    """用二分查找匹配容差内最近记录，避免对大型 rosbag 反复线性扫描。"""
     if not records:
         return None, None
     stamps = stamps or [item.stamp_ns for item in records]
@@ -167,7 +176,7 @@ def nearest_record(
 def optimize_vision_threshold(
     samples: Sequence[Tuple[TimedRecord, str]],
 ) -> Tuple[float, Dict[str, object]]:
-    """Select confidence threshold by macro F1, then accuracy."""
+    """网格搜索视觉阈值：先最大化 macro-F1，再比较 accuracy 和保守高阈值。"""
     best = None
     for integer_threshold in range(30, 91, 5):
         threshold = integer_threshold / 100.0
@@ -185,7 +194,10 @@ def optimize_vision_threshold(
 def optimize_terrain_thresholds(
     samples: Sequence[Tuple[TimedRecord, str]],
 ) -> Tuple[Tuple[float, float, float], Dict[str, object]]:
-    """Grid-search ordered height thresholds using production decisions."""
+    """用生产决策函数搜索严格递增的米制高度阈值。
+
+    分数相同时优先接近保守默认配置，避免有限样本把参数推到搜索边界。
+    """
     step_values = [value / 100.0 for value in range(4, 17, 2)]
     climb_values = [value / 100.0 for value in range(12, 29, 2)]
     stop_values = [value / 100.0 for value in range(24, 45, 2)]
@@ -212,7 +224,7 @@ def optimize_terrain_thresholds(
 
 
 def chronological_split(samples, validation_fraction: float):
-    """Reserve the newest samples to avoid tuning and scoring on identical data."""
+    """按时间保留最新样本验证，更贴近部署面对“未来数据”的真实情况。"""
     ordered = sorted(samples, key=lambda item: item[0].stamp_ns)
     fraction = max(0.0, min(0.5, float(validation_fraction)))
     if len(ordered) < 4 or fraction == 0.0:
@@ -278,7 +290,7 @@ def write_label_template(
     terrain_records: Sequence[TimedRecord],
     period_s: float,
 ) -> int:
-    """Create a sparse, unbiased CSV for human ground-truth annotation."""
+    """按固定时间间隔生成稀疏标注表，不依据预测结果挑选样本。"""
     all_stamps = sorted(
         {item.stamp_ns for item in vision_records}
         | {item.stamp_ns for item in terrain_records}
@@ -317,7 +329,7 @@ def evaluate(
     validation_fraction: float = 0.30,
     minimum_samples: int = 20,
 ) -> Tuple[Dict[str, object], Dict[str, object]]:
-    """Align ground truth, tune thresholds and return report plus YAML values."""
+    """对齐真值、检查样本门槛、训练/验证，并返回报告及 YAML 建议值。"""
     tolerance_ns = int(max(0.0, tolerance_s) * 1e9)
     vision_samples = []
     terrain_samples = []
@@ -440,6 +452,7 @@ def evaluate(
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
+    """定义稳定 CLI；路径参数保持 Path 类型，避免调用方手动转换。"""
     parser = argparse.ArgumentParser(
         description="Create labels or evaluate Wakula perception from rosbag2."
     )

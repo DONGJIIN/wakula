@@ -1,4 +1,9 @@
-"""Bridge a ROS 2 obstacle Action to a replaceable gait-controller backend."""
+"""在上层 ROS 2 Action 与可替换的真机步态控制器之间建立严格合同。
+
+Action 负责目标互斥、取消、双重超时、反馈和最终结果；底层 SDK 适配器负责执行腿部
+动作，并通过同一 goal UUID 回报状态。服务器不会因为收到一个字符串“完成”就成功，
+而是要求合法状态、单调进度以及可配置的触地确认。
+"""
 
 import math
 import threading
@@ -43,7 +48,7 @@ def validate_goal_values(
     timeout: float,
     maximum_timeout: float,
 ) -> Tuple[bool, str]:
-    """Validate one goal without depending on a running ROS executor."""
+    """在进入执行器前校验 Goal 数值，使错误请求不会触达真机控制器。"""
     values = (obstacle_height, obstacle_distance, speed_scale, timeout)
     if mode not in MODE_NAMES:
         return False, "unsupported crossing mode"
@@ -61,7 +66,11 @@ def validate_goal_values(
 def validate_controller_status(
     state: int, phase: int, progress: float, previous_progress: float
 ) -> Tuple[bool, str]:
-    """Reject malformed or regressing controller status updates."""
+    """拒绝非法、非有限或进度倒退的控制器状态。
+
+    FAILED/CANCELED 允许进度低于上一帧，因为某些控制器会在终止时清零；终止状态
+    仍必须被上层及时接收，不能因“进度倒退”被忽略后误判为心跳超时。
+    """
     if state not in VALID_STATUS_STATES:
         return False, "unknown controller state"
     if phase not in VALID_FEEDBACK_PHASES:
@@ -88,7 +97,7 @@ def controller_success_is_valid(
 
 
 class CrossingActionServer(Node):
-    """Own goal lifecycle while the hardware adapter owns leg execution."""
+    """管理单个活动 Goal 的完整生命周期，腿部执行由硬件适配器负责。"""
 
     def __init__(self):
         super().__init__("crossing_action_server")
@@ -149,6 +158,7 @@ class CrossingActionServer(Node):
         self.get_logger().info("Obstacle traversal Action gateway ready")
 
     def goal_callback(self, goal_request):
+        """校验并原子预留控制器；并发 Goal 会在执行开始前被拒绝。"""
         valid, reason = validate_goal_values(
             int(goal_request.mode),
             float(goal_request.obstacle_height),
@@ -172,6 +182,7 @@ class CrossingActionServer(Node):
         return CancelResponse.ACCEPT
 
     def status_callback(self, msg: CrossingStatus) -> None:
+        """只接收当前 UUID 的合法状态；无关/畸形消息不能刷新安全心跳。"""
         goal_id = bytes(msg.goal_id.uuid)
         with self._lock:
             if goal_id != self._active_goal_id:
@@ -193,6 +204,7 @@ class CrossingActionServer(Node):
             self._last_progress = float(msg.progress)
 
     def execute_callback(self, goal_handle):
+        """转发 START，持续反馈，并在取消、超时或终态时返回强类型结果。"""
         start = time.monotonic()
         goal_id = bytes(goal_handle.goal_id.uuid)
         with self._lock:
@@ -242,6 +254,8 @@ class CrossingActionServer(Node):
                 with self._lock:
                     status = self._latest_status
                     status_time = self._latest_status_time
+                # Goal 总超时约束整次动作；状态超时约束控制器通信。两者缺一不可：
+                # 持续发 RUNNING 不能无限执行，完全不回状态也不能继续驱动机器人。
                 if status_time is None:
                     stale = elapsed > self.status_timeout
                 else:
@@ -319,6 +333,7 @@ class CrossingActionServer(Node):
                     self._goal_reserved = False
 
     def _publish_command(self, command, goal_id, request) -> None:
+        """完整复制 Goal 参数和 UUID，确保控制器响应可与请求一一对应。"""
         msg = CrossingCommand()
         msg.command = command
         msg.goal_id = goal_id
@@ -331,6 +346,7 @@ class CrossingActionServer(Node):
 
     @staticmethod
     def _feedback(status: CrossingStatus, elapsed: float):
+        """将已校验状态转换为 Action Feedback；夹紧仅作为最后一道防御。"""
         feedback = TraverseObstacle.Feedback()
         feedback.phase = status.phase
         feedback.progress = float(max(0.0, min(1.0, status.progress)))
@@ -341,6 +357,7 @@ class CrossingActionServer(Node):
 
     @staticmethod
     def _result(success: bool, code: int, message: str, duration: float):
+        """集中构造 Action Result，保证所有退出路径字段一致。"""
         result = TraverseObstacle.Result()
         result.success = success
         result.error_code = code
@@ -349,6 +366,7 @@ class CrossingActionServer(Node):
         return result
 
     def destroy_node(self):
+        """节点退出前向仍活动的真机控制器发送 CANCEL。"""
         with self._lock:
             active = self._active_goal_handle
         if active is not None:

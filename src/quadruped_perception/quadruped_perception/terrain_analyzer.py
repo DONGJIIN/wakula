@@ -1,4 +1,14 @@
-"""Bounded-rate point-cloud terrain features in the robot base frame."""
+"""在 ``base_link`` 坐标系内提取轻量地形特征。
+
+设计目标是让 RK3588 在不依赖神经网络的情况下，以固定计算上限完成三件事：
+
+1. 从常见深度相机/三维雷达话题自动选择一个稳定点云源；
+2. 将点云统一变换到机器人坐标系，估计地面、坡度、粗糙度和障碍高度；
+3. 复用同一份前向 ROI 点云给 Nav2 标障，避免重复 TF 和全点云处理。
+
+这里输出的是“上层通行决策特征”，不是足端轨迹。所有距离单位均为米，坡度是
+``dz/dx``（即坡角正切值），而不是角度。消息字段合同见根目录 ``connect.txt``。
+"""
 
 from typing import Optional, Tuple
 
@@ -20,6 +30,18 @@ from quadruped_perception.topic_selection import should_accept_source
 
 
 TerrainResult = Tuple[list, int]
+# Float32MultiArray 没有字段名，因此在代码中集中声明下标，避免各节点散落魔法数字。
+# 修改该顺序属于通信接口变更，必须同步 planning、tools 和 connect.txt。
+FEATURE_GROUND_Z = 0
+FEATURE_HIGH_Z = 1
+FEATURE_OBSTACLE_HEIGHT = 2
+FEATURE_VALID_POINTS = 3
+FEATURE_GROUND_SLOPE = 4
+FEATURE_ROUGHNESS = 5
+FEATURE_FRONTAL_HEIGHT = 6
+FEATURE_LOOKAHEAD = 7
+FEATURE_TRAVERSABILITY = 8
+FEATURE_COUNT = 9
 DEFAULT_POINT_CLOUD_TOPICS = [
     "/camera/depth/points",
     "/camera/depth/color/points",
@@ -35,7 +57,11 @@ def filter_roi_points(
     y_half: float,
     max_points: int,
 ) -> np.ndarray:
-    """Return finite, bounded and deterministically downsampled ROI points."""
+    """返回前向 ROI 内有限且数量有上限的 ``Nx3`` 点数组。
+
+    等间隔抽样是确定性的：相同输入总会得到相同输出，便于 rosbag 回放复现结果。
+    它不是体素滤波，不能替代真机阶段对点云密度和盲区的检查。
+    """
     points = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
     # ROI 只保留机器人正前方区域，既减少计算量，也避免腿部点云干扰。
     valid = np.isfinite(points).all(axis=1)
@@ -51,7 +77,15 @@ def filter_roi_points(
 def fit_ground_envelope(
     points: np.ndarray, ground_percentile: float, bin_count: int = 12
 ) -> Tuple[float, float, np.ndarray, float]:
-    """Fit a robust ground line to low z quantiles in longitudinal bins."""
+    """用纵向分箱低分位点拟合地面包络。
+
+    直接对全部点拟合会让台阶顶面或墙面把“水平地面”拉成斜坡。这里先沿 x 分箱，
+    每箱只取较低的 z 分位数作为候选地面，再拟合 ``z = slope*x + intercept``。
+
+    Returns:
+        ``(slope, intercept, relative_z, roughness)``。``relative_z`` 是每个点
+        相对拟合地面的高度；roughness 同时考虑包络起伏和低层点离散度。
+    """
     x_values = points[:, 0].astype(np.float64)
     z_values = points[:, 2].astype(np.float64)
     quantile = float(np.clip(ground_percentile, 0.02, 0.40))
@@ -71,6 +105,7 @@ def fit_ground_envelope(
         sample_z.append(float(np.quantile(z_values[selected], quantile)))
 
     if len(sample_x) >= 2:
+        # 手写一元最小二乘可避免构造较大的设计矩阵，且退化条件清晰可控。
         centered = np.asarray(sample_x) - np.mean(sample_x)
         denominator = float(np.dot(centered, centered))
         slope = (
@@ -87,11 +122,13 @@ def fit_ground_envelope(
         )
         profile_roughness = float(np.sqrt(np.mean(np.square(profile_residuals))))
     else:
+        # 有效分箱不足时不能可靠估坡，退化为水平地面；后续仍受 min_points 约束。
         slope = 0.0
         intercept = float(np.quantile(z_values, quantile))
         profile_roughness = 0.0
 
     relative_z = z_values - (slope * x_values + intercept)
+    # 只用相对高度较低的一半估计点噪声，避免把真实障碍表面计入地面粗糙度。
     lower_half = relative_z[relative_z <= np.quantile(relative_z, 0.50)]
     point_roughness = float(np.std(lower_half)) if len(lower_half) else 0.0
     roughness = max(profile_roughness, point_roughness)
@@ -110,7 +147,11 @@ def compute_terrain_features(
     max_roughness: float,
     min_points: int,
 ) -> Optional[TerrainResult]:
-    """Compute lightweight terrain features from an Nx3 base-frame array."""
+    """从 ``base_link`` 下的 ``Nx3`` 点云计算固定九字段地形特征。
+
+    返回 ``None`` 表示证据不足，调用者不得将其解释为平地；在线节点会停止发布新特征，
+    规划节点随后依靠传感器超时进入 STOP。该 fail-closed 行为是安全合同的一部分。
+    """
     points = filter_roi_points(xyz, x_min, x_max, y_half, max_points)
     if len(points) < min_points:
         return None
@@ -144,29 +185,28 @@ def compute_terrain_features(
         if len(obstacle_x) >= minimum_obstacle_points
         else float(x_max)
     )
+    # traversability 仅供监控/排序，真正动作等级仍由 planning 中显式阈值决定。
+    # 保持动作判定离散透明，便于真机安全审查和离线复现。
     height_penalty = obstacle_height / max(critical_height, 1e-3)
     slope_penalty = abs(slope) / max(max_slope, 1e-3) * 0.35
     roughness_penalty = roughness / max(max_roughness, 1e-3) * 0.35
     penalty = height_penalty + slope_penalty + roughness_penalty
     traversability = float(np.clip(1.0 - penalty, 0.0, 1.0))
-    return (
-        [
-            ground,
-            high,
-            obstacle_height,
-            float(len(points)),
-            slope,
-            roughness,
-            frontal_height,
-            float(np.clip(lookahead, x_min, x_max)),
-            traversability,
-        ],
-        len(points),
-    )
+    features = [0.0] * FEATURE_COUNT
+    features[FEATURE_GROUND_Z] = ground
+    features[FEATURE_HIGH_Z] = high
+    features[FEATURE_OBSTACLE_HEIGHT] = obstacle_height
+    features[FEATURE_VALID_POINTS] = float(len(points))
+    features[FEATURE_GROUND_SLOPE] = slope
+    features[FEATURE_ROUGHNESS] = roughness
+    features[FEATURE_FRONTAL_HEIGHT] = frontal_height
+    features[FEATURE_LOOKAHEAD] = float(np.clip(lookahead, x_min, x_max))
+    features[FEATURE_TRAVERSABILITY] = traversability
+    return features, len(points)
 
 
 class TerrainAnalyzer(Node):
-    """Transform a cloud to base_link and estimate frontal traversability."""
+    """限频处理最新点云并发布地形特征、Nav2 障碍点和诊断信息。"""
 
     def __init__(self):
         super().__init__("terrain_analyzer")
@@ -263,7 +303,7 @@ class TerrainAnalyzer(Node):
         )
 
     def cloud_callback(self, msg: PointCloud2, source: str) -> None:
-        """Keep only the newest cloud to avoid processing backlog."""
+        """只缓存最新帧；处理速度落后时主动丢旧帧，避免决策使用过期环境。"""
         now = self.get_clock().now()
         active_age = (
             float("inf")
@@ -286,7 +326,7 @@ class TerrainAnalyzer(Node):
         self.latest_cloud = msg
 
     def processing_callback(self) -> None:
-        """Transform and process one unseen cloud."""
+        """处理一帧未见过的点云；每个传感器时间戳最多处理一次。"""
         msg = self.latest_cloud
         if msg is None:
             return
@@ -337,7 +377,9 @@ class TerrainAnalyzer(Node):
             return
         features, valid_points = result
         self.features_pub.publish(Float32MultiArray(data=features))
-        obstacle_height, slope, roughness = features[2], features[4], features[5]
+        obstacle_height = features[FEATURE_OBSTACLE_HEIGHT]
+        slope = features[FEATURE_GROUND_SLOPE]
+        roughness = features[FEATURE_ROUGHNESS]
         level = DiagnosticStatus.OK
         message = "Terrain passable"
         if obstacle_height >= self.critical_height or abs(slope) > self.max_slope:
@@ -356,6 +398,7 @@ class TerrainAnalyzer(Node):
         )
 
     def _to_target_frame(self, msg: PointCloud2) -> Optional[PointCloud2]:
+        """按消息采集时刻查询 TF，禁止用最新 TF 掩盖时间不同步问题。"""
         if not self.target_frame or msg.header.frame_id == self.target_frame:
             return msg
         try:
@@ -377,6 +420,7 @@ class TerrainAnalyzer(Node):
     def _publish_diagnostic(
         self, level: int, message: str, points: int, values: dict
     ) -> None:
+        """把可机读状态发布到标准 ``/diagnostics``，供监控和 rosbag 记录。"""
         status = DiagnosticStatus()
         status.level = level
         status.name = "quadruped/terrain_analyzer"

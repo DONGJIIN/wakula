@@ -40,6 +40,23 @@ def test_invalid_terrain_stops():
     assert decide(height=float("nan"))[0] == "STOP"
 
 
+def test_invalid_decision_limits_fail_closed():
+    """Corrupt runtime limits must never make unknown terrain look passable."""
+    decision = select_terrain_decision(
+        0.0,
+        100.0,
+        0.0,
+        0.0,
+        30,
+        0.08,
+        0.18,
+        0.32,
+        float("nan"),
+        0.06,
+    )
+    assert decision == ("STOP", "WAIT_FOR_TERRAIN", 0.0)
+
+
 def test_geometry_owns_crossing_mode():
     assert decide(height=0.04)[0] == "WALK"
     assert decide(height=0.10)[0] == "STEP"

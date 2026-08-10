@@ -262,6 +262,9 @@ TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
   data[7] lookahead                最近成片高点的 x 距离；未发现时为 ROI x_max
   data[8] traversability           0.0～1.0，可通行度
 失效行为：点数不足时不发布新特征，并通过 /diagnostics 报警；决策节点超时后 STOP。
+实现约束：上述 9 个下标在 terrain_analyzer 和 obstacle_crossing_manager 中使用具名常量；
+任何字段增删或重排都属于接口变更，必须同步离线评估工具、测试和本文档。后续推荐改成
+自定义 TerrainFeatures.msg，以便由 ROS 2 类型系统直接表达字段名和单位。
 
 6. Nav2 深度障碍点云
 
@@ -479,6 +482,8 @@ Result：success、error_code、message、duration。error_code：0=OK、1=INVAL
 默认超过 1.5 秒没有同 UUID 状态即取消后端命令并中止 Goal。
 严谨性：RUNNING/SUCCEEDED 进度不得倒退；state、phase、progress 非法的状态不会刷新心跳。
 默认 SUCCEEDED 还要求 progress>=0.95 且 contact_verified=true，否则返回 EXECUTION_FAILED。
+所有 UUID、状态枚举、阶段、进度和心跳验证的原因均已写在 Action 网关源码注释中；硬件
+SDK 适配器必须遵守这些合同，不能仅发布无 UUID 的字符串表示完成。
 
 兼容名称：/crossing/action_request，std_msgs/msg/String。它只给旧 SDK 显示 STEP/CLIMB/
 LOW_PROFILE，不携带结果，不能作为新控制器的完成判据。
