@@ -135,19 +135,6 @@ vision.yaml 中新增的准确率参数：
 推荐标定顺序：固定相机曝光和白平衡（若驱动支持），再调 ROI、HSV、最小面积/填充率、
 Canny，最后用 rosbag 中的真阳性和误检片段调整时序阈值。一次只改一组参数并记录结果。
 
-传感器类型和安装原则：
-
-1. 当前算法的基础组合是顶置 2D 激光雷达加前置 RGB-D 双目相机。2D 雷达负责 SLAM/Nav2，
-   RGB 负责 OpenCV，深度点云负责真实高度、坡度和越障确认。
-2. 2D 雷达建议距地 0.50～0.60 m、位于机身顶部中心且扫描面水平；相机建议距地
-   0.40～0.50 m、位于机身前端中心并下俯 10°～15°。
-3. RGB-D 应优先选择全局快门、水平宽视场、最近深度不大于 0.20～0.30 m，且能在
-   ROS 2 Jazzy/ARM64 发布 Image、CameraInfo 和 PointCloud2 的型号。
-4. 普通 RGB 相机只能提供视觉提示，不能让系统跳过点云确认。室外强光需要验证主动红外
-   深度，必要时换室外双目或 3D 雷达。
-5. 支架应刚性、防松且不被腿遮挡；实测六自由度外参必须写入 URDF/静态 TF。详细尺寸、
-   推荐规格、现有 URDF 对照和采购检查表见 README.md 第 4.1 节。
-
 障碍类型编码：
 
   0 = none               没有稳定证据
@@ -268,6 +255,18 @@ Gemini 2、ZED2、OAK-D、Velodyne、Ouster、Livox、Hesai、RoboSense 和 LSLI
 话题。驱动版本或命名空间不同，以 ros2 topic list -t 的实际结果为准，再用
 scan_topic、odom_topic、camera_topic、point_cloud_topic 覆盖。非空显式参数优先于
 profile；不指定时使用 ros_default。
+
+真机第一版推荐一个顶部 360° 2D ToF 雷达和一个前置主动双目 RGB-D 相机：
+
+  2D 雷达相对 base_link：x=0～+0.08 m，y≈0，z=+0.10～+0.15 m，扫描面保持水平。
+  RGB-D 相对 base_link：x=+0.28～+0.32 m，y≈0，z=0～+0.06 m，向下俯 10°～15°。
+
+选择相机时优先考虑近端深度不大于 0.3 m、水平视场约 80°～95°、深度全局快门、USB 3、
+设备端深度处理和 ROS 2/aarch64 驱动。选择雷达时优先考虑 360°、10 Hz 以上、室内距离
+12 m 以上、稳定 LaserScan 和 Jazzy/aarch64 驱动。3D 雷达是增强项，不是初版必要条件。
+这些只是机械预留值；真机装好后必须测量平移和 roll/pitch/yaw，并用静态场景检查 TF。
+通用 URDF 当前名义值为 lidar_link=(0.04, 0, 0.12) m、camera_link=(0.29, 0, 0.03) m
+且向下俯 12°，只用于模型和安装布局调试。
 
 2D 雷达可直接给 SLAM Toolbox 提供 LaserScan。3D 雷达的 PointCloud2 可直接给地形分析
 和局部代价地图使用，但当前二维 SLAM 仍需要独立 LaserScan；可以用

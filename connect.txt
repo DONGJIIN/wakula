@@ -403,12 +403,12 @@ base_link -> imu_link
 base_link -> 四条腿各级 link
   发布方：robot_state_publisher，其中固定关节走 /tf_static，运动关节走 /tf。
 
-传感器物理安装合同：
-  lidar_link 应对应机身顶部中心、水平且刚性安装的 2D 扫描平面；建议距地 0.50～0.60 m。
-  camera_link 应对应机身前端中心的相机本体；建议距地 0.40～0.50 m，光轴下俯 10°～15°。
-  camera_optical_frame 必须遵循 ROS 光学坐标约定，不能直接用 camera_link 冒充。
-  URDF 当前位置是 0.44 m 名义站高下的调试起点；真机必须用实测 xyz/rpy 替换。
-  驱动消息的 header.frame_id 必须能连接到上述实际 frame，禁止用错误静态 TF“让程序通过”。
+未定型真机的建议外参起点（仅用于机械预留，不得当作标定结果）：
+  lidar_link：x=0～+0.08 m，y≈0，z=+0.10～+0.15 m，roll/pitch/yaw≈0。
+  camera_link：x=+0.28～+0.32 m，y≈0，z=0～+0.06 m，光轴向下俯 10°～15°。
+最终值必须按实际光心/扫描中心测量；camera_optical_frame 仍按 ROS 光学坐标约定建立。
+当前通用 URDF 名义值：lidar_link=(0.04, 0, 0.12) m；camera_link=(0.29, 0, 0.03) m，
+pitch=+12°（使相机 +x 光轴向下俯）。真机替换这些固定关节后，通信话题无需改变。
 
 ROS 话题：
   /tf         tf2_msgs/msg/TFMessage，动态变换
