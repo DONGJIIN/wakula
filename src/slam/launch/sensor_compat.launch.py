@@ -22,8 +22,10 @@ def generate_launch_description():
         "camera_topic",
         "point_cloud_topic",
         "use_sim_time",
+        "use_control",
         "rviz",
         "vision",
+        "competition",
         "nav2_autostart",
     )
     defaults = {
@@ -36,8 +38,10 @@ def generate_launch_description():
         "camera_topic": "",
         "point_cloud_topic": "",
         "use_sim_time": "false",
+        "use_control": "false",
         "rviz": "true",
         "vision": "true",
+        "competition": "false",
         "nav2_autostart": "true",
     }
     declarations = [

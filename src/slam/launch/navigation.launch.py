@@ -28,11 +28,7 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     log_level = LaunchConfiguration("log_level")
     tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
-    controller_remaps = tf_remaps + [("cmd_vel", "/cmd_vel_nav")]
-    smoother_remaps = tf_remaps + [
-        ("cmd_vel", "/cmd_vel_nav"),
-        ("cmd_vel_smoothed", "/cmd_vel_smoothed"),
-    ]
+    cmd_remaps = tf_remaps + [("cmd_vel", "cmd_vel_nav")]
     lifecycle_nodes = [
         "controller_server",
         "smoother_server",
@@ -46,13 +42,7 @@ def generate_launch_description():
     configured_params = ParameterFile(
         RewrittenYaml(
             source_file=params_file,
-            # Rewrite every occurrence in nav2.yaml.  A GroupAction parameter
-            # alone can lose to node-local YAML values and split the stack
-            # between wall time and /clock.
-            param_rewrites={
-                "autostart": autostart,
-                "use_sim_time": use_sim_time,
-            },
+            param_rewrites={"autostart": autostart},
             convert_types=True,
         ),
         allow_substs=True,
@@ -64,7 +54,7 @@ def generate_launch_description():
             "controller_server",
             configured_params,
             log_level,
-            controller_remaps,
+            cmd_remaps,
         ),
         nav2_node(
             "nav2_smoother",
@@ -85,14 +75,14 @@ def generate_launch_description():
             "behavior_server",
             configured_params,
             log_level,
-            controller_remaps,
+            cmd_remaps,
         ),
         nav2_node(
             "nav2_velocity_smoother",
             "velocity_smoother",
             configured_params,
             log_level,
-            smoother_remaps,
+            cmd_remaps,
         ),
         nav2_node(
             "nav2_collision_monitor",
@@ -133,12 +123,6 @@ def generate_launch_description():
             output="screen",
             parameters=[{"use_sim_time": use_sim_time}],
             condition=IfCondition(autostart),
-        ),
-        Node(
-            package="slam",
-            executable="navigation_health_monitor",
-            output="screen",
-            parameters=[{"use_sim_time": use_sim_time}],
         ),
     ]
     return LaunchDescription(

@@ -1,0 +1,16 @@
+competition_obstacle_manager:
+  ros__parameters:
+    time_limit_s: 210.0
+    autonomous: true
+    return_bonus: 100
+    # The order/locations may be changed after the official layout is released.
+    obstacle_order:
+      - straight_poles
+      - gravel_wood_pit
+      - height_bar
+      - slope
+      - bridge_a
+      - bridge_b
+      - t_stairs
+      - high_wall
+    stair_levels_required: 4

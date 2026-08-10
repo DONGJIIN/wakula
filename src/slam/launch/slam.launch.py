@@ -1,7 +1,13 @@
-"""一键启动 Wakula 的 SLAM、Nav2、OpenCV 与点云感知栈。"""
+"""One-command Wakula entry for SLAM, Nav2, OpenCV and safety nodes."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, LogInfo, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    LogInfo,
+    OpaqueFunction,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -12,23 +18,36 @@ from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
 
 
 def package_file(package: str, folder: str, filename: str):
-    """返回安装空间内的资源路径，避免写死本机目录。"""
+    """Build a package share path without hard-coded installation paths."""
     return PathJoinSubstitution([FindPackageShare(package), folder, filename])
 
 
 def _launch_complete_stack(context):
-    """解析传感器 profile 后创建硬件无关的完整导航栈。"""
+    """Resolve the sensor profile and create the complete scoped stack."""
     profile_name = LaunchConfiguration("sensor_profile").perform(context)
-    profiles_file = LaunchConfiguration("sensor_profiles_file").perform(context)
-    topics = resolve_sensor_topics(
-        load_sensor_profiles(profiles_file),
-        profile_name,
-        {
-            key: LaunchConfiguration(key).perform(context)
-            for key in ("scan_topic", "odom_topic", "camera_topic", "point_cloud_topic")
-        },
+    profiles_file = LaunchConfiguration("sensor_profiles_file").perform(
+        context
     )
+    profiles = load_sensor_profiles(profiles_file)
+    overrides = {
+        key: LaunchConfiguration(key).perform(context)
+        for key in (
+            "scan_topic",
+            "odom_topic",
+            "camera_topic",
+            "point_cloud_topic",
+        )
+    }
+    topics = resolve_sensor_topics(profiles, profile_name, overrides)
+
     use_sim_time = LaunchConfiguration("use_sim_time")
+    use_control = LaunchConfiguration("use_control")
+    vision = LaunchConfiguration("vision")
+    competition = LaunchConfiguration("competition")
+    nav2_autostart = LaunchConfiguration("nav2_autostart")
+    slam_enabled = LaunchConfiguration("slam_enabled")
+    nav2_enabled = LaunchConfiguration("nav2_enabled")
+    rviz_enabled = LaunchConfiguration("rviz")
 
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -36,13 +55,14 @@ def _launch_complete_stack(context):
         ),
         launch_arguments={
             "use_sim_time": use_sim_time,
-            "vision": LaunchConfiguration("vision"),
-            "robot_model": LaunchConfiguration("robot_model"),
+            "use_control": use_control,
+            "vision": vision,
             "camera_topic": topics["camera_topic"],
             "point_cloud_topic": topics["point_cloud_topic"],
             "terrain_params_file": LaunchConfiguration("terrain_params_file"),
             "vision_params_file": LaunchConfiguration("vision_params_file"),
             "crossing_params_file": LaunchConfiguration("crossing_params_file"),
+            "competition": competition,
         }.items(),
     )
     slam_toolbox = IncludeLaunchDescription(
@@ -53,36 +73,41 @@ def _launch_complete_stack(context):
             "use_sim_time": use_sim_time,
             "slam_params_file": LaunchConfiguration("slam_params_file"),
         }.items(),
-        condition=IfCondition(LaunchConfiguration("slam_enabled")),
+        condition=IfCondition(slam_enabled),
     )
     nav2 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(package_file("slam", "launch", "navigation.launch.py")),
+        PythonLaunchDescriptionSource(
+            package_file("slam", "launch", "navigation.launch.py")
+        ),
         launch_arguments={
             "use_sim_time": use_sim_time,
             "params_file": LaunchConfiguration("nav2_params_file"),
-            "autostart": LaunchConfiguration("nav2_autostart"),
+            "autostart": nav2_autostart,
             "log_level": LaunchConfiguration("nav2_log_level"),
         }.items(),
-        condition=IfCondition(LaunchConfiguration("nav2_enabled")),
+        condition=IfCondition(nav2_enabled),
     )
     rviz = Node(
         package="rviz2",
         executable="rviz2",
         arguments=["-d", LaunchConfiguration("rviz_config_file")],
         parameters=[{"use_sim_time": use_sim_time}],
-        condition=IfCondition(LaunchConfiguration("rviz")),
+        condition=IfCondition(rviz_enabled),
         output="screen",
     )
+
     summary = (
-        f"Wakula profile={profile_name}: scan={topics['scan_topic']}, "
-        f"odom={topics['odom_topic']}, image={topics['camera_topic'] or 'auto'}, "
+        f"Wakula one-command profile={profile_name}: "
+        f"scan={topics['scan_topic']}, odom={topics['odom_topic']}, "
+        f"image={topics['camera_topic'] or 'auto'}, "
         f"points={topics['point_cloud_topic'] or 'auto'}"
     )
+    # Remaps are scoped to every included consumer, so one override reaches
+    # SLAM Toolbox, Nav2, Collision Monitor, readiness checks and RViz.
     return [
         LogInfo(msg=summary),
         GroupAction(
             actions=[
-                # 一个 remap 同时覆盖 SLAM、Nav2 和健康检查，换设备时只改入口参数。
                 SetRemap(src="/scan", dst=topics["scan_topic"]),
                 SetRemap(src="/odom", dst=topics["odom_topic"]),
                 bringup,
@@ -95,46 +120,122 @@ def _launch_complete_stack(context):
 
 
 def generate_launch_description():
-    """声明公共入口参数；本文件不启动仿真、底盘或关节控制。"""
+    """Declare all common controls and start the stack with one command."""
     return LaunchDescription(
         [
-            DeclareLaunchArgument("sensor_profile", default_value="ros_default"),
+            DeclareLaunchArgument(
+                "sensor_profile",
+                default_value="ros_default",
+                description="Profile from sensor_profiles_file.",
+            ),
             DeclareLaunchArgument(
                 "sensor_profiles_file",
-                default_value=package_file("slam", "config", "sensor_profiles.yaml"),
-            ),
-            DeclareLaunchArgument("scan_topic", default_value=""),
-            DeclareLaunchArgument("odom_topic", default_value=""),
-            DeclareLaunchArgument("camera_topic", default_value=""),
-            DeclareLaunchArgument("point_cloud_topic", default_value=""),
-            DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("slam_enabled", default_value="true"),
-            DeclareLaunchArgument("nav2_enabled", default_value="true"),
-            DeclareLaunchArgument("nav2_autostart", default_value="true"),
-            DeclareLaunchArgument("vision", default_value="true"),
-            DeclareLaunchArgument("robot_model", default_value="true"),
-            DeclareLaunchArgument("rviz", default_value="true"),
-            DeclareLaunchArgument("nav2_log_level", default_value="info"),
-            DeclareLaunchArgument(
-                "slam_params_file", default_value=package_file("slam", "config", "slam.yaml")
+                default_value=package_file(
+                    "slam", "config", "sensor_profiles.yaml"
+                ),
+                description="YAML containing common sensor topic profiles.",
             ),
             DeclareLaunchArgument(
-                "nav2_params_file", default_value=package_file("slam", "config", "nav2.yaml")
+                "scan_topic",
+                default_value="",
+                description="LaserScan override; empty uses the profile.",
+            ),
+            DeclareLaunchArgument(
+                "odom_topic",
+                default_value="",
+                description="Odometry override; empty uses the profile.",
+            ),
+            DeclareLaunchArgument(
+                "camera_topic",
+                default_value="",
+                description="Image override; empty uses profile/auto detection.",
+            ),
+            DeclareLaunchArgument(
+                "point_cloud_topic",
+                default_value="",
+                description="PointCloud2 override; empty uses profile/auto.",
+            ),
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="false",
+                description="Use the /clock topic from simulation or rosbag.",
+            ),
+            # Keep motor control disabled until a real hardware plugin is ready.
+            DeclareLaunchArgument(
+                "use_control",
+                default_value="false",
+                description="Start configured ros2_control nodes.",
+            ),
+            DeclareLaunchArgument(
+                "slam_enabled",
+                default_value="true",
+                description="Start online SLAM Toolbox.",
+            ),
+            DeclareLaunchArgument(
+                "nav2_enabled",
+                default_value="true",
+                description="Start the complete Nav2 runtime.",
+            ),
+            DeclareLaunchArgument(
+                "nav2_autostart",
+                default_value="true",
+                description="Activate Nav2 after sensors and TF are ready.",
+            ),
+            DeclareLaunchArgument(
+                "vision",
+                default_value="true",
+                description="Start the OpenCV obstacle detector.",
+            ),
+            DeclareLaunchArgument(
+                "competition",
+                default_value="false",
+                description="Use the Robocon competition state machine.",
+            ),
+            DeclareLaunchArgument(
+                "rviz",
+                default_value="true",
+                description="Start RViz with the project display config.",
+            ),
+            DeclareLaunchArgument(
+                "nav2_log_level",
+                default_value="info",
+                description="Log level passed to all Nav2 nodes.",
+            ),
+            DeclareLaunchArgument(
+                "slam_params_file",
+                default_value=package_file("slam", "config", "slam.yaml"),
+                description="SLAM Toolbox parameter YAML.",
+            ),
+            DeclareLaunchArgument(
+                "nav2_params_file",
+                default_value=package_file("slam", "config", "nav2.yaml"),
+                description="Nav2 parameter YAML.",
             ),
             DeclareLaunchArgument(
                 "vision_params_file",
-                default_value=package_file("quadruped_perception", "config", "vision.yaml"),
+                default_value=package_file(
+                    "quadruped_perception", "config", "vision.yaml"
+                ),
+                description="OpenCV detector parameter YAML.",
             ),
             DeclareLaunchArgument(
                 "terrain_params_file",
-                default_value=package_file("quadruped_perception", "config", "terrain.yaml"),
+                default_value=package_file(
+                    "quadruped_perception", "config", "terrain.yaml"
+                ),
+                description="Point-cloud terrain parameter YAML.",
             ),
             DeclareLaunchArgument(
                 "crossing_params_file",
-                default_value=package_file("quadruped_planning", "config", "crossing.yaml"),
+                default_value=package_file(
+                    "quadruped_planning", "config", "crossing.yaml"
+                ),
+                description="Crossing fusion and velocity-gate YAML.",
             ),
             DeclareLaunchArgument(
-                "rviz_config_file", default_value=package_file("slam", "rviz", "slam.rviz")
+                "rviz_config_file",
+                default_value=package_file("slam", "rviz", "slam.rviz"),
+                description="RViz display configuration.",
             ),
             OpaqueFunction(function=_launch_complete_stack),
         ]

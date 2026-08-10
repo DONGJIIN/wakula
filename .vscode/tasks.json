@@ -19,24 +19,7 @@
       "type": "shell",
       "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_bringup bringup.launch.py'",
       "problemMatcher": []
-    },
-    {
-      "label": "ROS: launch SLAM + Nav2 + perception",
-      "type": "shell",
-      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch slam slam.launch.py'",
-      "problemMatcher": []
-    },
-    {
-      "label": "ROS: record debug bag",
-      "type": "shell",
-      "command": "${workspaceFolder}/scripts/record_bag.sh",
-      "problemMatcher": []
-    },
-    {
-      "label": "ROS: diagnose interfaces",
-      "type": "shell",
-      "command": "${workspaceFolder}/scripts/diagnose.sh",
-      "problemMatcher": []
     }
   ]
 }
+

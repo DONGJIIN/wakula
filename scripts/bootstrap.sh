@@ -6,4 +6,3 @@ source /opt/ros/jazzy/setup.bash
 set -u
 cd "$workspace_dir"
 rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y
-"${workspace_dir}/scripts/build.sh"

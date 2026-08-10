@@ -1,0 +1,32 @@
+# Goal: one bounded obstacle traversal request.
+uint8 STEP=1
+uint8 CLIMB=2
+uint8 LOW_PROFILE=3
+uint8 mode
+float32 obstacle_height
+float32 obstacle_distance
+float32 speed_scale
+float32 timeout
+---
+# Result: terminal state returned by the hardware/gait controller.
+uint8 OK=0
+uint8 INVALID_GOAL=1
+uint8 CONTROLLER_TIMEOUT=2
+uint8 EXECUTION_FAILED=3
+uint8 CANCELED=4
+bool success
+uint8 error_code
+string message
+float32 duration
+---
+# Feedback: monotonic progress for operators and planners.
+uint8 ACCEPTED=0
+uint8 PREPARING=1
+uint8 EXECUTING=2
+uint8 VERIFYING_CONTACT=3
+uint8 RECOVERING=4
+uint8 phase
+float32 progress
+float32 elapsed
+bool contact_verified
+string message

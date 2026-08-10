@@ -47,8 +47,6 @@ def test_navigation_launch_description_is_constructible():
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
     assert len(description.entities) >= 2
-    source = path.read_text(encoding="utf-8")
-    assert '"use_sim_time": use_sim_time' in source
 
 
 def test_sensor_profiles_cover_common_devices_and_allow_overrides():
@@ -115,7 +113,6 @@ def test_slam_launch_is_the_complete_one_command_entry():
         "nav2_enabled",
         "nav2_autostart",
         "vision",
-        "robot_model",
         "rviz",
         "slam_params_file",
         "nav2_params_file",

@@ -2,8 +2,7 @@
 
 职责边界：本节点只发布模式、动作意图和速度缩放，不生成腿部轨迹，也不宣称越障已经
 完成。几何点云是动作等级的主证据；单目 OpenCV 没有可靠尺度，只能在 WALK 时请求
-减速或停车复核。项目当前没有腿部越障执行器，因此 STEP/CLIMB 只作为感知分类发布，
-速度门会保持停车；真机控制系统完成后再单独接入执行层。
+减速复核。真正的执行与成功判定由 ``crossing_action_server`` 和底层控制器完成。
 """
 
 from math import isfinite
@@ -24,26 +23,17 @@ TERRAIN_VALID_POINTS = 3
 TERRAIN_GROUND_SLOPE = 4
 TERRAIN_ROUGHNESS = 5
 TERRAIN_FRONTAL_HEIGHT = 6
-TERRAIN_PIT_DEPTH = 9
-TERRAIN_OBSTACLE_TYPE = 11
-
-# 与 TerrainFeatures.msg 一致；保留数组输入是为了兼容既有 rosbag。
-GEOMETRY_CLEAR, GEOMETRY_STEP, GEOMETRY_PIT = 1, 2, 3
-GEOMETRY_WALL, GEOMETRY_BAR, GEOMETRY_POLE = 4, 5, 6
 
 
 class ConservativeDecisionFilter:
-    """STOP 立即生效，动作升级/风险降低分别需要连续证据。
+    """风险升级立即生效，风险降低需连续多帧确认。
 
     例如 WALK→STOP 不允许因防抖而延迟；STOP→WALK 则必须持续观察到安全证据。
     这是一种非对称迟滞，解决阈值附近 WALK/STEP 来回跳变的问题。
     """
 
-    def __init__(
-        self, clear_frames: int, initial: Decision, hazard_frames: int = 2
-    ):
+    def __init__(self, clear_frames: int, initial: Decision):
         self.clear_frames = max(1, int(clear_frames))
-        self.hazard_frames = max(1, int(hazard_frames))
         self.current = initial
         self.pending_mode = None
         self.pending_count = 0
@@ -52,28 +42,11 @@ class ConservativeDecisionFilter:
         """输入当前帧候选结果，返回经过安全迟滞后的稳定结果。"""
         current_level = MODE_SEVERITY.get(self.current[0], MODE_SEVERITY["STOP"])
         candidate_level = MODE_SEVERITY.get(candidate[0], MODE_SEVERITY["STOP"])
-        if candidate_level == current_level:
+        if candidate_level >= current_level:
+            # 同级状态也立即更新 action/speed，使视觉复核等附加信息不会被延迟。
             self.current = candidate
             self.pending_mode = None
             self.pending_count = 0
-            return self.current
-        if candidate_level > current_level:
-            # 紧急 STOP 不允许防抖延迟；STEP/CLIMB 则要求短暂连续几何证据，
-            # 防止深度飞点在单帧内触发错误地形分类。
-            if candidate[0] == "STOP" or self.hazard_frames == 1:
-                self.current = candidate
-                self.pending_mode = None
-                self.pending_count = 0
-                return self.current
-            if candidate[0] != self.pending_mode:
-                self.pending_mode = candidate[0]
-                self.pending_count = 1
-            else:
-                self.pending_count += 1
-            if self.pending_count >= self.hazard_frames:
-                self.current = candidate
-                self.pending_mode = None
-                self.pending_count = 0
             return self.current
         if candidate[0] != self.pending_mode:
             self.pending_mode = candidate[0]
@@ -143,9 +116,9 @@ def select_terrain_decision(
     if obstacle_height >= stop_threshold or absolute_slope >= max_slope * 1.5:
         return "STOP", "REPLAN_OR_REQUEST_FOOTSTEPS", 0.0
     if obstacle_height >= climb_threshold or absolute_slope >= max_slope:
-        return "CLIMB", "STOP_FOR_CLIMB_OR_REPLAN", 0.0
+        return "CLIMB", "CROSS_CLIMB", 0.20
     if obstacle_height >= step_threshold or roughness >= max_roughness:
-        return "STEP", "STOP_FOR_STEP", 0.0
+        return "STEP", "CROSS_STEP", 0.45
     return "WALK", "NAVIGATE", 1.0
 
 
@@ -187,25 +160,6 @@ def apply_visual_assist(
     return mode, "VERIFY_VISUAL_OBSTACLE_WITH_DEPTH", min(speed, vision_speed_scale)
 
 
-def apply_geometry_classification(
-    decision: Decision, obstacle_type: int, pit_depth: float
-) -> Decision:
-    """在高度判定之上加入显式几何危险规则。
-
-    坑洞、墙面、横杆在没有真机运动控制器时一律停车；立柱交给 Nav2 绕行并限速。
-    未知类别不改变旧行为，便于回放旧 rosbag。
-    """
-    if obstacle_type == GEOMETRY_PIT and pit_depth > 0.0:
-        return "STOP", "REPLAN_AROUND_PIT", 0.0
-    if obstacle_type == GEOMETRY_BAR:
-        return "STOP", "STOP_FOR_LOW_BAR", 0.0
-    if obstacle_type == GEOMETRY_POLE and decision[0] == "WALK":
-        return "WALK", "NAVIGATE_AROUND_POLE", min(decision[2], 0.35)
-    if obstacle_type == GEOMETRY_WALL:
-        return "STOP", "REPLAN_AROUND_WALL", 0.0
-    return decision
-
-
 class ObstacleCrossingManager(Node):
     """订阅感知特征，执行安全融合并持续发布可供速度门使用的决策心跳。"""
 
@@ -219,7 +173,6 @@ class ObstacleCrossingManager(Node):
         self.declare_parameter("min_points", 30)
         self.declare_parameter("sensor_timeout", 0.7)
         self.declare_parameter("clear_confirmation_frames", 3)
-        self.declare_parameter("hazard_confirmation_frames", 2)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("vision_timeout", 0.6)
         self.declare_parameter("vision_min_confidence", 0.55)
@@ -268,7 +221,6 @@ class ObstacleCrossingManager(Node):
         self.decision_filter = ConservativeDecisionFilter(
             int(self.get_parameter("clear_confirmation_frames").value),
             ("STOP", "WAIT_FOR_TERRAIN", 0.0),
-            int(self.get_parameter("hazard_confirmation_frames").value),
         )
         self.vision_enabled = bool(self.get_parameter("vision_assist_enabled").value)
         self.vision_timeout = max(
@@ -334,17 +286,6 @@ class ObstacleCrossingManager(Node):
             if len(msg.data) > TERRAIN_ROUGHNESS
             else 0.0
         )
-        pit_depth = (
-            float(msg.data[TERRAIN_PIT_DEPTH])
-            if len(msg.data) > TERRAIN_PIT_DEPTH
-            else 0.0
-        )
-        obstacle_type = (
-            int(round(msg.data[TERRAIN_OBSTACLE_TYPE]))
-            if len(msg.data) > TERRAIN_OBSTACLE_TYPE
-            and isfinite(float(msg.data[TERRAIN_OBSTACLE_TYPE]))
-            else 0
-        )
 
         # 点云决定动作等级，视觉仅能在 WALK 状态要求减速复核。
         raw_decision = select_terrain_decision(
@@ -358,9 +299,6 @@ class ObstacleCrossingManager(Node):
             self.stop_threshold,
             self.max_slope,
             self.max_roughness,
-        )
-        raw_decision = apply_geometry_classification(
-            raw_decision, obstacle_type, pit_depth
         )
         decision = self.decision_filter.update(raw_decision)
         visual_active = self._fresh_visual_target()

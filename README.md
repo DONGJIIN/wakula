@@ -2,11 +2,10 @@
 
 Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试工作空间。
 当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示**
-构成轻量融合链路，不包含 YOLO、深度学习推理、硬件驱动或腿部运动控制。
+构成轻量融合链路，不包含深度学习推理框架或神经网络模型。
 
-现阶段只开发硬件无关的环境感知与自主导航底座。仓库没有实现 Gazebo、厂家 SDK、
-`ros2_control`、状态估计、FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
-结构、执行器和传感器选型确定后再开发。
+工程目前提供完整的软件雏形和安全接口；真正的抬腿、攀爬、跳跃仍需由机器狗厂商
+SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用于高速实机。
 
 ## 文档导航（先看这里）
 
@@ -15,7 +14,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | `README.md` | 项目简介、总体架构、安装和启动入口 | 第一次了解或运行项目 |
 | `quickstart.txt` | 新电脑完整复现、依赖插件、当前进度和后续路线 | 换电脑部署或接手开发 |
 | `instruction.txt` | 各模块作用、算法原理、参数和调试步骤 | 修改 SLAM、Nav2、OpenCV 或越障算法 |
-| `connect.txt` | 全部运行/辅助节点、Topic、消息、TF、字段和超时 | 接入相机、雷达或其他节点 |
+| `connect.txt` | 全部运行/辅助节点、Topic、Action、Service、TF、QoS、字段和超时 | 接入相机、雷达、SDK 或其他节点 |
 
 ## 四足整机研发状态与待完成工作
 
@@ -31,22 +30,23 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | 电气与电源 | ⬜ 未设计 | 电池、BMS、DC-DC、配电、保险、线束、接地、急停、充电和功耗/续航验证 |
 | 嵌入式与底层驱动 | ⬜ 未实现 | MCU/实时控制、CAN/串口/EtherCAT 通信、电机闭环、采样同步、故障码和底层看门狗 |
 | 计算平台与网络 | 🟡 目标为 RK3588 | 完成载板、存储、散热、启动服务、DDS 网络、时钟同步和长期稳定性测试 |
-| ROS 2 硬件接口 | ⬜ 未实现，等待真机 | 接入具体机器狗 SDK 或 ros2_control hardware plugin，打通关节、IMU、足端力和电池状态 |
-| 运动学与动力学模型 | ⬜ 未实现，等待实测参数 | 基于实测尺寸/惯量完成 FK/IK、雅可比、动力学、重力补偿和力矩限制 |
+| ROS 2 硬件接口 | 🟡 接口已预留 | 接入具体机器狗 SDK 或 ros2_control hardware plugin，打通关节、IMU、足端力和电池状态 |
+| 运动学与动力学模型 | ⬜ 未实现 | 实测 URDF/惯量，完成正逆运动学、雅可比、动力学、重力补偿、关节/力矩限制 |
 | 状态估计 | ⬜ 只有 `/odom` 接口 | 融合编码器、IMU、足端接触和视觉/雷达，输出可靠姿态、速度、落足状态及 `odom -> base_link` |
-| 站立与基础步态 | ⬜ 未实现，等待真机 | 完成上电标定、站起/趴下、接触稳定、步态切换和跌倒恢复 |
-| 全身与越障控制 | ⬜ 未实现，当前只识别并停车 | 实现落脚点规划、MPC/WBC、摆动腿轨迹和接触力控制，并用真实接触闭环验收 |
+| 站立与基础步态 | ⬜ 未实现 | 上电标定、站起/趴下、姿态稳定、原地踏步、行走/转向、步态切换和跌倒恢复 |
+| 全身与越障控制 | 🟡 Action 执行合同已完成 | 实现 IK、落脚点规划、MPC/WBC、摆动腿轨迹和接触力控制，并让真机控制器反馈 Action 状态 |
 | 环境感知 | 🟡 软件雏形完成 | 真机标定雷达/相机，完成 RGB-深度同步、障碍跟踪、高程图、坡面和可落脚区域识别 |
 | SLAM 与自主导航 | 🟡 软件雏形完成 | 使用真实 `/scan`、`/odom` 和 TF 调参，验证重定位、动态避障、狭窄通道及失效恢复 |
-| 任务与比赛逻辑 | ⬜ 暂未实现 | 测量正式场地坐标，联动真实越障反馈，完成失败重试、计时、计分和任务恢复 |
-| 整机安全 | ⬜ 仅有导航速度超时门 | 实现并验证硬件急停、驱动失能、过流/过温/欠压及真实姿态/关节保护 |
-| 仿真与测试 | ⬜ 按要求暂不开发仿真 | 真机方案确定后再决定是否建立 Gazebo/Isaac、SIL/HIL 和动力学回归环境 |
-| 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
+| 任务与比赛逻辑 | 🟡 状态机雏形完成 | 测量正式场地坐标，联动真实越障反馈，完善失败重试、计时、计分和任务恢复 |
+| 整机安全 | 🟡 只有 ROS 超时停车 | 增加硬件急停、驱动失能、过流/过温/欠压保护、姿态/关节保护和通信断链保护 |
+| 仿真与测试 | 🟡 只有 RViz 和单元测试 | 建立 Gazebo/Isaac 物理模型、传感器噪声、完整赛道、SIL/HIL、回归和故障注入测试 |
+| 真机联调与工程化 | ⬜ 未完成 | 架空→保护绳→低速→单障碍→整场测试，完成标定工具、日志、rosbag、CI、版本和维护流程 |
 
-当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门和 rosbag 离线评估：7 个 ROS 2 包可编译，37 项测试通过，并提供一键
-启动和 CI。URDF 只用于 RViz 外形与传感器 TF 占位，不能视为运动学或整机控制已完成。
-详细清单与开发顺序见 `quickstart.txt`。
+当前代码已经完成的是上表中“环境感知、SLAM 与自主导航、任务逻辑、ROS 软件安全”的
+第一版雏形：8 个 ROS 2 包可编译，34 项测试通过，并提供一键启动、越障 Action、
+rosbag 离线评估及常见传感器兼容入口。
+其余项目不能因仿真话题或 URDF 能运行就视为完成。详细清单与开发顺序见
+`quickstart.txt` 第七至九节。
 
 ### 后续工作的实施内容与阶段验收
 
@@ -89,8 +89,8 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 6. **阶段 5：真实越障和全身控制**
    - 工作：建立局部高程图，识别台阶、坡面、坑洞、边缘和可落脚区域，并完成 RGB—深度同步与障碍跟踪。
    - 工作：实现落脚点规划、摆动腿轨迹、MPC/WBC 或等价控制、接触力分配和滑移/碰撞检测。
-   - 工作：设计并实现真机越障接口，接入全身控制器，完成落脚、接触和姿态闭环。
-   - 交付物：高程/落脚模块、越障控制接口、动作参数库、失败恢复策略和逐类障碍测试数据。
+   - 工作：把现有 `TraverseObstacle` Action 接到真机全身控制器，完成落脚、接触和姿态闭环。
+   - 交付物：高程/落脚模块、越障 Action、动作参数库、失败恢复策略和逐类障碍测试数据。
    - 验收：每类障碍完成重复低速试验；动作失败可取消并安全站立；越障期间普通 `/cmd_vel` 不会与动作控制争用。
 
 7. **阶段 6：比赛、可靠性和工程交付**
@@ -108,7 +108,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 4. 建立单关节台架和硬件急停，先验证低层闭环及保护，再连接全部关节。
 5. 完成实机 URDF、关节零位和 IMU 标定，依次实现站立、低速行走与可靠 `/odom`。
 6. 接入本仓库的标准传感器和速度接口，录制 rosbag，完成 SLAM/Nav2/感知真机调参。
-7. 最后设计越障控制接口，接入落脚点规划和 MPC/WBC，并逐个障碍低速验收。
+7. 最后把现有越障 Action 接到落脚点规划和 MPC/WBC，并逐个障碍低速验收。
 
 ## 1. 目录结构
 
@@ -116,18 +116,17 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 wakula/
 ├── src/
 │   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
-│   ├── quadruped_bringup/      # 感知、决策、速度门和占位 TF 统一入口
-│   ├── quadruped_interfaces/   # 带时间戳的感知与融合消息
+│   ├── quadruped_control/      # ros2_control 控制器及关节限制
+│   ├── quadruped_bringup/      # 机器人、感知、规划和安全节点统一入口
+│   ├── quadruped_interfaces/   # 越障 Action、执行命令和状态消息
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
-│   ├── quadruped_planning/     # 保守地形决策与 Nav2 速度门
-│   ├── quadruped_tools/        # rosbag 离线标注与准确率报告
+│   ├── quadruped_planning/     # 越障决策、速度门、比赛状态机
+│   ├── quadruped_tools/        # rosbag 离线标注、标定与准确率报告
 │   └── slam/                   # SLAM Toolbox、Nav2 参数与自主启动
 ├── scripts/
-│   ├── record_bag.sh           # 记录感知、导航与诊断数据
-│   ├── diagnose.sh             # 检查 ROS 话题和 TF
+│   ├── bootstrap.sh            # rosdep 安装依赖
 │   └── build.sh                # 统一编译
 ├── .colcon/defaults.yaml
-├── .github/workflows/ros2-ci.yaml
 ├── .vscode/settings.json
 └── README.md
 ```
@@ -138,24 +137,24 @@ wakula/
 
 | 包 | 主要职责 | 关键入口 |
 |---|---|---|
-| `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
-| `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
-| `quadruped_interfaces` | 带时间戳的地形、视觉和融合强类型合同 | 三个 `msg/` 接口 |
-| `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
-| `quadruped_planning` | `WALK/STEP/CLIMB/STOP` 保守分类和 Nav2 速度门 | 两个规划节点 |
-| `quadruped_tools` | rosbag 标注匹配与准确率报告 | `perception_bag_evaluator` |
+| `quadruped_description` | 机器人模型、关节、雷达/相机坐标系 | `display.launch.py` |
+| `quadruped_control` | ros2_control 控制器和关节限制 | `controllers.yaml` |
+| `quadruped_bringup` | 公共启动入口，避免重复节点 | `bringup.launch.py` |
+| `quadruped_interfaces` | 强类型越障 Action 及 SDK 命令/状态合同 | `TraverseObstacle.action` |
+| `quadruped_perception` | 图像障碍证据、点云地形几何、Nav2 障碍点云 | 两个分析节点 |
+| `quadruped_planning` | `WALK/STEP/CLIMB/STOP`、Action 网关、速度门、比赛 FSM | 五个规划节点 |
+| `quadruped_tools` | rosbag 标注模板、阈值搜索和分类指标 | `perception_bag_evaluator` |
 | `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
 
 主要节点：
 
 - `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并做多帧确认。
-- `terrain_analyzer`：将点云转换到 `base_link`，以高度栅格分割主地面并估计台阶、坡度、坑洞、墙、横杆和立柱。
-- `perception_fusion`：按消息头时间戳近似同步相机/点云，发布强类型融合观测；点云始终掌握尺度权限。
-- `obstacle_crossing_manager`：融合视觉证据和点云几何，生成地形模式、处理建议和速度倍率；不输出腿部动作。
-- `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳。
-- `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
-- `cmd_vel_gate`：检查 Nav2 命令和地形决策心跳，任一失效立即输出零速。
-- `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
+- `terrain_analyzer`：将深度点云转换到 `base_link`，分析高度、坡度和粗糙度。
+- `obstacle_crossing_manager`：融合视觉证据和点云几何，生成越障模式与速度倍率。
+- `crossing_action_server`：管理越障目标、取消、反馈、结果和真机控制器超时。
+- `cmd_vel_gate`：检查导航命令及决策心跳并缩放速度，任何一项超时立即输出零速。
+- `competition_obstacle_manager`：Robocon 障碍进度、计时、接触约束和计分。
+- `course_waypoint_navigator`：比赛模式下向 Nav2 发送障碍接近点。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
 
@@ -164,16 +163,16 @@ wakula/
        │                                  │
        └──────────────────────────────────> Nav2 全局/局部规划
 
-RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
-                                                  ├─> 时间同步融合/rosbag
-深度点云 ──> 地面分割 ──> /terrain/features_stamped┘
-                          └─> /terrain/features ──> crossing manager
+RGB 相机 ──> OpenCV ──> /vision/obstacle_evidence ─┐
+                                                  ├─> crossing manager
+深度点云 ──> TF(base_link) ──> /terrain/features ─┘       │
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
 
-Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
-     ─> collision_monitor ─> /cmd_vel ─> 未来真机底盘接口
+安全决策 ─> TraverseObstacle Action ─> execution_command ─> SDK/全身控制器
+                                  <─ execution_status <──┘
 
-/scan + /odom + TF ─> navigation health + Nav2 readiness
+Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
+     ─> collision_monitor ─> /cmd_vel ─> 厂商 SDK / 自研步态控制器
 ```
 
 职责边界如下：
@@ -181,8 +180,7 @@ Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
 1. **SLAM** 用 `/scan` 在陌生环境生成地图和定位，不负责跨越动作。
 2. **Nav2** 根据地图规划路线；激光和深度点云共同写入局部代价地图用于绕障。
 3. **OpenCV** 识别杆、限高横杆、墙面和大面积有色障碍，用于提前减速和提示。
-4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据；
-   当前 STEP/CLIMB 只分类并停车。
+4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据。
 5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
 
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
@@ -327,14 +325,14 @@ source ~/wakula/install/setup.bash
 ros2 launch quadruped_description display.launch.py
 ```
 
-完整启动 SLAM + Nav2 + 感知 + 地形速度门：
+完整启动 SLAM + Nav2 + 感知 + 越障安全链路：
 
 ```bash
 ros2 launch slam slam.launch.py
 ```
 
-这条命令会启动占位模型、SLAM Toolbox、Nav2、OpenCV、点云地形分析、保守决策、
-速度门和 RViz，但不会自动启动雷达/相机厂商驱动，也不会实现真实机器狗步态。
+这条命令会启动机器人模型、SLAM Toolbox、Nav2、OpenCV、点云地形分析、越障决策、
+速度安全链和 RViz，但不会自动启动雷达/相机厂商驱动，也不会实现真实机器狗步态。
 
 常用参数都集中在同一入口：
 
@@ -346,10 +344,11 @@ ros2 launch slam slam.launch.py
 | `slam_enabled`、`nav2_enabled` | `true` | 分别启停 SLAM Toolbox 和 Nav2 |
 | `nav2_autostart` | `true` | 数据与 TF 就绪后是否自动激活 Nav2 |
 | `vision` | `true` | 是否启动 OpenCV 障碍识别 |
-| `robot_model` | `true` | 是否启动未标定的占位 URDF 与固定传感器 TF |
 | `rviz` | `true` | 是否启动 RViz |
-| `use_sim_time` | `false` | rosbag 回放时使用 `/clock` |
-| `*_params_file` | 项目默认 YAML | 覆盖 SLAM、Nav2、视觉、地形和决策参数文件 |
+| `competition` | `false` | 是否使用 Robocon 比赛状态机 |
+| `use_control` | `false` | 是否启动已配置的 ros2_control；真机插件未完成前保持关闭 |
+| `use_sim_time` | `false` | 仿真或 rosbag 回放时使用 `/clock` |
+| `*_params_file` | 项目默认 YAML | 覆盖 SLAM、Nav2、视觉、地形和越障参数文件 |
 
 查看全部参数：
 
@@ -393,10 +392,16 @@ ros2 launch slam slam.launch.py \
   point_cloud_topic:=/depth/points
 ```
 
-只启动占位模型、感知、决策和速度门，不启用 SLAM/Nav2：
+只启动模型、控制、感知和安全门，不启用 SLAM/Nav2：
 
 ```bash
 ros2 launch quadruped_bringup bringup.launch.py
+```
+
+Robocon 比赛模式：
+
+```bash
+ros2 launch slam slam.launch.py competition:=true
 ```
 
 Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`，并确认
@@ -446,19 +451,30 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 可临时开启 `publish_debug_mask`，在 `/vision/debug_mask` 检查分割与边缘效果；标定完成后
 关闭，以减少图像复制。
 
-## 8. 当前地形决策边界
+## 8. 越障 ROS 2 Action
 
-| 模式/类别 | 当前处理 | 是否执行腿部动作 |
-|---|---|---|
-| `WALK` | 允许 Nav2 速度通过；视觉证据可要求减速复核 | 否 |
-| `POLE` | 低速交给 Nav2 绕行 | 否 |
-| `STEP` | 发布 `STOP_FOR_STEP` 并将速度比例置零 | 否 |
-| `CLIMB` | 发布 `STOP_FOR_CLIMB_OR_REPLAN` 并停车 | 否 |
-| `PIT` / `WALL` / `BAR` | 停车并请求重规划或未来控制器处理 | 否 |
-| 数据断流、TF 失败或字段非法 | `WAIT_FOR_TERRAIN`，保持停车 | 否 |
+一键启动会创建 `/crossing/traverse_obstacle`，类型为
+`quadruped_interfaces/action/TraverseObstacle`。它不假装实现腿部控制，而是作为可靠网关
+把一个 Action Goal 转换成带 UUID 的 `/crossing/execution_command`，等待厂商 SDK、MPC/WBC
+或步态控制器从 `/crossing/execution_status` 返回进度和最终状态。
 
-`/crossing/action` 是给日志和后续开发者看的文字建议，不是运动命令。当前没有
-`TraverseObstacle` Action、SDK 网关、关节轨迹或越障控制器；待真机运动控制稳定后再设计。
+Goal 包含 `mode`（1=STEP、2=CLIMB、3=LOW_PROFILE）、障碍高度、障碍距离、速度倍率和超时；
+Feedback 包含阶段、0～1 进度、耗时、接触确认和文字；Result 包含成功标志、错误码、说明
+及总时长。服务端拒绝非法/并发目标，并在取消、目标超时或控制器状态超时时向后端发送
+`CANCEL`。旧 `/crossing/action` 仍是决策建议；兼容请求发布在 `/crossing/action_request`，
+不能代替强类型状态和 Action 结果。
+
+后端状态还必须满足阶段合法、进度在 0～1 且运行进度不倒退。默认只有进度达到 0.95 且
+`contact_verified=true` 的 `SUCCEEDED` 才会被接受；否则 Action 以执行证据不足失败。
+
+手动测试 Goal（未接控制器时会按安全设计超时失败）：
+
+```bash
+ros2 action send_goal /crossing/traverse_obstacle \
+  quadruped_interfaces/action/TraverseObstacle \
+  "{mode: 1, obstacle_height: 0.12, obstacle_distance: 0.50, speed_scale: 0.35, timeout: 10.0}" \
+  --feedback
+```
 
 ## 9. 点云地形与 Nav2 融合
 
@@ -467,28 +483,23 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 
 ```text
 /terrain/features              std_msgs/Float32MultiArray
-/terrain/features_stamped      quadruped_interfaces/TerrainFeatures
 /perception/obstacle_points    sensor_msgs/PointCloud2
-/perception/fused_obstacle     quadruped_interfaces/FusedObstacle
 /diagnostics                   diagnostic_msgs/DiagnosticArray
 ```
 
 `/terrain/features` 字段：
 
 ```text
-[ground_z, high_z, obstacle_height, valid_points, slope_pitch_tan, roughness,
- frontal_obstacle_height, lookahead, traversability, pit_depth, slope_roll,
- obstacle_type, confidence, width, clearance_height]
+[ground_z, high_z, obstacle_height, valid_points, slope, roughness,
+ frontal_obstacle_height, lookahead, traversability]
 ```
 
-判定默认值：高度 `0.08 m` 起分类为 `STEP`，`0.18 m` 起分类为 `CLIMB`，`0.32 m` 起
-标记为必须重规划；当前三种情况都会停车。阈值必须依据机器狗的实际腿长、质心、步态
-能力和相机安装误差重新标定。
+判定默认值：高度 `0.08 m` 起进入 `STEP`，`0.18 m` 起进入 `CLIMB`，`0.32 m` 起停止并
+重规划；坡度、粗糙度也会使模式升级。阈值必须依据机器狗的实际腿长、质心、步态能力
+和相机安装误差重新标定。
 
-兼容字段仍使用纵向低分位地面包络；强类型输出另将点云压成 XY 高度栅格，从占多数的
-高度层拟合 `z=ax+by+c` 主地面，再计算俯仰/横滚坡度、坑深、墙面垂直跨度、横杆净空
-和立柱宽度。坑洞必须看到真实低处回波，单纯无点按未知处理，避免把盲区误判成坑。
-`frontal_obstacle_height`
+地面不再用包含障碍物的全部点直接拟合，而是在纵向分箱中提取低分位地面包络，再估计
+坡度、粗糙度和相对障碍高度，避免台阶把“平地”错误拉成斜坡。`frontal_obstacle_height`
 只统计中央通道，`lookahead` 是最近成片障碍的实际 x 距离，不再是固定 ROI 长度。
 
 同一 ROI 被降采样后发布为 `/perception/obstacle_points`，Nav2 的 local costmap 以
@@ -496,13 +507,6 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗口会移除离开视野的旧区域。
 
 ### rosbag 离线标定与准确率报告
-
-完整采集和回放建议直接使用：
-
-```bash
-./scripts/record_bag.sh                    # 默认写入 bags/时间戳目录
-./scripts/replay_bag.sh bags/某次记录 0.5  # 以 /clock 回放，初始暂停
-```
 
 工具直接读取 `/vision/obstacle_evidence` 和 `/terrain/features`，不需要启动实时节点。先生成
 稀疏标注模板，人工填写 `vision_label`（`none/poles/height_bar/wall/colored_obstacle`）和
@@ -535,11 +539,11 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 - `cmd_vel_gate` 应用 `/crossing/speed_scale`，同时检查命令和决策心跳。
 - Collision Monitor 读取 `/scan`，并作为 `/cmd_vel` 唯一发布者。
 
-规划命令或地形决策心跳任意一项超时，速度门都会发布零速度。这只是导航软件层的失效
-停车，不替代未来真机必须具备的硬件急停、驱动失能、姿态/关节保护和底层看门狗。
+规划命令或越障决策任意一项超时，速度门都发布零速度。机器狗 SDK 还应实现独立的通信
+看门狗、急停和姿态保护，不能仅依赖 ROS 进程。
 
-融合模式采用非对称防抖：紧急 STOP 立即生效；STEP/CLIMB 需要连续几帧几何证据；向
-更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
+融合模式采用非对称防抖：从 WALK 升到 STEP/CLIMB/STOP 立即生效；向更安全等级恢复时，
+默认要求连续 3 帧一致的较低风险证据。这样既不延迟危险升级，也减少阈值附近来回切换。
 高度、坡度、粗糙度、点数和超时等运行参数也在节点入口及纯决策函数处进行合法性防御；
 NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通行。
 
@@ -547,32 +551,41 @@ NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通�
 注释；`/terrain/features` 的下标已集中为具名常量。维护时不要为逐行翻译代码而增加注释，
 应优先记录坐标系、单位、算法假设、安全边界和更换传感器后必须重新标定的内容。
 
-## 11. Robocon 比赛逻辑（待真机阶段）
+## 11. Robocon 障碍赛模式
 
-| 待实现内容 | 前置条件 |
-|---|---|
-| 210 秒计时、计分、障碍顺序和返回起点 | 正式规则与场地坐标冻结 |
-| 障碍完成、失败、取消和有限重试 | 真机越障控制器能返回可信结果 |
-| 足端接触限制和台阶计分 | 真实足端力/接触检测完成 |
-| Nav2 与越障控制切换 | 基础步态、急停和全身控制通过台架验收 |
+当前比赛状态机按提供的 V1.0 规则建立了 210 秒计时、障碍完成/重试、足端接触限制、
+T 字台阶双向计分和返回启动区奖励。事件接口：
 
-当前仓库不发布 `/competition/*` 话题，也没有比赛状态机或调试航点，避免在缺少真机反馈
-时把计时流程误认为完整任务能力。
+```text
+/competition/obstacle_hint          std_msgs/String
+/competition/obstacle_complete      std_msgs/Bool
+/competition/obstacle_failed        std_msgs/Bool
+/competition/retry                  std_msgs/Bool
+/competition/returned_to_start      std_msgs/Bool
+/competition/stair_levels_touched   std_msgs/Int32
+/competition/stair_sides_completed  std_msgs/Int32
+/foot_contacts                      std_msgs/UInt8MultiArray
+```
+
+`course_waypoints.yaml` 仍是调试坐标。获得正式场地测量结果后只修改 YAML，不要将点位
+硬编码到节点。规则状态机管理流程，不代替实际足端接触检测和越障动作控制器。
 
 ## 12. 配置文件索引
 
 | 配置 | 内容 |
 |---|---|
-| `quadruped_interfaces/msg/` | 地形、视觉和相机/点云融合强类型消息 |
-| `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
+| `quadruped_interfaces/action/TraverseObstacle.action` | 越障 Goal、Feedback、Result 合同 |
+| `quadruped_interfaces/msg/` | Action 网关与 SDK 的 UUID 命令/状态合同 |
+| `quadruped_description/urdf/` | 尺寸、惯性、关节、传感器坐标系 |
+| `quadruped_control/config/controllers.yaml` | ros2_control 控制器 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
-| `quadruped_planning/config/crossing.yaml` | 地形分类阈值、视觉辅助和速度门超时 |
+| `quadruped_planning/config/crossing.yaml` | 越障阈值、视觉融合、速度门超时 |
+| `quadruped_planning/config/competition.yaml` | 比赛时间、计分和约束 |
+| `quadruped_planning/config/course_waypoints.yaml` | 障碍接近点 |
 | `quadruped_tools/perception_bag_evaluator.py` | rosbag 标签、指标和参数搜索 |
-| `.github/workflows/ros2-ci.yaml` | Ubuntu 24.04 + ROS 2 Jazzy 自动构建测试 |
 | `slam/config/slam.yaml` | SLAM Toolbox |
 | `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
-| `slam/behavior_trees/navigate_to_pose_wakula.xml` | 清图、等待、小退和小角度旋转恢复树 |
 | `slam/config/sensor_profiles.yaml` | 常见雷达/相机话题 profile，可直接扩展 |
 
 公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
@@ -583,12 +596,12 @@ NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通�
 ## 13. 实机接入清单
 
 1. 用实测值替换 URDF 尺寸、质量和惯性。
-2. 新建厂商 SDK 适配或 `ros2_control` 硬件接口；当前仓库没有模拟实现可直接替换。
+2. 将 mock ros2_control 替换为厂商硬件接口或自研控制器。
 3. 标定关节零位、IMU、雷达、RGB/深度相机内外参和时间同步。
 4. 检查 `/odom`、`odom -> base_link`、传感器 TF 的方向、频率和协方差。
 5. 录制 rosbag，在离线数据上标定 HSV、点云 ROI、高度和坡度阈值。
 6. 检查 local costmap 中激光与 `/perception/obstacle_points` 是否准确重合。
-7. 空载验证断相机、断雷达、断里程计和决策超时；真机安全层完成后再验证急停与恢复。
+7. 空载验证断相机、断雷达、断里程计、决策超时、急停和恢复行为。
 8. 先低速单障碍测试，再接入真实跨越动作和足端接触反馈。
 
 目前的 OpenCV 是带光照归一化、几何配对和时序一致性校验的可解释规则识别，适合起步、
@@ -599,7 +612,7 @@ NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通�
 
 - `README.md`：安装、启动、总体架构和使用入口。
 - `instruction.txt`：各模块作用、算法原理和现场调试顺序。
-- `connect.txt`：全部节点、话题、消息类型、字段、TF、QoS 和超时合同。
+- `connect.txt`：全部节点、话题、消息类型、字段、Action、Service、TF、QoS 和超时合同。
 - `quickstart.txt`：跨电脑完整复现、启动命令、当前成果、常见问题和后续开发路线。
 
 后续每次完成修改都同步检查这四份文档：接口变化更新 `connect.txt`，算法或职责变化

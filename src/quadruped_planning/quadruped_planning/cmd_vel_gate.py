@@ -14,19 +14,12 @@ from std_msgs.msg import Float32
 
 
 def gated_twist(
-    source: Twist,
-    scale: float,
-    command_fresh: bool,
-    decision_fresh: bool,
+    source: Twist, scale: float, command_fresh: bool, decision_fresh: bool
 ) -> Twist:
-    """仅在 Nav2 与地形判断心跳都有效时缩放 Twist，否则输出零。"""
+    """仅在两条心跳有效时缩放 Twist，否则返回全零新消息。"""
     output = Twist()
     # 两条独立心跳任一失效都输出默认构造的零 Twist。
-    if (
-        not command_fresh
-        or not decision_fresh
-        or scale <= 0.0
-    ):
+    if not command_fresh or not decision_fresh or scale <= 0.0:
         return output
     output.linear.x = source.linear.x * scale
     output.linear.y = source.linear.y * scale
