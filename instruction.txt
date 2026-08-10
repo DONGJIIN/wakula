@@ -8,19 +8,18 @@ Wakula 四足机器人自主导航与越障工程说明
 越障决策框架。整体基于 ROS 2 Jazzy，计算量按 RK3588 能够长期运行的标准控制，
 视觉部分只使用 OpenCV，不使用深度学习推理模型。
 
-本工程负责“感知、决策和安全速度输出”，不直接生成每条腿的关节力矩。最终的
-/cmd_vel、/crossing/mode 和 /crossing/action 需要由厂商 SDK、MPC/WBC 控制器或
-自研步态控制器转换为真正的腿部动作。
+本工程现在还提供解析腿部运动学、确定性步态和标准关节轨迹输出，但不直接生成关节
+力矩。内置控制器用于仿真和低速架空联调；自由站立真机仍应由厂商控制器或经过验证的
+MPC/WBC 接管，不能把位置开环基线当作动态稳定控制器。
 
 后续整机软件继续按职责拆包，避免把底层控制堆入导航节点：
 
   quadruped_hardware          已建立安全监督和模拟 SDK；后续加入具体 SDK/硬件插件
-  quadruped_state_estimation 编码器、IMU、足端接触和里程计融合
-  quadruped_kinematics       正逆运动学、雅可比和动力学模型
-  quadruped_locomotion       站立、步态、落脚、MPC/WBC 和越障 Action
-  quadruped_simulation       Gazebo/Isaac 整机、传感器和比赛场景
+  quadruped_control          已有 FK/IK、爬行/小跑及基础轨迹；后续加入雅可比、MPC/WBC
+  quadruped_simulation       已有 Gazebo 基线；后续补完整赛道、噪声、接触和 HIL
+  quadruped_state_estimation 后续融合编码器、IMU、足端接触和里程计
 
-除 quadruped_hardware 已建立硬件无关基线外，其余名称是后续模块边界，不代表已经实现。
+已实现内容仍是硬件无关基线；没有实测质量、惯量、接触与执行器参数的功能不能视为真机完成。
 每个包应先定义输入、输出、超时、错误状态和验收测试，再开始写控制算法；整机阶段
 交付物及通过条件见 README 顶部和 quickstart.txt 第八、九节。
 
@@ -61,8 +60,10 @@ Wakula 四足机器人自主导航与越障工程说明
 
 2. src/quadruped_control
 
-  保存 ros2_control 控制器列表及关节限位。当前主要用于调试模型，接入真机时需要
-  替换为厂商硬件插件或自研硬件接口。
+  kinematics.py：匹配 URDF 的单腿三自由度解析正逆运动学、工作空间和关节限位检查。
+  gait.py：纯函数形式的四拍爬行/对角小跑、摆动脚平滑轨迹和轻量姿态补偿。
+  basic_motion_controller.py：把 /cmd_vel 与强类型越障命令转换为 12 关节 JointTrajectory。
+  controllers.yaml/basic_control.yaml：控制器与低速步态参数。真机需替换硬件插件并重新标定。
 
 3. src/quadruped_bringup
 
@@ -103,7 +104,13 @@ Wakula 四足机器人自主导航与越障工程说明
   perception_bag_evaluator.py：读取 rosbag 结果、生成标注模板、搜索阈值并输出准确率报告。
   fault_injector.py：注入软件急停和模拟控制器失败、失联、非法进度。
 
-9. src/slam
+9. src/quadruped_simulation
+
+  wakula_training.sdf：包含地面、不同高度台阶、斜坡和色杆的 Gazebo Harmonic 训练场。
+  simulation.launch.py：生成机器人、启动标准话题桥并在实体就绪后激活两个控制器。
+  bridge.yaml：把仿真传感器统一映射到 /scan、/odom、/imu/data 和默认相机话题。
+
+10. src/slam
 
   slam.yaml：SLAM Toolbox 参数。
   nav2.yaml：Nav2 规划器、控制器、代价地图、速度平滑和碰撞监控参数。
@@ -114,7 +121,31 @@ Wakula 四足机器人自主导航与越障工程说明
   nav2_readiness_monitor.py：传感器和 TF 就绪后才自动激活 Nav2。
 
 
-四、OpenCV 障碍识别原理
+四、运动学、基础步态与仿真原理
+------------------------------
+
+单腿从髋部开始有侧摆、髋俯仰和膝俯仰三个自由度。kinematics.py 使用实数解析式完成
+FK/IK，输入脚端坐标遵循 REP-103（x 前、y 左、z 上），选择与名义站姿一致的屈膝解。
+求解前检查 NaN/Inf、髋偏置奇异区、腿长可达圆环及三关节限位；不可达目标抛出明确异常，
+步态层退回中立站姿，不会分别裁剪关节制造未知脚位。
+
+gait.py 先把 Twist 限制在保守范围，再由支撑相和摆动相生成连续余弦位移与正弦抬脚。
+四拍爬行按 FL→RR→FR→RL 错相，默认支撑占空比更高；小跑保留为仿真选项。IMU 横滚/
+俯仰只改变最多 25 mm 的虚拟腿长，是轻量姿态辅助而非接触力闭环。
+
+basic_motion_controller 以固定频率发布标准 JointTrajectory。命令或 /safety/stop 心跳超时
+立即回到 HOLD；越障过程带 UUID、进度、取消和接触验证。Gazebo 可以显式允许“定时动作
+完成”以便软件闭环测试，真机默认必须从 /feet/contact 得到至少三足接触证明才能成功。
+
+simulation.launch.py 通过 ros_gz_sim 生成同一 URDF，并由 gz_ros2_control 驱动相同的
+leg_controller。仿真与真机的上层接口一致，切换硬件时只替换 ros2_control system plugin、
+实测 URDF 参数和传感器驱动。仿真统一使用 /clock；SLAM/Nav2/感知/控制不能混用墙上时间。
+
+边界：当前仿真使用简化碰撞和位置接口，基础动作没有 ZMP、MPC/WBC、滑移估计、力分配和
+稳定性证明。它适合验证软件通信、轨迹方向和低速行为，不是无需保护即可下发真机的控制律。
+
+
+五、OpenCV 障碍识别原理
 ----------------------
 
 输入话题按顺序自动兼容：
@@ -183,7 +214,7 @@ Canny，最后用 rosbag 中的真阳性和误检片段调整时序阈值。一�
 无法从单目图像可靠得到真实距离，所以它只负责“提示和提前减速”。
 
 
-五、点云地形分析原理
+六、点云地形分析原理
 --------------------
 
 默认兼容点云话题：
@@ -225,7 +256,7 @@ Canny，最后用 rosbag 中的真阳性和误检片段调整时序阈值。一�
 默认不 clearing，避免深度空洞瞬间把真实障碍清除。
 
 
-六、视觉与点云融合决策
+七、视觉与点云融合决策
 ----------------------
 
 默认高度阈值：
@@ -268,7 +299,7 @@ VERIFY_VISUAL_OBSTACLE_WITH_DEPTH，速度降到 vision_speed_scale。若点云�
 STEP、CLIMB 或 STOP，视觉不能降低点云给出的安全等级。
 
 
-七、越障 Action 与 rosbag 离线评估
+八、越障 Action 与 rosbag 离线评估
 ----------------------------------
 
 越障执行接口为 /crossing/traverse_obstacle，类型
@@ -313,7 +344,7 @@ WALK、STEP、CLIMB、STOP。工具优化的是融合置信度和地形高度阈
 外参以及点云 ROI 仍需结合原始图像、debug mask、标定板和 RViz 人工检查。
 
 
-八、SLAM 与 Nav2 原理
+九、SLAM 与 Nav2 原理
 ---------------------
 
 SLAM Toolbox 使用激光扫描和里程计不断估计机器人位姿，同时更新二维占据栅格地图。
@@ -383,7 +414,7 @@ Nav2 就绪保护：
 强行关闭造成底层进程崩溃。
 
 
-九、速度安全原理
+十、速度安全原理
 ----------------
 
 cmd_vel_gate 接收：
@@ -416,7 +447,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 时间内是否会碰撞，最终发布 /cmd_vel。真机驱动仍必须有独立的通信看门狗和急停。
 
 
-十、常用启动命令
+十一、常用启动命令
 ----------------
 
 先确认当前终端能找到工作空间：
@@ -443,6 +474,14 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 完整自主链路：
 
   ros2 launch slam slam.launch.py
+
+一键启动全部仿真、控制、SLAM、Nav2 和感知：
+
+  ros2 launch slam slam.launch.py simulation:=true
+
+无界面全栈仿真：
+
+  ros2 launch slam slam.launch.py simulation:=true simulation_headless:=true rviz:=false
 
 无 RViz：
 
@@ -496,7 +535,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
   ros2 run quadruped_tools fault_injector --controller-fault none
 
 
-十一、现场调试顺序
+十二、现场调试顺序
 ----------------
 
 1. 用 ros2 topic hz /scan 检查雷达频率。
@@ -512,7 +551,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 10. 最后在低速、保护绳和急停可用的情况下做单障碍实机测试。
 
 
-十二、重要配置文件
+十三、重要配置文件
 ------------------
 
   src/quadruped_perception/config/vision.yaml
@@ -527,6 +566,12 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
   src/quadruped_hardware/config/hardware.yaml
     安全监督初始阈值、必需状态开关和模拟 SDK 动作时长。
 
+  src/quadruped_control/config/basic_control.yaml
+    站高、步频、占空比、抬脚高度、控制周期和真机接触成功条件。
+
+  src/quadruped_simulation/worlds/wakula_training.sdf、config/bridge.yaml
+    Gazebo 训练障碍、物理系统以及 ROS 标准传感器话题桥。
+
   src/slam/config/slam.yaml
     SLAM Toolbox 建图参数。
 
@@ -540,7 +585,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
     每次 main 推送和 PR 在 Ubuntu 24.04 / ROS 2 Jazzy 构建并运行测试。
 
 
-十三、当前边界
+十四、当前边界
 --------------
 
 本仓库当前只覆盖四足整机中的上层 ROS 2 软件，不包含机械、电气、执行器、嵌入式电机
@@ -555,7 +600,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 6. 任何实机测试都应保留硬件急停、姿态保护和驱动侧超时保护。
 
 
-十四、配套文档和维护规则
+十五、配套文档和维护规则
 ------------------------
 
 根目录 README.md 顶部提供四份文档导航、当前状态和优先待办，并说明安装、启动和总体架构；

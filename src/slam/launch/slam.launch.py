@@ -40,8 +40,15 @@ def _launch_complete_stack(context):
     }
     topics = resolve_sensor_topics(profiles, profile_name, overrides)
 
-    use_sim_time = LaunchConfiguration("use_sim_time")
-    use_control = LaunchConfiguration("use_control")
+    simulation = LaunchConfiguration("simulation")
+    simulation_enabled = simulation.perform(context).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    # Gazebo owns controller_manager and /clock.  A standalone ros2_control_node
+    # in the same process graph would claim the same twelve joints twice.
+    use_sim_time = "true" if simulation_enabled else LaunchConfiguration("use_sim_time")
+    use_control = "false" if simulation_enabled else LaunchConfiguration("use_control")
+    basic_control = LaunchConfiguration("basic_control")
     vision = LaunchConfiguration("vision")
     competition = LaunchConfiguration("competition")
     auto_crossing = LaunchConfiguration("auto_crossing")
@@ -59,6 +66,8 @@ def _launch_complete_stack(context):
         launch_arguments={
             "use_sim_time": use_sim_time,
             "use_control": use_control,
+            "simulation": simulation,
+            "basic_control": basic_control,
             "vision": vision,
             "camera_topic": topics["camera_topic"],
             "point_cloud_topic": topics["point_cloud_topic"],
@@ -71,6 +80,19 @@ def _launch_complete_stack(context):
             "safety_supervisor": safety_supervisor,
             "mock_hardware": mock_hardware,
         }.items(),
+    )
+    simulator = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            package_file(
+                "quadruped_simulation", "launch", "simulation.launch.py"
+            )
+        ),
+        launch_arguments={
+            "headless": LaunchConfiguration("simulation_headless"),
+            "world": LaunchConfiguration("simulation_world"),
+            "start_robot_state_publisher": "false",
+        }.items(),
+        condition=IfCondition(simulation),
     )
     slam_toolbox = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -118,6 +140,7 @@ def _launch_complete_stack(context):
                 SetRemap(src="/scan", dst=topics["scan_topic"]),
                 SetRemap(src="/odom", dst=topics["odom_topic"]),
                 bringup,
+                simulator,
                 slam_toolbox,
                 nav2,
                 rviz,
@@ -163,6 +186,23 @@ def generate_launch_description():
                 description="PointCloud2 override; empty uses profile/auto.",
             ),
             DeclareLaunchArgument(
+                "simulation",
+                default_value="false",
+                description="Start Gazebo Harmonic with simulated standard sensors.",
+            ),
+            DeclareLaunchArgument(
+                "simulation_headless",
+                default_value="false",
+                description="Run Gazebo server without its graphical client.",
+            ),
+            DeclareLaunchArgument(
+                "simulation_world",
+                default_value=package_file(
+                    "quadruped_simulation", "worlds", "wakula_training.sdf"
+                ),
+                description="Gazebo SDF world.",
+            ),
+            DeclareLaunchArgument(
                 "use_sim_time",
                 default_value="false",
                 description="Use the /clock topic from simulation or rosbag.",
@@ -172,6 +212,11 @@ def generate_launch_description():
                 "use_control",
                 default_value="false",
                 description="Start configured ros2_control nodes.",
+            ),
+            DeclareLaunchArgument(
+                "basic_control",
+                default_value=LaunchConfiguration("simulation"),
+                description="Start analytic IK and basic joint-trajectory gait control.",
             ),
             DeclareLaunchArgument(
                 "slam_enabled",

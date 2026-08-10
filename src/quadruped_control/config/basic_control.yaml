@@ -1,0 +1,18 @@
+basic_motion_controller:
+  ros__parameters:
+    update_rate: 50.0
+    command_timeout: 0.5
+    safety_timeout: 0.5
+    standing_height: 0.39
+    cadence: 1.5
+    duty_factor: 0.62
+    swing_height: 0.06
+    trajectory_horizon: 0.12
+    attitude_gain: 0.8
+    crossing_step_duration: 4.0
+    crossing_climb_duration: 6.0
+    require_contact_for_crossing: true
+    allow_open_loop_crossing_success: false
+    # Four-beat crawl is the safe bring-up default; switch to trot only after
+    # real mass/inertia, contact and gain validation.
+    normal_gait: crawl

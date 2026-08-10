@@ -27,4 +27,6 @@ def test_bringup_launch_description_is_constructible():
         "auto_crossing",
         "safety_supervisor",
         "mock_hardware",
+        "simulation",
+        "basic_control",
     } <= arguments

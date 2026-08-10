@@ -2,8 +2,12 @@
 
 import cv2
 import numpy as np
+import pytest
 
-from quadruped_perception.terrain_analyzer import compute_terrain_features
+from quadruped_perception.terrain_analyzer import (
+    compute_terrain_features,
+    transform_xyz,
+)
 from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
     ObstacleEvidence,
@@ -168,3 +172,16 @@ def test_sensor_topic_selection_locks_and_fails_over():
     assert should_accept_source(
         "/camera/image_raw", "/image_raw", 2.1, 2.0
     )
+
+
+def test_xyz_transform_handles_rotation_translation_and_invalid_quaternion():
+    points = np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 2.0]], dtype=np.float32)
+    half = np.sqrt(0.5)
+    transformed = transform_xyz(points, (1.0, 2.0, 3.0), (0.0, 0.0, half, half))
+    np.testing.assert_allclose(
+        transformed,
+        [[1.0, 3.0, 3.0], [0.0, 2.0, 5.0]],
+        atol=1e-6,
+    )
+    with pytest.raises(ValueError, match="degenerate"):
+        transform_xyz(points, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0))

@@ -8,6 +8,7 @@ from launch.substitutions import (
     FindExecutable,
     LaunchConfiguration,
     PathJoinSubstitution,
+    PythonExpression,
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -22,6 +23,8 @@ def package_file(package: str, folder: str, filename: str):
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     use_control = LaunchConfiguration("use_control")
+    simulation = LaunchConfiguration("simulation")
+    basic_control = LaunchConfiguration("basic_control")
     vision = LaunchConfiguration("vision")
     camera_topic = LaunchConfiguration("camera_topic")
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
@@ -39,6 +42,9 @@ def generate_launch_description():
     )
     controllers_file = package_file(
         "quadruped_control", "config", "controllers.yaml"
+    )
+    basic_control_file = package_file(
+        "quadruped_control", "config", "basic_control.yaml"
     )
     default_terrain_file = package_file(
         "quadruped_perception", "config", "terrain.yaml"
@@ -59,7 +65,17 @@ def generate_launch_description():
         "quadruped_hardware", "config", "hardware.yaml"
     )
     robot_description = ParameterValue(
-        Command([FindExecutable(name="xacro"), " ", description_file]),
+        Command(
+            [
+                FindExecutable(name="xacro"),
+                " ",
+                description_file,
+                " simulation:=",
+                simulation,
+                " controllers_file:=",
+                controllers_file,
+            ]
+        ),
         value_type=str,
     )
 
@@ -68,6 +84,8 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("use_control", default_value="true"),
+            DeclareLaunchArgument("simulation", default_value="false"),
+            DeclareLaunchArgument("basic_control", default_value="false"),
             DeclareLaunchArgument("vision", default_value="true"),
             DeclareLaunchArgument(
                 "camera_topic",
@@ -110,7 +128,11 @@ def generate_launch_description():
                 package="controller_manager",
                 executable="ros2_control_node",
                 output="screen",
-                condition=IfCondition(use_control),
+                condition=IfCondition(
+                    PythonExpression(
+                        ["'", use_control, "' == 'true' and '", simulation, "' != 'true'"]
+                    )
+                ),
                 parameters=[
                     {"robot_description": robot_description},
                     controllers_file,
@@ -125,7 +147,11 @@ def generate_launch_description():
                     "--controller-manager",
                     "/controller_manager",
                 ],
-                condition=IfCondition(use_control),
+                condition=IfCondition(
+                    PythonExpression(
+                        ["'", use_control, "' == 'true' and '", simulation, "' != 'true'"]
+                    )
+                ),
             ),
             Node(
                 package="controller_manager",
@@ -135,7 +161,26 @@ def generate_launch_description():
                     "--controller-manager",
                     "/controller_manager",
                 ],
-                condition=IfCondition(use_control),
+                condition=IfCondition(
+                    PythonExpression(
+                        ["'", use_control, "' == 'true' and '", simulation, "' != 'true'"]
+                    )
+                ),
+            ),
+            Node(
+                package="quadruped_control",
+                executable="basic_motion_controller",
+                output="screen",
+                parameters=[
+                    basic_control_file,
+                    {
+                        "allow_open_loop_crossing_success": ParameterValue(
+                            simulation, value_type=bool
+                        )
+                    },
+                    common_time,
+                ],
+                condition=IfCondition(basic_control),
             ),
             Node(
                 package="quadruped_perception",

@@ -182,12 +182,16 @@ def test_controller_success_requires_progress_and_contact_proof():
 
 
 def test_decision_filter_escalates_now_and_confirms_clearance():
-    """Risk increases immediately while a safer mode needs repeated evidence."""
-    filter_ = ConservativeDecisionFilter(3, ("WALK", "NAVIGATE", 1.0))
+    """STOP is immediate; motion actions and clearance need repeated evidence."""
+    filter_ = ConservativeDecisionFilter(
+        3, ("WALK", "NAVIGATE", 1.0), hazard_frames=2
+    )
+    assert filter_.update(("CLIMB", "CROSS_CLIMB", 0.2))[0] == "WALK"
     assert filter_.update(("CLIMB", "CROSS_CLIMB", 0.2))[0] == "CLIMB"
     assert filter_.update(("WALK", "NAVIGATE", 1.0))[0] == "CLIMB"
     assert filter_.update(("WALK", "NAVIGATE", 1.0))[0] == "CLIMB"
     assert filter_.update(("WALK", "NAVIGATE", 1.0))[0] == "WALK"
+    assert filter_.update(("STOP", "REPLAN", 0.0))[0] == "STOP"
 
 
 def test_competition_tracks_out_of_order_active_obstacle():

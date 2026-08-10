@@ -42,7 +42,13 @@ def generate_launch_description():
     configured_params = ParameterFile(
         RewrittenYaml(
             source_file=params_file,
-            param_rewrites={"autostart": autostart},
+            # Rewrite every occurrence in nav2.yaml.  A GroupAction parameter
+            # alone can lose to node-local YAML values and split the stack
+            # between wall time and /clock.
+            param_rewrites={
+                "autostart": autostart,
+                "use_sim_time": use_sim_time,
+            },
             convert_types=True,
         ),
         allow_substs=True,

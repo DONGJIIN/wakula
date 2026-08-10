@@ -6,6 +6,7 @@ Action 负责目标互斥、取消、双重超时、反馈和最终结果；底�
 """
 
 import math
+import signal
 import threading
 import time
 from typing import Tuple
@@ -387,6 +388,9 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        # launch can forward SIGINT more than once while executor-owned Action
+        # entities are being destroyed; make this cleanup section idempotent.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             executor.shutdown()
         except KeyboardInterrupt:

@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<sdf version="1.10">
+  <world name="wakula_training">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <gravity>0 0 -9.81</gravity>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse><specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -1</direction>
+    </light>
+
+    <model name="ground">
+      <static>true</static>
+      <link name="ground_link">
+        <collision name="collision"><geometry><box><size>20 14 0.1</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>20 14 0.1</size></box></geometry>
+          <material><ambient>0.45 0.48 0.45 1</ambient><diffuse>0.55 0.58 0.55 1</diffuse></material>
+        </visual>
+      </link>
+      <pose>0 0 -0.05 0 0 0</pose>
+    </model>
+
+    <!-- Three isolated lanes provide repeatable 8, 15 and 30 cm obstacle tests. -->
+    <model name="step_08"><static>true</static><pose>1.0 -1.8 0.04 0 0 0</pose><link name="link">
+      <collision name="collision"><geometry><box><size>0.70 1.20 0.08</size></box></geometry></collision>
+      <visual name="visual"><geometry><box><size>0.70 1.20 0.08</size></box></geometry><material><ambient>0.1 0.3 0.8 1</ambient><diffuse>0.1 0.3 0.8 1</diffuse></material></visual>
+    </link></model>
+    <model name="step_15"><static>true</static><pose>1.0 0 0.075 0 0 0</pose><link name="link">
+      <collision name="collision"><geometry><box><size>0.70 1.20 0.15</size></box></geometry></collision>
+      <visual name="visual"><geometry><box><size>0.70 1.20 0.15</size></box></geometry><material><ambient>0.9 0.4 0.05 1</ambient><diffuse>0.9 0.4 0.05 1</diffuse></material></visual>
+    </link></model>
+    <model name="wall_30"><static>true</static><pose>1.0 1.8 0.15 0 0 0</pose><link name="link">
+      <collision name="collision"><geometry><box><size>0.70 1.20 0.30</size></box></geometry></collision>
+      <visual name="visual"><geometry><box><size>0.70 1.20 0.30</size></box></geometry><material><ambient>0.75 0.1 0.1 1</ambient><diffuse>0.75 0.1 0.1 1</diffuse></material></visual>
+    </link></model>
+
+    <model name="incline"><static>true</static><pose>3.2 -1.4 0.24 0 -0.28 0</pose><link name="link">
+      <collision name="collision"><geometry><box><size>1.60 1.20 0.08</size></box></geometry></collision>
+      <visual name="visual"><geometry><box><size>1.60 1.20 0.08</size></box></geometry><material><ambient>0.15 0.65 0.25 1</ambient><diffuse>0.15 0.65 0.25 1</diffuse></material></visual>
+    </link></model>
+
+    <model name="orange_poles"><static>true</static><pose>3.2 1.4 0 0 0 0</pose>
+      <link name="left"><pose>0 0.48 0.60 0 0 0</pose><collision name="c"><geometry><cylinder><radius>0.06</radius><length>1.2</length></cylinder></geometry></collision><visual name="v"><geometry><cylinder><radius>0.06</radius><length>1.2</length></cylinder></geometry><material><ambient>1 0.25 0 1</ambient><diffuse>1 0.25 0 1</diffuse></material></visual></link>
+      <link name="right"><pose>0 -0.48 0.60 0 0 0</pose><collision name="c"><geometry><cylinder><radius>0.06</radius><length>1.2</length></cylinder></geometry></collision><visual name="v"><geometry><cylinder><radius>0.06</radius><length>1.2</length></cylinder></geometry><material><ambient>1 0.25 0 1</ambient><diffuse>1 0.25 0 1</diffuse></material></visual></link>
+    </model>
+
+    <model name="boundary_north"><static>true</static><pose>0 6.8 0.5 0 0 0</pose><link name="link"><collision name="c"><geometry><box><size>20 0.1 1</size></box></geometry></collision><visual name="v"><geometry><box><size>20 0.1 1</size></box></geometry></visual></link></model>
+    <model name="boundary_south"><static>true</static><pose>0 -6.8 0.5 0 0 0</pose><link name="link"><collision name="c"><geometry><box><size>20 0.1 1</size></box></geometry></collision><visual name="v"><geometry><box><size>20 0.1 1</size></box></geometry></visual></link></model>
+  </world>
+</sdf>

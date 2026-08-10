@@ -10,6 +10,7 @@
 ``dz/dx``（即坡角正切值），而不是角度。消息字段合同见根目录 ``connect.txt``。
 """
 
+import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -22,9 +23,8 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Header
 from tf2_ros import Buffer, TransformException, TransformListener
-from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 from quadruped_perception.topic_selection import should_accept_source
 
@@ -48,6 +48,49 @@ DEFAULT_POINT_CLOUD_TOPICS = [
     "/camera/points",
     "/points",
 ]
+
+
+def transform_xyz(xyz: np.ndarray, translation, quaternion) -> np.ndarray:
+    """Transform only XYZ while accepting arbitrary extra PointCloud2 fields.
+
+    Several RGB-D drivers append packed RGB, intensity, ring or padding fields.
+    Rebuilding the complete structured record through ``tf2_sensor_msgs`` can
+    fail when those fields have vendor-specific alignment.  Terrain analysis
+    needs XYZ only, so this bounded NumPy transform deliberately decouples
+    geometry from unrelated fields.
+    """
+    points = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+    # GPU depth sensors use +/-Inf for pixels without a return; discard them
+    # before matrix multiplication to avoid warnings and needless CPU work.
+    points = points[np.isfinite(points).all(axis=1)]
+    tx, ty, tz = (float(value) for value in translation)
+    qx, qy, qz, qw = (float(value) for value in quaternion)
+    values = (tx, ty, tz, qx, qy, qz, qw)
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if not all(np.isfinite(value) for value in values) or norm < 1e-9:
+        raise ValueError("point-cloud transform is non-finite or degenerate")
+    qx, qy, qz, qw = (value / norm for value in (qx, qy, qz, qw))
+    rotation = np.asarray(
+        [
+            [
+                1 - 2 * (qy * qy + qz * qz),
+                2 * (qx * qy - qz * qw),
+                2 * (qx * qz + qy * qw),
+            ],
+            [
+                2 * (qx * qy + qz * qw),
+                1 - 2 * (qx * qx + qz * qz),
+                2 * (qy * qz - qx * qw),
+            ],
+            [
+                2 * (qx * qz - qy * qw),
+                2 * (qy * qz + qx * qw),
+                1 - 2 * (qx * qx + qy * qy),
+            ],
+        ],
+        dtype=np.float64,
+    )
+    return (points @ rotation.T + np.asarray((tx, ty, tz))).astype(np.float32)
 
 
 def filter_roi_points(
@@ -334,16 +377,10 @@ class TerrainAnalyzer(Node):
         if stamp == self.last_processed_stamp:
             return
         self.last_processed_stamp = stamp
-        cloud = self._to_target_frame(msg)
-        if cloud is None:
+        transformed = self._xyz_in_target_frame(msg)
+        if transformed is None:
             return
-        try:
-            xyz = point_cloud2.read_points_numpy(
-                cloud, field_names=["x", "y", "z"], skip_nans=True
-            )
-        except (AssertionError, ValueError) as exc:
-            self.get_logger().warning(f"Invalid PointCloud2 layout: {exc}")
-            return
+        header, xyz = transformed
         # 同一份已转换点云同时供 Nav2 标障和越障几何计算，避免重复 TF。
         nav2_points = filter_roi_points(
             xyz,
@@ -353,7 +390,7 @@ class TerrainAnalyzer(Node):
             self.nav2_cloud_max_points,
         )
         self.obstacle_cloud_pub.publish(
-            point_cloud2.create_cloud_xyz32(cloud.header, nav2_points.tolist())
+            point_cloud2.create_cloud_xyz32(header, nav2_points.tolist())
         )
         result = compute_terrain_features(
             xyz,
@@ -397,10 +434,17 @@ class TerrainAnalyzer(Node):
             },
         )
 
-    def _to_target_frame(self, msg: PointCloud2) -> Optional[PointCloud2]:
-        """按消息采集时刻查询 TF，禁止用最新 TF 掩盖时间不同步问题。"""
+    def _xyz_in_target_frame(self, msg: PointCloud2):
+        """读取 XYZ 并按采样时刻变换，忽略不相关的厂商扩展字段。"""
+        try:
+            xyz = point_cloud2.read_points_numpy(
+                msg, field_names=["x", "y", "z"], skip_nans=True
+            )
+        except (AssertionError, ValueError) as exc:
+            self.get_logger().warning(f"Invalid PointCloud2 XYZ layout: {exc}")
+            return None
         if not self.target_frame or msg.header.frame_id == self.target_frame:
-            return msg
+            return msg.header, np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.target_frame,
@@ -408,13 +452,26 @@ class TerrainAnalyzer(Node):
                 Time.from_msg(msg.header.stamp),
                 timeout=Duration(seconds=self.transform_timeout),
             )
-            return do_transform_cloud(msg, transform)
+            translation = transform.transform.translation
+            rotation = transform.transform.rotation
+            transformed = transform_xyz(
+                xyz,
+                (translation.x, translation.y, translation.z),
+                (rotation.x, rotation.y, rotation.z, rotation.w),
+            )
+            header = Header()
+            header.stamp = msg.header.stamp
+            header.frame_id = self.target_frame
+            return header, transformed
         except TransformException as exc:
             self.get_logger().warning(
                 f"Waiting for point-cloud TF {msg.header.frame_id} -> "
                 f"{self.target_frame}: {exc}",
                 throttle_duration_sec=2.0,
             )
+            return None
+        except ValueError as exc:
+            self.get_logger().warning(f"Invalid point-cloud transform: {exc}")
             return None
 
     def _publish_diagnostic(

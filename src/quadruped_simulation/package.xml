@@ -1,22 +1,19 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>quadruped_bringup</name>
+  <name>quadruped_simulation</name>
   <version>0.1.0</version>
-  <description>Unified launch package for quadruped autonomy.</description>
+  <description>Gazebo Harmonic world, bridges and ros2_control launch for Wakula.</description>
   <maintainer email="developer@example.com">Quadruped Developer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>controller_manager</exec_depend>
-  <exec_depend>launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>gz_ros2_control</exec_depend>
   <exec_depend>quadruped_control</exec_depend>
   <exec_depend>quadruped_description</exec_depend>
-  <exec_depend>quadruped_hardware</exec_depend>
-  <exec_depend>quadruped_control</exec_depend>
-  <exec_depend>quadruped_perception</exec_depend>
-  <exec_depend>quadruped_planning</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
-  <exec_depend>xacro</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

@@ -301,6 +301,13 @@ def main(args=None):
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RuntimeError:
+        # ROS 2 Jazzy may tear down a subscription between wait-set wakeup and
+        # message conversion when launch broadcasts SIGINT.  Suppress only
+        # that shutdown race; a RuntimeError during normal operation remains
+        # visible and must not be mistaken for a clean exit.
+        if rclpy.ok():
+            raise
     finally:
         # launch 与 timeout 可能连续转发 SIGINT，清理阶段也必须可重入退出。
         signal.signal(signal.SIGINT, signal.SIG_IGN)

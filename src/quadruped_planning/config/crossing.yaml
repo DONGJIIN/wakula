@@ -8,7 +8,9 @@ obstacle_crossing_manager:
     min_points: 30
     sensor_timeout: 0.7
     # Escalate immediately; require this many valid frames before moving safer.
-    clear_confirmation_frames: 3
+    clear_confirmation_frames: 5
+    # STEP/CLIMB need consecutive depth frames; emergency STOP remains immediate.
+    hazard_confirmation_frames: 3
     # Vision may only slow navigation and request depth confirmation. Geometry
     # remains the authority for STEP/CLIMB/STOP decisions.
     vision_assist_enabled: true

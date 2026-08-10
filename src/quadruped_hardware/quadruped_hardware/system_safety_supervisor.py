@@ -6,6 +6,7 @@
 """
 
 import math
+import signal
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
@@ -45,6 +46,32 @@ def quaternion_to_roll_pitch(x: float, y: float, z: float, w: float):
     sin_pitch = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
     pitch = math.asin(sin_pitch)
     return roll, pitch
+
+
+def joint_state_is_valid(names, position, velocity, effort) -> bool:
+    """Validate required kinematics while accepting unavailable effort as NaN.
+
+    ``joint_state_broadcaster`` legitimately publishes an all-NaN effort array
+    when a position-only backend has no torque sensor.  A mixed finite/NaN
+    effort array remains invalid because it indicates a partial data failure.
+    """
+    count = len(names)
+    if not names or len(position) != count:
+        return False
+    if velocity and len(velocity) != count:
+        return False
+    if effort and len(effort) != count:
+        return False
+    if not all(math.isfinite(float(value)) for value in position):
+        return False
+    if velocity and not all(math.isfinite(float(value)) for value in velocity):
+        return False
+    if effort:
+        finite = tuple(math.isfinite(float(value)) for value in effort)
+        all_nan = all(math.isnan(float(value)) for value in effort)
+        if not all(finite) and not all_nan:
+            return False
+    return True
 
 
 def evaluate_safety(
@@ -172,15 +199,8 @@ class SystemSafetySupervisor(Node):
         self.last_times[0] = self.get_clock().now()
 
     def joint_callback(self, msg: JointState) -> None:
-        values = tuple(msg.position) + tuple(msg.velocity) + tuple(msg.effort)
-        lengths_valid = (
-            bool(msg.name)
-            and len(msg.position) == len(msg.name)
-            and (not msg.velocity or len(msg.velocity) == len(msg.name))
-            and (not msg.effort or len(msg.effort) == len(msg.name))
-        )
-        self.joint_values_valid = lengths_valid and all(
-            math.isfinite(float(value)) for value in values
+        self.joint_values_valid = joint_state_is_valid(
+            msg.name, msg.position, msg.velocity, msg.effort
         )
         self.last_times[1] = self.get_clock().now()
 
@@ -255,7 +275,11 @@ def main(args=None):
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RuntimeError:
+        if rclpy.ok():
+            raise
     finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             node.destroy_node()
             rclpy.try_shutdown()

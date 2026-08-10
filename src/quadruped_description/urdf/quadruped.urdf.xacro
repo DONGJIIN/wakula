@@ -1,5 +1,8 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="wakula_quadruped">
+  <!-- The same model targets GenericSystem, Gazebo or a future real plugin. -->
+  <xacro:arg name="simulation" default="false"/>
+  <xacro:arg name="controllers_file" default=""/>
   <!-- Generic 12-DOF quadruped model for RViz and ros2_control debugging.
        Replace these dimensions and inertias with measured hardware values before deployment. -->
   <xacro:property name="body_length" value="0.52"/>
@@ -136,6 +139,10 @@
       <child link="${prefix}_foot"/>
       <origin xyz="0 0 ${-lower_leg_length}"/>
     </joint>
+    <gazebo reference="${prefix}_foot">
+      <mu1>1.5</mu1>
+      <mu2>1.5</mu2>
+    </gazebo>
   </xacro:macro>
 
   <xacro:leg prefix="front_left"  x="0.20"  y="${body_width/2.0}"  side="1"/>
@@ -170,14 +177,25 @@
     <parent link="base_link"/><child link="camera_link"/>
     <origin xyz="0.29 0 0.03" rpy="0 ${12*pi/180} 0"/>
   </joint>
-  <link name="camera_optical_frame"/>
+  <link name="camera_optical_frame">
+    <!-- Tiny inertia keeps the preserved optical frame valid during URDF->SDF conversion. -->
+    <xacro:box_inertial mass="0.001" x="0.001" y="0.001" z="0.001"/>
+  </link>
   <joint name="camera_optical_joint" type="fixed">
     <parent link="camera_link"/><child link="camera_optical_frame"/>
     <origin rpy="${-pi/2} 0 ${-pi/2}"/>
   </joint>
 
   <ros2_control name="QuadrupedSystem" type="system">
-    <hardware><plugin>mock_components/GenericSystem</plugin></hardware>
+    <hardware>
+      <xacro:if value="$(arg simulation)">
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+      </xacro:if>
+      <xacro:unless value="$(arg simulation)">
+        <!-- Replace only this plugin when the selected real actuator SDK is known. -->
+        <plugin>mock_components/GenericSystem</plugin>
+      </xacro:unless>
+    </hardware>
     <xacro:macro name="controlled_joint" params="name initial:=0.0">
       <joint name="${name}">
         <command_interface name="position"/>
@@ -198,4 +216,73 @@
     <xacro:controlled_joint name="rear_right_thigh_joint" initial="0.55"/>
     <xacro:controlled_joint name="rear_right_calf_joint" initial="-1.10"/>
   </ros2_control>
+
+  <!-- Gazebo-only physics, controller and sensor systems.  Real drivers keep
+       publishing the same ROS topics, so perception and navigation do not change. -->
+  <xacro:if value="$(arg simulation)">
+    <gazebo>
+      <self_collide>true</self_collide>
+      <plugin filename="gz_ros2_control-system"
+              name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+        <parameters>$(arg controllers_file)</parameters>
+        <hold_joints>true</hold_joints>
+        <position_proportional_gain>0.25</position_proportional_gain>
+      </plugin>
+      <plugin filename="gz-sim-odometry-publisher-system"
+              name="gz::sim::systems::OdometryPublisher">
+        <odom_frame>odom</odom_frame>
+        <robot_base_frame>base_footprint</robot_base_frame>
+        <odom_topic>/odom</odom_topic>
+        <tf_topic>/tf</tf_topic>
+        <odom_publish_frequency>50</odom_publish_frequency>
+      </plugin>
+    </gazebo>
+
+    <gazebo reference="lidar_joint"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+    <gazebo reference="lidar_link">
+      <sensor name="wakula_lidar" type="gpu_lidar">
+        <always_on>true</always_on>
+        <update_rate>12</update_rate>
+        <visualize>false</visualize>
+        <topic>/scan</topic>
+        <lidar>
+          <scan><horizontal>
+            <samples>720</samples><resolution>1</resolution>
+            <min_angle>-${pi}</min_angle><max_angle>${pi}</max_angle>
+          </horizontal></scan>
+          <range><min>0.12</min><max>20.0</max><resolution>0.01</resolution></range>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.006</stddev></noise>
+        </lidar>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="camera_joint"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+    <gazebo reference="camera_optical_joint"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+    <gazebo reference="camera_link">
+      <sensor name="wakula_rgbd" type="rgbd_camera">
+        <always_on>true</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/rgbd_camera</topic>
+        <camera>
+          <horizontal_fov>1.40</horizontal_fov>
+          <image><width>640</width><height>360</height><format>R8G8B8</format></image>
+          <clip><near>0.20</near><far>8.0</far></clip>
+          <!-- Gazebo RGBD points use x-forward/y-left/z-up coordinates.  Label
+               them camera_link; real optical drivers continue using the fixed
+               camera_optical_frame supplied above. -->
+          <optical_frame_id>camera_link</optical_frame_id>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.002</stddev></noise>
+        </camera>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="imu_joint"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+    <gazebo reference="imu_link">
+      <sensor name="wakula_imu" type="imu">
+        <always_on>true</always_on><update_rate>100</update_rate>
+        <topic>/imu/data</topic>
+      </sensor>
+    </gazebo>
+  </xacro:if>
 </robot>

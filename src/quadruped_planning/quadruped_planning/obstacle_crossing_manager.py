@@ -26,14 +26,17 @@ TERRAIN_FRONTAL_HEIGHT = 6
 
 
 class ConservativeDecisionFilter:
-    """风险升级立即生效，风险降低需连续多帧确认。
+    """STOP 立即生效，动作升级/风险降低分别需要连续证据。
 
     例如 WALK→STOP 不允许因防抖而延迟；STOP→WALK 则必须持续观察到安全证据。
     这是一种非对称迟滞，解决阈值附近 WALK/STEP 来回跳变的问题。
     """
 
-    def __init__(self, clear_frames: int, initial: Decision):
+    def __init__(
+        self, clear_frames: int, initial: Decision, hazard_frames: int = 2
+    ):
         self.clear_frames = max(1, int(clear_frames))
+        self.hazard_frames = max(1, int(hazard_frames))
         self.current = initial
         self.pending_mode = None
         self.pending_count = 0
@@ -42,11 +45,28 @@ class ConservativeDecisionFilter:
         """输入当前帧候选结果，返回经过安全迟滞后的稳定结果。"""
         current_level = MODE_SEVERITY.get(self.current[0], MODE_SEVERITY["STOP"])
         candidate_level = MODE_SEVERITY.get(candidate[0], MODE_SEVERITY["STOP"])
-        if candidate_level >= current_level:
-            # 同级状态也立即更新 action/speed，使视觉复核等附加信息不会被延迟。
+        if candidate_level == current_level:
             self.current = candidate
             self.pending_mode = None
             self.pending_count = 0
+            return self.current
+        if candidate_level > current_level:
+            # 紧急 STOP 不允许防抖延迟；STEP/CLIMB 则要求短暂连续几何证据，
+            # 防止深度飞点在单帧内触发真实抬腿动作。
+            if candidate[0] == "STOP" or self.hazard_frames == 1:
+                self.current = candidate
+                self.pending_mode = None
+                self.pending_count = 0
+                return self.current
+            if candidate[0] != self.pending_mode:
+                self.pending_mode = candidate[0]
+                self.pending_count = 1
+            else:
+                self.pending_count += 1
+            if self.pending_count >= self.hazard_frames:
+                self.current = candidate
+                self.pending_mode = None
+                self.pending_count = 0
             return self.current
         if candidate[0] != self.pending_mode:
             self.pending_mode = candidate[0]
@@ -173,6 +193,7 @@ class ObstacleCrossingManager(Node):
         self.declare_parameter("min_points", 30)
         self.declare_parameter("sensor_timeout", 0.7)
         self.declare_parameter("clear_confirmation_frames", 3)
+        self.declare_parameter("hazard_confirmation_frames", 2)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("vision_timeout", 0.6)
         self.declare_parameter("vision_min_confidence", 0.55)
@@ -221,6 +242,7 @@ class ObstacleCrossingManager(Node):
         self.decision_filter = ConservativeDecisionFilter(
             int(self.get_parameter("clear_confirmation_frames").value),
             ("STOP", "WAIT_FOR_TERRAIN", 0.0),
+            int(self.get_parameter("hazard_confirmation_frames").value),
         )
         self.vision_enabled = bool(self.get_parameter("vision_assist_enabled").value)
         self.vision_timeout = max(

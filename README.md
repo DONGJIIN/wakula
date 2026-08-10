@@ -4,8 +4,9 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示**
 构成轻量融合链路，不包含深度学习推理框架或神经网络模型。
 
-工程目前提供完整的软件雏形和安全接口；真正的抬腿、攀爬、跳跃仍需由机器狗厂商
-SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用于高速实机。
+工程已提供 Gazebo Harmonic 训练场、解析三自由度腿部正逆运动学、低速位置式爬行/小跑
+基线和安全接口。基础控制可用于仿真、架空及保护绳低增益联调，但不等同于具备动态稳定性
+的 MPC/WBC；真正高速行走、攀爬和抗冲击仍需结合真机动力学、接触估计及力控制实现。
 
 ## 文档导航（先看这里）
 
@@ -18,9 +19,9 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 
 ## 四足整机研发状态与待完成工作
 
-> **当前只完成了上层 ROS 2 软件雏形，不是一台已经完成的四足机器人。** SLAM、Nav2、
-> OpenCV 和点云解决的是“看环境、定位置、选路线、发动作请求”；机器能否稳定站立、行走、
-> 抬腿和越障，还取决于机械、电气、驱动、状态估计及运动控制等尚未完成的整机系统。
+> **当前完成的是硬件无关软件基线，不是一台已经完成的四足机器人。** 除 SLAM、Nav2、
+> OpenCV 和点云外，仓库已有简化仿真、解析 IK 与低速位置步态；机器能否稳定站立、行走、
+> 抬腿和越障，仍取决于机械、电气、驱动、状态估计和经过真机验证的动态运动控制。
 
 | 整机子系统 | 当前状态 | 还需要完成 |
 |---|---|---|
@@ -31,20 +32,20 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 | 嵌入式与底层驱动 | ⬜ 未实现 | MCU/实时控制、CAN/串口/EtherCAT 通信、电机闭环、采样同步、故障码和底层看门狗 |
 | 计算平台与网络 | 🟡 目标为 RK3588 | 完成载板、存储、散热、启动服务、DDS 网络、时钟同步和长期稳定性测试 |
 | ROS 2 硬件接口 | 🟡 强类型合同和模拟 SDK 已完成 | 接入具体机器狗 SDK 或 ros2_control hardware plugin，打通关节、IMU、足端力和电池状态 |
-| 运动学与动力学模型 | ⬜ 未实现 | 实测 URDF/惯量，完成正逆运动学、雅可比、动力学、重力补偿、关节/力矩限制 |
+| 运动学与动力学模型 | 🟡 解析 3-DOF 腿部 FK/IK 已完成 | 用实测尺寸/惯量校准，继续完成雅可比、动力学、重力补偿和力矩限制 |
 | 状态估计 | ⬜ 只有 `/odom` 接口 | 融合编码器、IMU、足端接触和视觉/雷达，输出可靠姿态、速度、落足状态及 `odom -> base_link` |
-| 站立与基础步态 | ⬜ 未实现 | 上电标定、站起/趴下、姿态稳定、原地踏步、行走/转向、步态切换和跌倒恢复 |
-| 全身与越障控制 | 🟡 Action 执行合同已完成 | 实现 IK、落脚点规划、MPC/WBC、摆动腿轨迹和接触力控制，并让真机控制器反馈 Action 状态 |
+| 站立与基础步态 | 🟡 位置式站立、四拍爬行/小跑基线已完成 | 真机上电标定、站起/趴下、接触稳定、步态切换和跌倒恢复仍待实现 |
+| 全身与越障控制 | 🟡 Action + 定时抬脚爬行基线已完成 | 实现落脚点规划、MPC/WBC、摆动腿轨迹和接触力控制，并用真实接触闭环验收 |
 | 环境感知 | 🟡 软件雏形完成 | 真机标定雷达/相机，完成 RGB-深度同步、障碍跟踪、高程图、坡面和可落脚区域识别 |
 | SLAM 与自主导航 | 🟡 软件雏形完成 | 使用真实 `/scan`、`/odom` 和 TF 调参，验证重定位、动态避障、狭窄通道及失效恢复 |
 | 任务与比赛逻辑 | 🟡 状态机雏形完成 | 测量正式场地坐标，联动真实越障反馈，完善失败重试、计时、计分和任务恢复 |
 | 整机安全 | 🟡 软件监督和互锁已完成 | 接入并验证硬件急停、驱动失能、过流/过温/欠压及真实姿态/关节保护 |
-| 仿真与测试 | 🟡 单元、最小闭环和故障注入已完成 | 建立 Gazebo/Isaac 物理模型、传感器噪声、完整赛道和 SIL/HIL |
+| 仿真与测试 | 🟡 Gazebo Harmonic 基线、训练障碍、传感器及控制闭环已完成 | 校准动力学/噪声，补齐完整赛道、接触传感和 SIL/HIL |
 | 真机联调与工程化 | 🟡 CI/标定工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
-当前代码已经完成的是上表中“环境感知、SLAM 与自主导航、任务逻辑、ROS 软件安全”的
-第一版雏形：9 个 ROS 2 包可编译，42 项测试通过，并提供一键启动、自动越障 Action
-协调、软件安全监督、模拟 SDK、故障注入、GitHub CI、rosbag 离线评估及传感器兼容入口。
+当前代码已经完成环境感知、SLAM/Nav2、任务逻辑、ROS 软件安全，以及运动学、低速基础
+步态和 Gazebo 仿真的第一版基线：10 个 ROS 2 包可编译，53 项测试通过，并提供一键启动、
+自动越障 Action、训练场、模拟传感器/执行器、故障注入、CI 和 rosbag 离线评估。
 其余项目不能因仿真话题或 URDF 能运行就视为完成。详细清单与开发顺序见
 `quickstart.txt` 第七至九节。
 
@@ -117,6 +118,7 @@ wakula/
 ├── src/
 │   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
 │   ├── quadruped_control/      # ros2_control 控制器及关节限制
+│   ├── quadruped_simulation/   # Gazebo Harmonic 训练场、传感器桥和控制器装载
 │   ├── quadruped_bringup/      # 机器人、感知、规划和安全节点统一入口
 │   ├── quadruped_interfaces/   # 越障 Action、执行命令和状态消息
 │   ├── quadruped_hardware/     # 软件安全监督、模拟 SDK 和未来硬件适配边界
@@ -140,7 +142,8 @@ wakula/
 | 包 | 主要职责 | 关键入口 |
 |---|---|---|
 | `quadruped_description` | 机器人模型、关节、雷达/相机坐标系 | `display.launch.py` |
-| `quadruped_control` | ros2_control 控制器和关节限制 | `controllers.yaml` |
+| `quadruped_control` | 解析 FK/IK、步态、基础运动节点及 ros2_control 配置 | `basic_motion_controller` |
+| `quadruped_simulation` | Gazebo 世界、标准传感器桥、实体和控制器装载 | `simulation.launch.py` |
 | `quadruped_bringup` | 公共启动入口，避免重复节点 | `bringup.launch.py` |
 | `quadruped_interfaces` | 强类型越障 Action 及 SDK 命令/状态合同 | `TraverseObstacle.action` |
 | `quadruped_hardware` | 标准状态安全监督、模拟 SDK 和硬件替换边界 | 两个硬件无关节点 |
@@ -161,6 +164,8 @@ wakula/
 - `cmd_vel_gate`：检查命令/决策心跳、安全停车及 Action 接管，任一不满足立即输出零速。
 - `competition_obstacle_manager`：Robocon 障碍进度、计时、接触约束和计分。
 - `course_waypoint_navigator`：比赛模式下向 Nav2 发送障碍接近点。
+- `basic_motion_controller`：把最终 `/cmd_vel` 和越障命令转换为标准 12 关节轨迹；只作为
+  低速位置控制基线，真机默认要求足端接触证明。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
 
@@ -181,7 +186,8 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_evidence ─┐
 急停 + IMU + 关节 + 电池 ─> safety supervisor ─> /safety/stop ─> gate + coordinator
 
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
-     ─> collision_monitor ─> /cmd_vel ─> 厂商 SDK / 自研步态控制器
+     ─> collision_monitor ─> /cmd_vel ─> basic_motion_controller
+     ─> /leg_controller/joint_trajectory ─> Gazebo 或真机 ros2_control 插件
 ```
 
 职责边界如下：
@@ -303,7 +309,8 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
-视觉仅依赖 `python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
+仿真还依赖 `ros-jazzy-ros-gz` 与 `ros-jazzy-gz-ros2-control`。视觉仅依赖
+`python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
 默认 8 Hz、最大 640 像素宽；点云默认 10 Hz 且限制采样数量，适合 RK3588 起步调试。
 
 运行单元测试：
@@ -343,6 +350,19 @@ ros2 launch slam slam.launch.py
 这条命令会启动机器人模型、SLAM Toolbox、Nav2、OpenCV、点云地形分析、越障决策、
 速度安全链和 RViz，但不会自动启动雷达/相机厂商驱动，也不会实现真实机器狗步态。
 
+一键启动 Gazebo 无硬件全栈（SLAM + Nav2 + OpenCV/点云 + 基础控制）：
+
+```bash
+ros2 launch slam slam.launch.py simulation:=true
+# 无界面 CI/RK3588 调试：
+ros2 launch slam slam.launch.py simulation:=true simulation_headless:=true rviz:=false
+```
+
+仿真会自动启用 `/clock`、`gz_ros2_control`、基础运动节点以及标准 `/scan`、`/odom`、
+`/imu/data`、`/camera/image_raw`、`/camera/depth/points`，无需另开多个终端。训练世界包含
+8/15/30 cm 台阶、斜坡和比赛色杆。实测全栈可发布 `/map`，Nav2 生命周期自动进入
+`active`；用 Ctrl+C 停止即可。
+
 常用参数都集中在同一入口：
 
 | 参数 | 默认值 | 作用 |
@@ -358,7 +378,11 @@ ros2 launch slam slam.launch.py
 | `auto_crossing` | `true` | 是否把稳定 STEP/CLIMB 自动转换为越障 Action |
 | `safety_supervisor` | `true` | 是否启动标准状态安全监督；正常使用不要关闭 |
 | `mock_hardware` | `false` | 是否启动绝不驱动电机的模拟 SDK 后端 |
-| `use_control` | `false` | 是否启动已配置的 ros2_control；真机插件未完成前保持关闭 |
+| `simulation` | `false` | 启动 Gazebo、传感器桥和 gz_ros2_control，并强制使用仿真时间 |
+| `simulation_headless` | `false` | 仿真时不启动 Gazebo GUI |
+| `simulation_world` | 内置训练场 | 可替换 SDF 世界绝对路径 |
+| `basic_control` | 同 `simulation` | 启动低速位置式基础步态；真机须显式开启并先架空验证 |
+| `use_control` | `false` | 非仿真时启动 ros2_control；需先换成真机硬件插件 |
 | `use_sim_time` | `false` | 仿真或 rosbag 回放时使用 `/clock` |
 | `*_params_file` | 项目默认 YAML | 覆盖 SLAM、Nav2、视觉、地形、越障和安全参数文件 |
 
@@ -622,6 +646,9 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 | `quadruped_interfaces/msg/` | Action 网关与 SDK 的 UUID 命令/状态合同 |
 | `quadruped_description/urdf/` | 尺寸、惯性、关节、传感器坐标系 |
 | `quadruped_control/config/controllers.yaml` | ros2_control 控制器 |
+| `quadruped_control/config/basic_control.yaml` | 步态频率、站高、抬脚和真机接触验证 |
+| `quadruped_simulation/worlds/wakula_training.sdf` | Gazebo 训练世界与障碍 |
+| `quadruped_simulation/config/bridge.yaml` | Gazebo 到 ROS 2 的标准传感器话题桥 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
 | `quadruped_planning/config/crossing.yaml` | 越障阈值、视觉融合、速度门超时 |

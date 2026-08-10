@@ -32,8 +32,16 @@ controller_manager
   管理 ros2_control 硬件接口、joint_state_broadcaster 和 leg_controller。
 
 controller_manager spawner
-  use_control:=true 时临时加载并激活 joint_state_broadcaster 和 leg_controller；完成后
-  进程可能退出，控制器继续由 controller_manager 托管。
+  非仿真 use_control:=true 或仿真实体创建完成后加载 joint_state_broadcaster 和
+  leg_controller；完成后进程退出，控制器继续由 controller_manager 托管。
+
+basic_motion_controller
+  订阅最终 /cmd_vel、安全心跳、IMU、足端接触和越障执行命令，以解析 IK 生成 12 关节
+  JointTrajectory，并发布动作状态。simulation:=true 时默认启动；真机需 basic_control:=true。
+
+wakula_gz_bridge / ros_gz_sim create
+  仿真时分别把 Gazebo 传感器桥接到 ROS 标准话题、从 robot_description 生成机器人实体。
+  gz_ros2_control 在 Gazebo 进程内提供 /controller_manager，不另起 ros2_control_node。
 
 terrain_analyzer
   接收一个深度点云，转换到 base_link，发布地形特征和 Nav2 障碍点云。
@@ -119,6 +127,10 @@ rviz2
   auto_crossing         是否自动发送越障 Action，默认 true
   safety_supervisor     是否启动统一软件安全监督，默认 true
   mock_hardware         是否启动无电机模拟 SDK 后端，默认 false
+  simulation            是否启动 Gazebo、传感器桥和 gz_ros2_control，默认 false
+  simulation_headless   是否关闭 Gazebo GUI，默认 false
+  simulation_world      SDF 世界路径，默认 wakula_training.sdf
+  basic_control         是否启动基础关节轨迹节点，默认值跟随 simulation
   use_control           是否启动 ros2_control，默认 false
   use_sim_time          是否使用 /clock，默认 false
   nav2_log_level        Nav2 日志等级，默认 info
@@ -225,6 +237,16 @@ TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
 接收方：competition_obstacle_manager
 字段协议：data 前四项依次表示四只脚是否接触地面；0 为未接触，大于 0 为接触。
 用途：验证砂砾坑、斜坡、木桥和 T 字台阶的单足接地限制。
+
+7. 基础控制足端接触（真机预留）
+
+名称：/feet/contact
+类型：std_msgs/msg/Float32MultiArray
+发送方：足底力阈值节点、厂商 SDK 适配器或状态估计器
+接收方：basic_motion_controller
+字段协议：data[0..3] 依次为 FL、FR、RL、RR；大于 0.5 表示可靠接触。
+用途：越障动作结束时至少三足接触才允许报告成功。Gazebo 当前无足力模型，只有
+      simulation:=true 时启动文件才显式允许定时完成，真机不得沿用该覆盖。
 
 
 三、感知输出接口
@@ -689,6 +711,20 @@ course_waypoint_navigator 通信闭环：
 十、ros2_control 与关节接口
 ---------------------------
 
+basic_motion_controller 输入输出：
+
+  输入 /cmd_vel                         geometry_msgs/msg/Twist
+  输入 /safety/stop                     std_msgs/msg/Bool（Reliable + Transient Local）
+  输入 /imu/data                        sensor_msgs/msg/Imu
+  输入 /feet/contact                    std_msgs/msg/Float32MultiArray
+  输入 /crossing/execution_command      quadruped_interfaces/msg/CrossingCommand
+  输出 /leg_controller/joint_trajectory trajectory_msgs/msg/JointTrajectory
+  输出 /crossing/execution_status       quadruped_interfaces/msg/CrossingStatus
+  输出 /motion/state                    std_msgs/msg/String（HOLD/WALK/CROSSING）
+
+命令和安全心跳默认 0.5 秒超时。普通速度超时进入 HOLD；安全超时还会取消越障。控制输出
+是 position JointTrajectory，不是力矩命令，不能替代真机力/接触稳定控制。
+
 joint_state_broadcaster：
 
 名称：/joint_states
@@ -716,13 +752,29 @@ leg_controller：
 load_controller、configure_controller、switch_controller。实际名称和类型使用
 ros2 service list -t | grep controller_manager 查询。
 
-注意：当前 URDF 使用 mock_components/GenericSystem，仅用于调试。真机 SDK 适配器可以：
+非仿真 URDF 默认使用 mock_components/GenericSystem；simulation:=true 时改为
+gz_ros2_control/GazeboSimSystem。真机必须替换成厂商或自研 hardware plugin。适配器可以：
 
 方案 A：实现 ros2_control hardware plugin，让 leg_controller 直接控制硬件。
 方案 B：订阅 /cmd_vel、/crossing/mode、/crossing/action，自行调用厂商 SDK。
 方案 C：由自研 MPC/WBC 接收高层指令，再发布关节轨迹或力矩到硬件层。
 
 无论使用哪种方案，都不得绕过急停、姿态限制、关节限位和通信看门狗。
+
+Gazebo 仿真桥（只在 simulation:=true 时存在）：
+
+  /clock                       rosgraph_msgs/msg/Clock
+  /scan                        sensor_msgs/msg/LaserScan，frame=lidar_link
+  /odom                        nav_msgs/msg/Odometry，odom -> base_footprint
+  /tf                          tf2_msgs/msg/TFMessage
+  /imu/data                    sensor_msgs/msg/Imu
+  /camera/image_raw            sensor_msgs/msg/Image
+  /camera/camera_info          sensor_msgs/msg/CameraInfo
+  /camera/depth/image_raw      sensor_msgs/msg/Image
+  /camera/depth/points         sensor_msgs/msg/PointCloud2，frame=camera_link
+
+这些名称刻意与真机默认合同一致。RGB-D 仿真点云按 camera_link 的 x 前、y 左、z 上输出；
+真实光学相机仍应发布自身 camera_optical_frame，并由 TF 转到 base_link，不能只改 frame_id。
 
 
 十一、QoS、时间和命名约定
