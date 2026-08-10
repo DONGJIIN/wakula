@@ -36,6 +36,10 @@ vision_obstacle_detector
 obstacle_crossing_manager
   普通模式越障管理器，融合地形和视觉，发布模式、动作和速度倍率。
 
+crossing_action_server
+  提供 /crossing/traverse_obstacle，将 Action Goal 转换为带 UUID 的控制器命令，并汇总
+  反馈、取消、超时和结果。一键启动时始终运行。
+
 competition_obstacle_manager
   比赛模式越障管理器。它与 obstacle_crossing_manager 互斥启动，避免重复发布决策。
 
@@ -427,8 +431,57 @@ ROS 话题：
           且服务已就绪。
 
 
-七、Nav2 Action 接口
--------------------
+七、ROS 2 Action 接口
+--------------------
+
+1. 真机越障 Action
+
+名称：/crossing/traverse_obstacle
+类型：quadruped_interfaces/action/TraverseObstacle
+服务端：crossing_action_server
+客户端：任务执行器、比赛 FSM 适配器、人工调试程序
+同一时刻：只允许一个活动 Goal。
+
+Goal：
+  mode               uint8，1=STEP，2=CLIMB，3=LOW_PROFILE
+  obstacle_height    float32，米，必须非负
+  obstacle_distance  float32，米，必须非负
+  speed_scale        float32，(0, 1]
+  timeout            float32，秒，默认配置允许 0.1～60
+
+Feedback：
+  phase              0=ACCEPTED，1=PREPARING，2=EXECUTING，
+                     3=VERIFYING_CONTACT，4=RECOVERING
+  progress           0.0～1.0
+  elapsed            秒
+  contact_verified   足端/姿态闭环是否已经确认
+  message            控制器状态说明
+
+Result：success、error_code、message、duration。error_code：0=OK、1=INVALID_GOAL、
+2=CONTROLLER_TIMEOUT、3=EXECUTION_FAILED、4=CANCELED。非法 Goal 在接受前直接拒绝。
+
+2. Action 网关与真机控制器合同
+
+名称：/crossing/execution_command
+类型：quadruped_interfaces/msg/CrossingCommand
+发送方：crossing_action_server
+接收方：机器狗 SDK、落脚点规划器或 MPC/WBC/步态控制器
+字段：command（1=START、2=CANCEL）、goal_id、mode、obstacle_height、
+      obstacle_distance、speed_scale、timeout。
+
+名称：/crossing/execution_status
+类型：quadruped_interfaces/msg/CrossingStatus
+发送方：机器狗 SDK 或全身控制器
+接收方：crossing_action_server
+字段：goal_id、state（0=RUNNING、1=SUCCEEDED、2=FAILED、3=CANCELED）、phase、
+      progress、contact_verified、message。
+要求：goal_id 必须原样返回；运行期间应以高于 1/controller_status_timeout 的频率更新。
+默认超过 1.5 秒没有同 UUID 状态即取消后端命令并中止 Goal。
+
+兼容名称：/crossing/action_request，std_msgs/msg/String。它只给旧 SDK 显示 STEP/CLIMB/
+LOW_PROFILE，不携带结果，不能作为新控制器的完成判据。
+
+3. Nav2 Action
 
 项目直接使用的 Action：
 
@@ -620,13 +673,14 @@ SDK 适配器至少订阅：
 
   /cmd_vel                 geometry_msgs/msg/Twist
   /crossing/mode           std_msgs/msg/String
-  /crossing/action         std_msgs/msg/String
+  /crossing/execution_command  quadruped_interfaces/msg/CrossingCommand
 
 SDK 或状态估计器至少发布：
 
   /odom                    nav_msgs/msg/Odometry
   odom -> base_link        TF
   /joint_states            sensor_msgs/msg/JointState，若不由 ros2_control 发布
+  /crossing/execution_status quadruped_interfaces/msg/CrossingStatus
 
 比赛功能还需发布：
 
@@ -653,9 +707,10 @@ SDK 或状态估计器至少发布：
   /odom                  nav_msgs/msg/Odometry        融合后的机身里程计
   odom -> base_link      TF                            连续局部位姿
 
-站起、趴下、步态切换和 STEP/CLIMB/LOW_PROFILE 后续应使用带反馈、取消和结果的 ROS 2
-Action，而不是继续扩展 String 命令。Action 的自定义类型和最终名称必须在运动控制器实现
-前统一设计；确定前本文件不把占位名称声明为已实现接口。
+STEP/CLIMB/LOW_PROFILE 已使用带反馈、取消、结果和超时的 TraverseObstacle Action。
+厂商适配器必须实现 execution_command/status 合同；`/crossing/action` 只保留为上层建议，
+`/crossing/action_request` 只用于旧接口兼容。站起、趴下和普通步态切换若以后新增 Action，
+应沿用相同 UUID、心跳、取消和终态原则，而不是继续扩展 String 命令。
 
 
 十三、通信调试命令

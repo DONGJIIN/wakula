@@ -29,6 +29,8 @@ setup(
             "quadruped_planning.competition_obstacle_manager:main",
             "course_waypoint_navigator = "
             "quadruped_planning.course_waypoint_navigator:main",
+            "crossing_action_server = "
+            "quadruped_planning.crossing_action_server:main",
         ],
     },
 )

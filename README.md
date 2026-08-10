@@ -34,7 +34,7 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 | 运动学与动力学模型 | ⬜ 未实现 | 实测 URDF/惯量，完成正逆运动学、雅可比、动力学、重力补偿、关节/力矩限制 |
 | 状态估计 | ⬜ 只有 `/odom` 接口 | 融合编码器、IMU、足端接触和视觉/雷达，输出可靠姿态、速度、落足状态及 `odom -> base_link` |
 | 站立与基础步态 | ⬜ 未实现 | 上电标定、站起/趴下、姿态稳定、原地踏步、行走/转向、步态切换和跌倒恢复 |
-| 全身与越障控制 | ⬜ 仅发布动作请求 | 实现 IK、落脚点规划、MPC/WBC、摆动腿轨迹、接触力控制，以及 STEP/CLIMB/LOW_PROFILE 真动作 |
+| 全身与越障控制 | 🟡 Action 执行合同已完成 | 实现 IK、落脚点规划、MPC/WBC、摆动腿轨迹和接触力控制，并让真机控制器反馈 Action 状态 |
 | 环境感知 | 🟡 软件雏形完成 | 真机标定雷达/相机，完成 RGB-深度同步、障碍跟踪、高程图、坡面和可落脚区域识别 |
 | SLAM 与自主导航 | 🟡 软件雏形完成 | 使用真实 `/scan`、`/odom` 和 TF 调参，验证重定位、动态避障、狭窄通道及失效恢复 |
 | 任务与比赛逻辑 | 🟡 状态机雏形完成 | 测量正式场地坐标，联动真实越障反馈，完善失败重试、计时、计分和任务恢复 |
@@ -43,7 +43,8 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 | 真机联调与工程化 | ⬜ 未完成 | 架空→保护绳→低速→单障碍→整场测试，完成标定工具、日志、rosbag、CI、版本和维护流程 |
 
 当前代码已经完成的是上表中“环境感知、SLAM 与自主导航、任务逻辑、ROS 软件安全”的
-第一版雏形：6 个 ROS 2 包可编译，23 项测试通过，并提供一键启动及常见传感器兼容入口。
+第一版雏形：8 个 ROS 2 包可编译，28 项测试通过，并提供一键启动、越障 Action、
+rosbag 离线评估及常见传感器兼容入口。
 其余项目不能因仿真话题或 URDF 能运行就视为完成。详细清单与开发顺序见
 `quickstart.txt` 第七至九节。
 
@@ -88,7 +89,7 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 6. **阶段 5：真实越障和全身控制**
    - 工作：建立局部高程图，识别台阶、坡面、坑洞、边缘和可落脚区域，并完成 RGB—深度同步与障碍跟踪。
    - 工作：实现落脚点规划、摆动腿轨迹、MPC/WBC 或等价控制、接触力分配和滑移/碰撞检测。
-   - 工作：将 `STEP/CLIMB/LOW_PROFILE` 从字符串请求升级为可反馈、可取消、可超时的 ROS 2 Action。
+   - 工作：把现有 `TraverseObstacle` Action 接到真机全身控制器，完成落脚、接触和姿态闭环。
    - 交付物：高程/落脚模块、越障 Action、动作参数库、失败恢复策略和逐类障碍测试数据。
    - 验收：每类障碍完成重复低速试验；动作失败可取消并安全站立；越障期间普通 `/cmd_vel` 不会与动作控制争用。
 
@@ -107,7 +108,7 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 4. 建立单关节台架和硬件急停，先验证低层闭环及保护，再连接全部关节。
 5. 完成实机 URDF、关节零位和 IMU 标定，依次实现站立、低速行走与可靠 `/odom`。
 6. 接入本仓库的标准传感器和速度接口，录制 rosbag，完成 SLAM/Nav2/感知真机调参。
-7. 最后开发真实越障 Action、落脚点规划和 MPC/WBC，并逐个障碍低速验收。
+7. 最后把现有越障 Action 接到落脚点规划和 MPC/WBC，并逐个障碍低速验收。
 
 ## 1. 目录结构
 
@@ -117,8 +118,10 @@ wakula/
 │   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
 │   ├── quadruped_control/      # ros2_control 控制器及关节限制
 │   ├── quadruped_bringup/      # 机器人、感知、规划和安全节点统一入口
+│   ├── quadruped_interfaces/   # 越障 Action、执行命令和状态消息
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
 │   ├── quadruped_planning/     # 越障决策、速度门、比赛状态机
+│   ├── quadruped_tools/        # rosbag 离线标注、标定与准确率报告
 │   └── slam/                   # SLAM Toolbox、Nav2 参数与自主启动
 ├── scripts/
 │   ├── bootstrap.sh            # rosdep 安装依赖
@@ -137,8 +140,10 @@ wakula/
 | `quadruped_description` | 机器人模型、关节、雷达/相机坐标系 | `display.launch.py` |
 | `quadruped_control` | ros2_control 控制器和关节限制 | `controllers.yaml` |
 | `quadruped_bringup` | 公共启动入口，避免重复节点 | `bringup.launch.py` |
+| `quadruped_interfaces` | 强类型越障 Action 及 SDK 命令/状态合同 | `TraverseObstacle.action` |
 | `quadruped_perception` | 图像障碍证据、点云地形几何、Nav2 障碍点云 | 两个分析节点 |
-| `quadruped_planning` | `WALK/STEP/CLIMB/STOP`、速度安全门、比赛 FSM | 四个规划节点 |
+| `quadruped_planning` | `WALK/STEP/CLIMB/STOP`、Action 网关、速度门、比赛 FSM | 五个规划节点 |
+| `quadruped_tools` | rosbag 标注模板、阈值搜索和分类指标 | `perception_bag_evaluator` |
 | `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
 
 主要节点：
@@ -146,6 +151,7 @@ wakula/
 - `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并做多帧确认。
 - `terrain_analyzer`：将深度点云转换到 `base_link`，分析高度、坡度和粗糙度。
 - `obstacle_crossing_manager`：融合视觉证据和点云几何，生成越障模式与速度倍率。
+- `crossing_action_server`：管理越障目标、取消、反馈、结果和真机控制器超时。
 - `cmd_vel_gate`：检查导航命令及决策心跳并缩放速度，任何一项超时立即输出零速。
 - `competition_obstacle_manager`：Robocon 障碍进度、计时、接触约束和计分。
 - `course_waypoint_navigator`：比赛模式下向 Nav2 发送障碍接近点。
@@ -161,6 +167,9 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_evidence ─┐
                                                   ├─> crossing manager
 深度点云 ──> TF(base_link) ──> /terrain/features ─┘       │
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
+
+安全决策 ─> TraverseObstacle Action ─> execution_command ─> SDK/全身控制器
+                                  <─ execution_status <──┘
 
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> cmd_vel_gate
      ─> collision_monitor ─> /cmd_vel ─> 厂商 SDK / 自研步态控制器
@@ -442,7 +451,29 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 可临时开启 `publish_debug_mask`，在 `/vision/debug_mask` 检查分割与边缘效果；标定完成后
 关闭，以减少图像复制。
 
-## 8. 点云地形与 Nav2 融合
+## 8. 越障 ROS 2 Action
+
+一键启动会创建 `/crossing/traverse_obstacle`，类型为
+`quadruped_interfaces/action/TraverseObstacle`。它不假装实现腿部控制，而是作为可靠网关
+把一个 Action Goal 转换成带 UUID 的 `/crossing/execution_command`，等待厂商 SDK、MPC/WBC
+或步态控制器从 `/crossing/execution_status` 返回进度和最终状态。
+
+Goal 包含 `mode`（1=STEP、2=CLIMB、3=LOW_PROFILE）、障碍高度、障碍距离、速度倍率和超时；
+Feedback 包含阶段、0～1 进度、耗时、接触确认和文字；Result 包含成功标志、错误码、说明
+及总时长。服务端拒绝非法/并发目标，并在取消、目标超时或控制器状态超时时向后端发送
+`CANCEL`。旧 `/crossing/action` 仍是决策建议；兼容请求发布在 `/crossing/action_request`，
+不能代替强类型状态和 Action 结果。
+
+手动测试 Goal（未接控制器时会按安全设计超时失败）：
+
+```bash
+ros2 action send_goal /crossing/traverse_obstacle \
+  quadruped_interfaces/action/TraverseObstacle \
+  "{mode: 1, obstacle_height: 0.12, obstacle_distance: 0.50, speed_scale: 0.35, timeout: 10.0}" \
+  --feedback
+```
+
+## 9. 点云地形与 Nav2 融合
 
 `terrain_analyzer` 只保留最新一帧，将点云按消息时间戳转换到 `base_link`，裁剪机器人
 正前方 ROI 并发布：
@@ -468,7 +499,26 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 `PointCloud2` 障碍源进行 marking，2D 雷达继续负责 marking + clearing。点云层不主动
 clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗口会移除离开视野的旧区域。
 
-## 9. 速度与失效安全
+### rosbag 离线标定与准确率报告
+
+工具直接读取 `/vision/obstacle_evidence` 和 `/terrain/features`，不需要启动实时节点。先生成
+稀疏标注模板，人工填写 `vision_label`（`none/poles/height_bar/wall/colored_obstacle`）和
+`terrain_label`（`WALK/STEP/CLIMB/STOP`），再评估：
+
+```bash
+ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
+  --write-label-template labels.csv --sample-period 0.5
+
+ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
+  --labels labels.csv --report perception_report.json \
+  --suggestions calibration_suggestions.yaml
+```
+
+报告包含混淆矩阵、accuracy、macro-F1、每类 precision/recall/F1、匹配数量和时间对齐误差；
+工具网格搜索 `vision_min_confidence` 与 `step/climb/stop_threshold`，将建议值写入独立 YAML，
+不会自动覆盖正式配置。HSV、ROI、相机内外参仍需结合 debug mask/标定板人工标定。
+
+## 10. 速度与失效安全
 
 速度链路固定为：
 
@@ -484,7 +534,7 @@ clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗
 规划命令或越障决策任意一项超时，速度门都发布零速度。机器狗 SDK 还应实现独立的通信
 看门狗、急停和姿态保护，不能仅依赖 ROS 进程。
 
-## 10. Robocon 障碍赛模式
+## 11. Robocon 障碍赛模式
 
 当前比赛状态机按提供的 V1.0 规则建立了 210 秒计时、障碍完成/重试、足端接触限制、
 T 字台阶双向计分和返回启动区奖励。事件接口：
@@ -503,10 +553,12 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 `course_waypoints.yaml` 仍是调试坐标。获得正式场地测量结果后只修改 YAML，不要将点位
 硬编码到节点。规则状态机管理流程，不代替实际足端接触检测和越障动作控制器。
 
-## 11. 配置文件索引
+## 12. 配置文件索引
 
 | 配置 | 内容 |
 |---|---|
+| `quadruped_interfaces/action/TraverseObstacle.action` | 越障 Goal、Feedback、Result 合同 |
+| `quadruped_interfaces/msg/` | Action 网关与 SDK 的 UUID 命令/状态合同 |
 | `quadruped_description/urdf/` | 尺寸、惯性、关节、传感器坐标系 |
 | `quadruped_control/config/controllers.yaml` | ros2_control 控制器 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
@@ -514,6 +566,7 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 | `quadruped_planning/config/crossing.yaml` | 越障阈值、视觉融合、速度门超时 |
 | `quadruped_planning/config/competition.yaml` | 比赛时间、计分和约束 |
 | `quadruped_planning/config/course_waypoints.yaml` | 障碍接近点 |
+| `quadruped_tools/perception_bag_evaluator.py` | rosbag 标签、指标和参数搜索 |
 | `slam/config/slam.yaml` | SLAM Toolbox |
 | `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
 | `slam/config/sensor_profiles.yaml` | 常见雷达/相机话题 profile，可直接扩展 |
@@ -523,7 +576,7 @@ T 字台阶双向计分和返回启动区奖励。事件接口：
 `slam/launch/sensor_compat.launch.py` 仅作为旧命令兼容别名，新的启动命令统一使用
 `slam.launch.py`；已删除重复的 `all_in_one.launch.py`。
 
-## 12. 实机接入清单
+## 13. 实机接入清单
 
 1. 用实测值替换 URDF 尺寸、质量和惯性。
 2. 将 mock ros2_control 替换为厂商硬件接口或自研控制器。

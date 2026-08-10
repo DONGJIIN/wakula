@@ -6,6 +6,7 @@ from std_msgs.msg import Bool, String
 
 from quadruped_planning.cmd_vel_gate import gated_twist
 from quadruped_planning.competition_obstacle_manager import CompetitionObstacleManager
+from quadruped_planning.crossing_action_server import validate_goal_values
 from quadruped_planning.obstacle_crossing_manager import (
     apply_visual_assist,
     select_terrain_decision,
@@ -86,6 +87,18 @@ def test_velocity_gate_requires_both_fresh_inputs():
     assert gated_twist(command, 1.0, False, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, False).linear.x == 0.0
     assert gated_twist(command, 0.0, True, True).linear.x == 0.0
+
+
+def test_crossing_action_goal_validation():
+    """The Action boundary rejects unsafe modes, values and timeouts."""
+    assert validate_goal_values(1, 0.12, 0.50, 0.4, 10.0, 60.0)[0]
+    assert not validate_goal_values(99, 0.12, 0.50, 0.4, 10.0, 60.0)[0]
+    assert not validate_goal_values(1, -0.1, 0.50, 0.4, 10.0, 60.0)[0]
+    assert not validate_goal_values(1, 0.1, 0.50, 0.0, 10.0, 60.0)[0]
+    assert not validate_goal_values(1, 0.1, 0.50, 0.4, 90.0, 60.0)[0]
+    assert not validate_goal_values(
+        1, float("nan"), 0.50, 0.4, 10.0, 60.0
+    )[0]
 
 
 def test_competition_tracks_out_of_order_active_obstacle():

@@ -68,20 +68,30 @@ quickstart.txt 第八、九节。
   bringup.launch.py 是机器人模型、控制、感知、越障管理器和速度门的公共启动入口。
   其他启动文件通过包含它来复用配置，避免重复启动同一个节点。
 
-4. src/quadruped_perception
+4. src/quadruped_interfaces
+
+  定义 TraverseObstacle.action、CrossingCommand.msg 和 CrossingStatus.msg，作为上层规划、
+  Action 网关与真机 SDK/全身控制器之间的强类型合同。
+
+5. src/quadruped_perception
 
   vision_obstacle_detector.py：OpenCV 图像识别。
   terrain_analyzer.py：PointCloud2 地形分析与 Nav2 点云输出。
   topic_selection.py：从多个常见相机话题中锁定一个有效数据源并支持超时切换。
 
-5. src/quadruped_planning
+6. src/quadruped_planning
 
   obstacle_crossing_manager.py：视觉和地形融合决策。
+  crossing_action_server.py：越障 Action 生命周期与控制器超时网关。
   cmd_vel_gate.py：速度缩放和双心跳失效保护。
   competition_obstacle_manager.py：Robocon 比赛状态、计时、计分和接触约束。
   course_waypoint_navigator.py：将比赛障碍接近点发送给 Nav2。
 
-6. src/slam
+7. src/quadruped_tools
+
+  perception_bag_evaluator.py：读取 rosbag 结果、生成标注模板、搜索阈值并输出准确率报告。
+
+8. src/slam
 
   slam.yaml：SLAM Toolbox 参数。
   nav2.yaml：Nav2 规划器、控制器、代价地图、速度平滑和碰撞监控参数。
@@ -230,7 +240,41 @@ VERIFY_VISUAL_OBSTACLE_WITH_DEPTH，速度降到 vision_speed_scale。若点云�
 STEP、CLIMB 或 STOP，视觉不能降低点云给出的安全等级。
 
 
-七、SLAM 与 Nav2 原理
+七、越障 Action 与 rosbag 离线评估
+----------------------------------
+
+越障执行接口为 /crossing/traverse_obstacle，类型
+quadruped_interfaces/action/TraverseObstacle。Goal 携带 mode、障碍高度/距离、速度倍率和
+超时；Feedback 携带阶段、进度、耗时、接触确认；Result 携带成功、错误码、说明和时长。
+
+crossing_action_server 每次只接受一个合法 Goal，将其转换为带 UUID 的
+/crossing/execution_command。真机 SDK、落脚点规划器或 MPC/WBC 订阅命令，并持续把相同
+UUID 的 /crossing/execution_status 返回。取消、Goal 超时或状态心跳超时都会发送 CANCEL。
+这层已经完成；真正关节轨迹、接触力和全身控制仍必须由后端实现。
+
+离线工具 perception_bag_evaluator 的流程：
+
+1. 从 rosbag 读取 /vision/obstacle_evidence 和 /terrain/features。
+2. 按固定采样周期生成 labels.csv，人工填写视觉和地形真值。
+3. 按时间戳在容差内匹配记录，分别计算混淆矩阵、accuracy、macro-F1、precision 和 recall。
+4. 网格搜索 vision_min_confidence 与 step/climb/stop_threshold。
+5. 输出 JSON 报告和独立 YAML 建议，不直接修改正式参数。
+
+命令：
+
+  ros2 run quadruped_tools perception_bag_evaluator BAG \
+    --write-label-template labels.csv
+
+  ros2 run quadruped_tools perception_bag_evaluator BAG \
+    --labels labels.csv --report perception_report.json \
+    --suggestions calibration_suggestions.yaml
+
+视觉标签只能使用 none、poles、height_bar、wall、colored_obstacle；地形标签只能使用
+WALK、STEP、CLIMB、STOP。工具优化的是融合置信度和地形高度阈值，HSV/ROI、相机内参、
+外参以及点云 ROI 仍需结合原始图像、debug mask、标定板和 RViz 人工检查。
+
+
+八、SLAM 与 Nav2 原理
 ---------------------
 
 SLAM Toolbox 使用激光扫描和里程计不断估计机器人位姿，同时更新二维占据栅格地图。
@@ -300,7 +344,7 @@ Nav2 就绪保护：
 强行关闭造成底层进程崩溃。
 
 
-八、速度安全原理
+九、速度安全原理
 ----------------
 
 cmd_vel_gate 接收：
@@ -319,7 +363,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 时间内是否会碰撞，最终发布 /cmd_vel。真机驱动仍必须有独立的通信看门狗和急停。
 
 
-九、常用启动命令
+十、常用启动命令
 ----------------
 
 先确认当前终端能找到工作空间：
@@ -387,7 +431,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
   ros2 launch slam slam.launch.py competition:=true
 
 
-十、现场调试顺序
+十一、现场调试顺序
 ----------------
 
 1. 用 ros2 topic hz /scan 检查雷达频率。
@@ -398,11 +442,12 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 6. 开启视觉 debug_mask，使用现场光照标定 HSV 和 Canny 参数。
 7. 用 ros2 topic echo /terrain/features 检查地面、高度和坡度。
 8. 在 Nav2 local_costmap 中确认激光与 obstacle_points 标障位置一致。
-9. 抬起机器狗或断开电机，只验证 /crossing/action 和 /cmd_vel。
+9. 抬起机器狗或断开电机，只验证 TraverseObstacle Action、execution_command/status 和
+   /cmd_vel；确认取消、失败与超时都能停止后端。
 10. 最后在低速、保护绳和急停可用的情况下做单障碍实机测试。
 
 
-十一、重要配置文件
+十二、重要配置文件
 ------------------
 
   src/quadruped_perception/config/vision.yaml
@@ -424,7 +469,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
     比赛障碍接近点，目前需用正式场地测量值替换。
 
 
-十二、当前边界
+十三、当前边界
 --------------
 
 本仓库当前只覆盖四足整机中的上层 ROS 2 软件，不包含机械、电气、执行器、嵌入式电机
@@ -439,7 +484,7 @@ Collision Monitor 接收 /cmd_vel_terrain_safe 和 /scan，预测 time_before_co
 6. 任何实机测试都应保留硬件急停、姿态保护和驱动侧超时保护。
 
 
-十三、配套文档和维护规则
+十四、配套文档和维护规则
 ------------------------
 
 根目录 README.md 顶部提供四份文档导航、当前状态和优先待办，并说明安装、启动和总体架构；

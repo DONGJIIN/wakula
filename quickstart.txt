@@ -72,7 +72,7 @@ Wakula 后续开发快速上手指南
 
   ./scripts/bootstrap.sh
 
-5. 编译全部 6 个 ROS 包：
+5. 编译全部 8 个 ROS 包：
 
   ./scripts/build.sh
 
@@ -89,7 +89,7 @@ Wakula 后续开发快速上手指南
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-当前基准为 23 项测试、0 error、0 failure。
+当前基准为 28 项测试、0 error、0 failure。
 
 8. 查看机器人模型：
 
@@ -180,6 +180,7 @@ ROS 2 Jazzy；支持 amd64 与 arm64。不要复制 build、install、log，应�
     ros-jazzy-joint-state-publisher-gui \
     ros-jazzy-robot-state-publisher ros-jazzy-xacro \
     ros-jazzy-cv-bridge ros-jazzy-sensor-msgs-py \
+    ros-jazzy-rosbag2-py ros-jazzy-rosidl-default-generators \
     ros-jazzy-tf2-sensor-msgs ros-jazzy-tf2-tools \
     ros-jazzy-rqt-image-view
 
@@ -245,7 +246,7 @@ URDF/Xacro 编辑。VS Code 不是机器人运行时依赖。
   colcon test --event-handlers console_direct+
   colcon test-result --verbose
 
-bootstrap.sh 会读取 6 个 package.xml，并用 rosdep 补齐遗漏依赖，因此 package.xml 是
+bootstrap.sh 会读取 8 个 package.xml，并用 rosdep 补齐遗漏依赖，因此 package.xml 是
 最终依赖清单，上面的 apt 列表是可直接安装的完整基线。检查：
 
   ros2 pkg prefix quadruped_description
@@ -384,6 +385,12 @@ src/quadruped_bringup
   launch/bringup.launch.py
     机器人模型、控制、感知、越障决策和速度门的唯一公共入口。
 
+src/quadruped_interfaces
+  action/TraverseObstacle.action
+    STEP、CLIMB、LOW_PROFILE 的 Goal、Feedback 和 Result。
+  msg/CrossingCommand.msg、CrossingStatus.msg
+    Action 网关与厂商 SDK/全身控制器的 UUID 命令和状态合同。
+
 src/quadruped_perception
   vision_obstacle_detector.py
     OpenCV HSV、Canny、轮廓和多帧投票。
@@ -397,12 +404,18 @@ src/quadruped_perception
 src/quadruped_planning
   obstacle_crossing_manager.py
     普通越障视觉—点云融合决策。
+  crossing_action_server.py
+    单目标越障 Action、取消、进度、结果和控制器状态超时。
   cmd_vel_gate.py
     导航速度和决策倍率双心跳保护。
   competition_obstacle_manager.py
     Robocon 计时、障碍、接触规则和计分状态机。
   course_waypoint_navigator.py
     比赛障碍接近点与 Nav2 Action 桥接。
+
+src/quadruped_tools
+  perception_bag_evaluator.py
+    rosbag 标注模板、时间匹配、混淆矩阵、指标和参数网格搜索。
 
 src/slam
   config/slam.yaml
@@ -485,6 +498,23 @@ scripts
 只检查感知和上层安全链，不启动 SLAM/Nav2：
 
   ros2 launch slam slam.launch.py slam_enabled:=false nav2_enabled:=false
+
+发送一个越障 Action（没有真机执行状态时会安全超时）：
+
+  ros2 action send_goal /crossing/traverse_obstacle \
+    quadruped_interfaces/action/TraverseObstacle \
+    "{mode: 1, obstacle_height: 0.12, obstacle_distance: 0.5, speed_scale: 0.35, timeout: 10.0}" \
+    --feedback
+
+录制并离线评估 OpenCV/点云结果：
+
+  ros2 bag record /vision/obstacle_evidence /terrain/features
+  ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
+    --write-label-template labels.csv
+  # 人工填写 labels.csv 后：
+  ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
+    --labels labels.csv --report perception_report.json \
+    --suggestions calibration_suggestions.yaml
 
 Robocon 比赛模式：
 
@@ -575,6 +605,15 @@ OpenCV：
 4. 导航命令和越障决策双心跳速度保护。
 5. Python 节点重复 SIGINT 清理保护。
 6. 合成 RGB + PointCloud2 端到端融合验证。
+7. TraverseObstacle Action 的参数校验、UUID 命令、反馈、取消、结果及双重超时。
+8. 真机控制器使用 execution_command/status 强类型合同，旧字符串仅作兼容提示。
+
+离线标定和评估：
+
+1. 从 rosbag 直接读取视觉证据和点云地形特征，无需启动实时节点。
+2. 生成稀疏 CSV 真值模板并按时间容差匹配。
+3. 输出 accuracy、macro-F1、每类 precision/recall/F1 和混淆矩阵。
+4. 搜索视觉置信度及 STEP/CLIMB/STOP 高度阈值，建议 YAML 不覆盖正式配置。
 
 比赛框架：
 
@@ -585,10 +624,10 @@ OpenCV：
 
 工程状态：
 
-  6 个 ROS 2 包可编译。
+  8 个 ROS 2 包可编译。
   slam.launch.py 保持 ROS 2 内部默认名称，并集中处理 profile 和显式覆盖。
   常见 2D/3D 雷达及 RGB-D 相机 profile 可通过 YAML 扩展。
-  当前 23 项测试全部通过。
+  当前 28 项测试全部通过。
   README、算法原理、通信合同和快速上手文档齐全。
   以上只代表上层 ROS 2 感知、导航、决策雏形，不代表四足整机研发完成。
 
@@ -660,7 +699,7 @@ OpenCV：
 阶段 4：全身控制和真实越障
 
 1. 实现落脚点规划、摆动腿轨迹、MPC/WBC 或等价全身控制与接触力分配。
-2. 将 STEP、CLIMB、LOW_PROFILE 升级为可反馈、可取消的 ROS 2 Action。
+2. 将现有 STEP、CLIMB、LOW_PROFILE Action 接到真实落脚/MPC/WBC 控制器。
 3. 利用足端接触和机身姿态闭环执行动作，并定义高度、坡度、速度安全包络。
 4. 越障期间接管普通 /cmd_vel，成功、失败或超时后安全交还 Nav2。
 
@@ -822,7 +861,7 @@ profile 启动后仍没有相机数据：
 十三、新开发者接手完成标准
 --------------------------
 
-1. 能独立编译 6 个包并运行全部测试。
+1. 能独立编译 8 个包并运行全部测试。
 2. 能解释 map、odom、base_link 和传感器 frame 的关系。
 3. 能说明 /scan、/odom、RGB 和 PointCloud2 被哪些节点使用。
 4. 能解释 OpenCV 为什么不能单独触发 CLIMB。
@@ -832,3 +871,5 @@ profile 启动后仍没有相机数据：
 8. 能根据 connect.txt 编写机器狗 SDK 适配器。
 9. 修改接口后能同步更新四份根目录文档。
 10. 验证完成后能够安全地直接推送 main。
+11. 能生成 rosbag 标注模板、运行离线评估并解释混淆矩阵和建议阈值。
+12. 能解释 TraverseObstacle Action 与 execution_command/status 后端合同。

@@ -154,6 +154,12 @@ def generate_launch_description():
             ),
             Node(
                 package="quadruped_planning",
+                executable="crossing_action_server",
+                output="screen",
+                parameters=[crossing_params_file, common_time],
+            ),
+            Node(
+                package="quadruped_planning",
                 executable="competition_obstacle_manager",
                 output="screen",
                 parameters=[competition_file, common_time],
