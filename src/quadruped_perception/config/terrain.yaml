@@ -23,5 +23,9 @@ terrain_analyzer:
     ground_height_bin: 0.03
     pit_depth_threshold: 0.08
     wall_height_threshold: 0.25
+    # Competition bar bottom is about 0.30 m; keep margin for depth/TF error.
+    bar_min_clearance: 0.18
     # Reject isolated depth speckles: hazards must form an 8-connected XY region.
     min_connected_region_cells: 3
+    # A connected patch also needs enough raw returns; rejects clustered flying pixels.
+    min_connected_region_points: 12

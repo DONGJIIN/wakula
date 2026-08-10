@@ -16,12 +16,54 @@ from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformListener
 
 
-def scan_is_valid(ranges, minimum_valid_ratio: float) -> bool:
-    """检查雷达有效回波比例；Inf 代表无障碍，在 LaserScan 中仍是合法观测。"""
+def scan_is_valid(
+    ranges,
+    minimum_valid_ratio: float,
+    range_min: float = 0.0,
+    range_max: float = math.inf,
+) -> bool:
+    """检查雷达有效回波比例、量程和非法浮点值。
+
+    正 ``Inf`` 表示量程内无障碍，是 LaserScan 的合法观测；NaN、负无穷以及小于厂家
+    ``range_min`` 的零/近零回波不能算作有效数据。
+    """
     if not ranges:
         return False
-    valid = sum(1 for value in ranges if not math.isnan(float(value)) and value >= 0.0)
+    lower = max(0.0, float(range_min)) if math.isfinite(range_min) else 0.0
+    upper = float(range_max)
+    if not math.isfinite(upper) or upper <= lower:
+        upper = math.inf
+    valid = sum(
+        1
+        for value in ranges
+        if (
+            math.isinf(float(value))
+            and float(value) > 0.0
+            or math.isfinite(float(value))
+            and lower <= float(value) <= upper
+        )
+    )
     return valid / len(ranges) >= minimum_valid_ratio
+
+
+def source_stamp_is_current(
+    seconds: int,
+    nanoseconds: int,
+    now_seconds: float,
+    maximum_age: float,
+    future_tolerance: float = 0.10,
+) -> bool:
+    """验证传感器采样时刻，而非只相信 DDS 回调刚刚到达。"""
+    stamp = float(seconds) + float(nanoseconds) * 1e-9
+    values = (stamp, now_seconds, maximum_age, future_tolerance)
+    if not all(math.isfinite(float(value)) for value in values):
+        return False
+    age = float(now_seconds) - stamp
+    return (
+        stamp > 0.0
+        and maximum_age > 0.0
+        and -max(0.0, future_tolerance) <= age <= maximum_age
+    )
 
 
 def odometry_is_valid(msg: Odometry, max_xy_covariance: float) -> bool:
@@ -38,8 +80,15 @@ def odometry_is_valid(msg: Odometry, max_xy_covariance: float) -> bool:
         msg.twist.twist.angular.z,
     )
     covariance = (msg.pose.covariance[0], msg.pose.covariance[7])
-    return all(math.isfinite(float(value)) for value in values + covariance) and all(
-        0.0 <= float(value) <= max_xy_covariance for value in covariance
+    quaternion_norm = math.sqrt(
+        sum(float(value) ** 2 for value in values[2:6])
+    )
+    return (
+        all(math.isfinite(float(value)) for value in values + covariance)
+        and 0.90 <= quaternion_norm <= 1.10
+        and all(
+            0.0 <= float(value) <= max_xy_covariance for value in covariance
+        )
     )
 
 
@@ -70,6 +119,7 @@ class NavigationHealthMonitor(Node):
         self.declare_parameter("minimum_scan_valid_ratio", 0.60)
         self.declare_parameter("max_xy_covariance", 1.0)
         self.declare_parameter("max_odom_jump", 0.75)
+        self.declare_parameter("future_stamp_tolerance", 0.10)
         self.global_frame = str(self.get_parameter("global_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.timeout = max(0.1, float(self.get_parameter("sensor_timeout").value))
@@ -80,6 +130,9 @@ class NavigationHealthMonitor(Node):
             0.0, float(self.get_parameter("max_xy_covariance").value)
         )
         self.max_odom_jump = max(0.01, float(self.get_parameter("max_odom_jump").value))
+        self.future_stamp_tolerance = max(
+            0.0, float(self.get_parameter("future_stamp_tolerance").value)
+        )
         self.last_scan_time = None
         self.last_odom_time = None
         self.scan_valid = False
@@ -101,18 +154,41 @@ class NavigationHealthMonitor(Node):
 
     def scan_callback(self, msg: LaserScan) -> None:
         """缓存激光有效率判定和接收时间。"""
-        self.scan_valid = scan_is_valid(msg.ranges, self.minimum_scan_valid_ratio)
-        self.last_scan_time = self.get_clock().now()
+        now = self.get_clock().now()
+        stamp_valid = source_stamp_is_current(
+            msg.header.stamp.sec,
+            msg.header.stamp.nanosec,
+            now.nanoseconds * 1e-9,
+            self.timeout,
+            self.future_stamp_tolerance,
+        )
+        self.scan_valid = stamp_valid and scan_is_valid(
+            msg.ranges,
+            self.minimum_scan_valid_ratio,
+            msg.range_min,
+            msg.range_max,
+        )
+        self.last_scan_time = now
 
     def odom_callback(self, msg: Odometry) -> None:
         """缓存里程计有限性、协方差、跳变判定和接收时间。"""
+        now = self.get_clock().now()
         xy = (float(msg.pose.pose.position.x), float(msg.pose.pose.position.y))
         self.odom_jump = self.previous_xy is not None and math.hypot(
             xy[0] - self.previous_xy[0], xy[1] - self.previous_xy[1]
         ) > self.max_odom_jump
         self.previous_xy = xy
-        self.odom_valid = odometry_is_valid(msg, self.max_xy_covariance)
-        self.last_odom_time = self.get_clock().now()
+        stamp_valid = source_stamp_is_current(
+            msg.header.stamp.sec,
+            msg.header.stamp.nanosec,
+            now.nanoseconds * 1e-9,
+            self.timeout,
+            self.future_stamp_tolerance,
+        )
+        self.odom_valid = stamp_valid and odometry_is_valid(
+            msg, self.max_xy_covariance
+        )
+        self.last_odom_time = now
 
     def _fresh(self, stamp) -> bool:
         """判断输入是否未超过配置的健康超时。"""

@@ -1,7 +1,7 @@
 """Nav2 与底盘之间的失效安全速度门。
 
-只有 Nav2 速度命令和地形安全评估两条独立心跳都新鲜时才允许非零输出。节点不规划
-路线、不创建新的运动意图，只约束 Nav2 已经计算出的 Twist。它也不替代
+只有 Nav2 速度命令、地形安全评估和导航健康三条独立心跳都有效且新鲜时才允许非零
+输出。节点不规划路线、不创建新的运动意图，只约束 Nav2 已经计算出的 Twist。它也不替代
 硬件急停、驱动器看门狗或姿态保护，它只是防止 ROS 节点失联后沿用最后一条速度。
 """
 
@@ -11,7 +11,7 @@ import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from std_msgs.msg import Bool, Float32
 
 
 def gated_twist(
@@ -19,13 +19,17 @@ def gated_twist(
     limit: float,
     command_fresh: bool,
     decision_fresh: bool,
+    navigation_healthy: bool = True,
+    health_fresh: bool = True,
 ) -> Twist:
-    """仅在 Nav2 与评估心跳均有效时按 0～1 上限缩放 Twist。"""
+    """仅在命令、地形评估和导航健康状态均有效时缩放 Twist。"""
     output = Twist()
-    # 两条独立心跳任一失效都输出默认构造的零 Twist。
+    # 三条独立安全条件任一失效都输出默认构造的零 Twist。
     if (
         not command_fresh
         or not decision_fresh
+        or not navigation_healthy
+        or not health_fresh
         or not isfinite(limit)
         or limit <= 0.0
     ):
@@ -49,6 +53,8 @@ class NavigationSpeedGate(Node):
         self.declare_parameter("output_topic", "/cmd_vel_terrain_safe")
         self.declare_parameter("command_timeout", 0.5)
         self.declare_parameter("assessment_timeout", 0.7)
+        self.declare_parameter("navigation_health_timeout", 0.5)
+        self.declare_parameter("require_navigation_health", True)
         self.declare_parameter("default_speed_limit", 0.0)
 
         input_topic = self.get_parameter("input_topic").value
@@ -70,6 +76,18 @@ class NavigationSpeedGate(Node):
             and configured_assessment_timeout > 0.0
             else 0.7
         )
+        configured_health_timeout = float(
+            self.get_parameter("navigation_health_timeout").value
+        )
+        self.health_timeout = (
+            configured_health_timeout
+            if isfinite(configured_health_timeout)
+            and configured_health_timeout > 0.0
+            else 0.5
+        )
+        self.require_navigation_health = bool(
+            self.get_parameter("require_navigation_health").value
+        )
         configured_limit = float(self.get_parameter("default_speed_limit").value)
         self.speed_limit = (
             max(0.0, min(1.0, configured_limit))
@@ -79,11 +97,16 @@ class NavigationSpeedGate(Node):
         self.latest_cmd = Twist()
         self.last_cmd_time = self.get_clock().now()
         self.last_assessment_time = self.get_clock().now()
+        self.navigation_healthy = not self.require_navigation_health
+        self.last_health_time = None
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
         self.create_subscription(
             Float32, "/terrain/speed_limit", self.limit_callback, 10
+        )
+        self.create_subscription(
+            Bool, "/navigation/healthy", self.health_callback, 10
         )
         self.timer = self.create_timer(0.05, self.publish_safe_command)
         self.get_logger().info(f"Velocity gate: {input_topic} -> {output_topic}")
@@ -99,17 +122,30 @@ class NavigationSpeedGate(Node):
         self.speed_limit = max(0.0, min(1.0, value)) if isfinite(value) else 0.0
         self.last_assessment_time = self.get_clock().now()
 
+    def health_callback(self, msg: Bool) -> None:
+        """缓存导航健康心跳；false 或断流都会关闭非零速度输出。"""
+        self.navigation_healthy = bool(msg.data)
+        self.last_health_time = self.get_clock().now()
+
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
         command_age = (now - self.last_cmd_time).nanoseconds / 1e9
         assessment_age = (now - self.last_assessment_time).nanoseconds / 1e9
+        health_age = (
+            float("inf")
+            if self.last_health_time is None
+            else (now - self.last_health_time).nanoseconds / 1e9
+        )
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
             self.latest_cmd,
             self.speed_limit,
             command_age <= self.command_timeout,
             assessment_age <= self.assessment_timeout,
+            self.navigation_healthy,
+            not self.require_navigation_health
+            or health_age <= self.health_timeout,
         )
         self.pub.publish(output)
 

@@ -39,6 +39,17 @@ def test_local_costmap_fuses_scan_and_depth_points():
     assert obstacle_layer["terrain_points"]["data_type"] == "PointCloud2"
 
 
+def test_navigation_health_parameters_are_versioned_with_nav2():
+    """导航健康阈值必须进入正式配置，不能只隐藏在源码默认值中。"""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    health = config["navigation_health_monitor"]["ros__parameters"]
+    assert health["minimum_scan_valid_ratio"] >= 0.5
+    assert health["sensor_timeout"] > 0.0
+    assert 0.0 <= health["future_stamp_tolerance"] <= 0.2
+
+
 def test_navigation_launch_description_is_constructible():
     """The reduced Nav2 launch entry must remain importable."""
     path = PACKAGE_ROOT / "launch" / "navigation.launch.py"

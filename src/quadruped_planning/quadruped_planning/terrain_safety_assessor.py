@@ -117,10 +117,33 @@ def finite_or_zero(value: float) -> float:
     return numeric if isfinite(numeric) else 0.0
 
 
+def nonnegative_finite_or_zero(value: float) -> float:
+    """清理必须非负的置信度、长度和粗糙度字段。"""
+    return max(0.0, finite_or_zero(value))
+
+
 def nonnegative_integer_or_zero(value: float) -> int:
     """安全转换点数；旧 rosbag 中的 NaN/Inf/负数均视为无有效点。"""
     numeric = float(value)
     return int(numeric) if isfinite(numeric) and numeric >= 0.0 else 0
+
+
+def observation_stamp_is_current(
+    now_seconds: float,
+    stamp_seconds: float,
+    maximum_age: float,
+    future_tolerance: float = 0.10,
+) -> bool:
+    """拒绝零时间戳、陈旧重放帧和明显来自未来的观测。"""
+    values = (now_seconds, stamp_seconds, maximum_age, future_tolerance)
+    if not all(isfinite(float(value)) for value in values):
+        return False
+    age = float(now_seconds) - float(stamp_seconds)
+    return (
+        stamp_seconds > 0.0
+        and maximum_age > 0.0
+        and -max(0.0, future_tolerance) <= age <= maximum_age
+    )
 
 
 def select_terrain_assessment(
@@ -252,6 +275,12 @@ def fused_observation_valid(
         and GEOMETRY_CLEAR <= int(msg.obstacle_type) <= GEOMETRY_POLE
         and all(isfinite(float(value)) for value in metrics)
         and confidence_limit <= float(msg.confidence) <= 1.0
+        and float(msg.obstacle_height) >= 0.0
+        and float(msg.pit_depth) >= 0.0
+        and float(msg.roughness) >= 0.0
+        and float(msg.distance) >= 0.0
+        and float(msg.width) >= 0.0
+        and float(msg.clearance_height) >= 0.0
         and int(msg.valid_points) >= max(1, int(min_points))
     )
 
@@ -307,6 +336,7 @@ class TerrainSafetyAssessor(Node):
             ("vision_min_confidence", 0.55),
             ("vision_center_margin", 0.20),
             ("vision_speed_scale", 0.35),
+            ("future_stamp_tolerance", 0.10),
         ):
             self.declare_parameter(name, default)
         self.declare_parameter("min_points", 30)
@@ -334,6 +364,9 @@ class TerrainSafetyAssessor(Node):
         self.max_slope = self._positive_parameter("max_slope", 0.45)
         self.max_roughness = self._positive_parameter("max_roughness", 0.06)
         self.sensor_timeout = self._positive_parameter("sensor_timeout", 0.7)
+        self.future_stamp_tolerance = self._positive_parameter(
+            "future_stamp_tolerance", 0.10
+        )
         self.min_points = max(1, int(self.get_parameter("min_points").value))
         self.prefer_fused = bool(
             self.get_parameter("prefer_fused_obstacle").value
@@ -526,7 +559,23 @@ class TerrainSafetyAssessor(Node):
         """处理相机与点云按时间戳配对后的强类型原子观测。"""
         if not self.prefer_fused:
             return
-        self.last_features_time = self.get_clock().now()
+        now = self.get_clock().now()
+        stamp = (
+            float(msg.header.stamp.sec)
+            + float(msg.header.stamp.nanosec) * 1e-9
+        )
+        if not observation_stamp_is_current(
+            now.nanoseconds * 1e-9,
+            stamp,
+            self.sensor_timeout,
+            self.future_stamp_tolerance,
+        ):
+            self.perception_valid = False
+            self.visual_assist_active = False
+            self.latest_observation = None
+            self._publish_candidate(("STOP", 0.0))
+            return
+        self.last_features_time = now
         self.latest_observation = msg
         self.perception_valid = fused_observation_valid(
             msg, self.fused_min_confidence, self.min_points
@@ -596,17 +645,25 @@ class TerrainSafetyAssessor(Node):
         safety.visual_assist_active = bool(self.visual_assist_active)
         if observation is not None:
             safety.obstacle_type = int(observation.obstacle_type)
-            safety.confidence = finite_or_zero(observation.confidence)
-            safety.obstacle_height = finite_or_zero(
+            safety.confidence = min(
+                1.0, nonnegative_finite_or_zero(observation.confidence)
+            )
+            safety.obstacle_height = nonnegative_finite_or_zero(
                 observation.obstacle_height
             )
-            safety.pit_depth = finite_or_zero(observation.pit_depth)
+            safety.pit_depth = nonnegative_finite_or_zero(
+                observation.pit_depth
+            )
             safety.slope_pitch = finite_or_zero(observation.slope_pitch)
             safety.slope_roll = finite_or_zero(observation.slope_roll)
-            safety.roughness = finite_or_zero(observation.roughness)
-            safety.distance = finite_or_zero(observation.distance)
-            safety.width = finite_or_zero(observation.width)
-            safety.clearance_height = finite_or_zero(
+            safety.roughness = nonnegative_finite_or_zero(
+                observation.roughness
+            )
+            safety.distance = nonnegative_finite_or_zero(
+                observation.distance
+            )
+            safety.width = nonnegative_finite_or_zero(observation.width)
+            safety.clearance_height = nonnegative_finite_or_zero(
                 observation.clearance_height
             )
             safety.valid_points = nonnegative_integer_or_zero(

@@ -59,31 +59,110 @@ def find_synchronized_pair(terrain_queue, vision_queue, sync_slop: float):
     return terrain, vision, float(skew)
 
 
+def terrain_observation_valid(terrain) -> bool:
+    """独立复核点云生产者的有效位、类别、范围和全部连续字段。"""
+    metrics = (
+        terrain.confidence,
+        terrain.ground_height,
+        terrain.obstacle_height,
+        terrain.pit_depth,
+        terrain.slope_pitch,
+        terrain.slope_roll,
+        terrain.roughness,
+        terrain.distance,
+        terrain.width,
+        terrain.clearance_height,
+    )
+    return (
+        bool(terrain.valid)
+        and TerrainFeatures.CLEAR
+        <= int(terrain.obstacle_type)
+        <= TerrainFeatures.POLE
+        and all(math.isfinite(float(value)) for value in metrics)
+        and 0.0 <= float(terrain.confidence) <= 1.0
+        and float(terrain.obstacle_height) >= 0.0
+        and float(terrain.pit_depth) >= 0.0
+        and float(terrain.roughness) >= 0.0
+        and float(terrain.distance) >= 0.0
+        and float(terrain.width) >= 0.0
+        and float(terrain.clearance_height) >= 0.0
+        and int(terrain.valid_points) > 0
+    )
+
+
+def vision_observation_valid(vision, minimum_confidence: float) -> bool:
+    """验证视觉类别、置信度和归一化框，拒绝 NaN 与退化框。"""
+    if vision is None:
+        return False
+    metrics = (
+        vision.confidence,
+        vision.center_x,
+        vision.center_y,
+        vision.width,
+        vision.height,
+    )
+    threshold = float(minimum_confidence)
+    if not math.isfinite(threshold):
+        return False
+    return (
+        int(vision.obstacle_type) in VISION_TO_GEOMETRY
+        and all(math.isfinite(float(value)) for value in metrics)
+        and max(0.0, min(1.0, threshold)) <= float(vision.confidence) <= 1.0
+        and 0.0 < float(vision.width) <= 1.0
+        and 0.0 < float(vision.height) <= 1.0
+        and float(vision.width) / 2.0
+        <= float(vision.center_x)
+        <= 1.0 - float(vision.width) / 2.0
+        and float(vision.height) / 2.0
+        <= float(vision.center_y)
+        <= 1.0 - float(vision.height) / 2.0
+    )
+
+
+def _finite_or_zero(value: float) -> float:
+    """保持融合消息数值有限；有效性另由严格校验结果表达。"""
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else 0.0
+
+
+def _nonnegative_finite_or_zero(value: float) -> float:
+    """清理不可能为负的米制量，确保无效消息也适合记录和诊断。"""
+    numeric = _finite_or_zero(value)
+    return max(0.0, numeric)
+
+
 def fuse_observations(terrain, vision, skew: float, vision_min_confidence: float):
     """融合一对同步消息并返回强类型结果，保持点云几何的安全优先级。"""
     result = FusedObstacle()
     result.header = terrain.header
-    result.obstacle_type = int(terrain.obstacle_type)
-    result.geometry_confirmed = bool(terrain.valid)
+    terrain_valid = terrain_observation_valid(terrain)
+    result.obstacle_type = (
+        int(terrain.obstacle_type) if terrain_valid else FusedObstacle.UNKNOWN
+    )
+    result.geometry_confirmed = terrain_valid
     result.vision_confirmed = False
-    result.confidence = float(terrain.confidence if terrain.valid else 0.0)
-    result.obstacle_height = float(terrain.obstacle_height)
-    result.pit_depth = float(terrain.pit_depth)
-    result.slope_pitch = float(terrain.slope_pitch)
-    result.slope_roll = float(terrain.slope_roll)
-    result.roughness = float(terrain.roughness)
-    result.distance = float(terrain.distance)
-    result.width = float(terrain.width)
-    result.clearance_height = float(terrain.clearance_height)
-    result.time_skew = float(abs(skew))
-    result.valid_points = int(terrain.valid_points)
-    if vision is None or vision.confidence < vision_min_confidence:
+    result.confidence = _finite_or_zero(
+        terrain.confidence if terrain_valid else 0.0
+    )
+    result.obstacle_height = _nonnegative_finite_or_zero(
+        terrain.obstacle_height
+    )
+    result.pit_depth = _nonnegative_finite_or_zero(terrain.pit_depth)
+    result.slope_pitch = _finite_or_zero(terrain.slope_pitch)
+    result.slope_roll = _finite_or_zero(terrain.slope_roll)
+    result.roughness = _nonnegative_finite_or_zero(terrain.roughness)
+    result.distance = _nonnegative_finite_or_zero(terrain.distance)
+    result.width = _nonnegative_finite_or_zero(terrain.width)
+    result.clearance_height = _nonnegative_finite_or_zero(
+        terrain.clearance_height
+    )
+    result.time_skew = _nonnegative_finite_or_zero(abs(skew))
+    result.valid_points = max(0, int(terrain.valid_points))
+    if not vision_observation_valid(vision, vision_min_confidence):
         return result
     visual_type = VISION_TO_GEOMETRY.get(int(vision.obstacle_type))
-    if visual_type is None:
-        return result
     result.vision_confirmed = True
-    if terrain.valid and terrain.obstacle_type in (
+    if terrain_valid and terrain.obstacle_type in (
         TerrainFeatures.STEP,
         TerrainFeatures.WALL,
         TerrainFeatures.BAR,
@@ -94,7 +173,7 @@ def fuse_observations(terrain, vision, skew: float, vision_min_confidence: float
         compatible = visual_type == int(terrain.obstacle_type)
         if (
             visual_type == FusedObstacle.BAR
-            and terrain.clearance_height >= 0.05
+            and terrain.clearance_height >= 0.12
             and terrain.obstacle_height >= 0.10
         ):
             compatible = True

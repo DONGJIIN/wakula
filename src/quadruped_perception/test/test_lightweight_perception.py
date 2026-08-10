@@ -9,6 +9,7 @@ from quadruped_perception.terrain_analyzer import (
     transform_xyz,
 )
 from quadruped_perception.terrain_geometry import (
+    BAR,
     CLEAR,
     PIT,
     WALL,
@@ -20,12 +21,14 @@ from quadruped_perception.vision_obstacle_detector import (
     adaptive_canny_thresholds,
     apply_image_quality,
     apply_detection_roi,
+    combined_hsv_mask,
     detect_obstacle_evidence,
     enhance_illumination,
     evidence_iou,
     image_quality_score,
     largest_color_feature,
     stabilize_evidence,
+    suppress_specular_edges,
 )
 
 
@@ -134,6 +137,47 @@ def test_image_quality_rejects_unusable_frames_and_scales_evidence():
     accepted = apply_image_quality(evidence, 0.8, 0.35)
     assert accepted.hint == "wall"
     assert 0.7 < accepted.confidence < evidence.confidence
+
+
+def test_image_quality_rejects_clipped_light_and_motion_blur():
+    """全黑、全白和运动模糊帧均不能靠亮度增强绕过质量门。"""
+    black = np.zeros((120, 160), dtype=np.uint8)
+    white = np.full_like(black, 255)
+    indices = np.indices(black.shape)
+    sharp = np.where(
+        (indices[0] // 8 + indices[1] // 8) % 2 == 0, 50, 200
+    ).astype(np.uint8)
+    blurred = cv2.GaussianBlur(sharp, (31, 31), 0)
+    assert image_quality_score(black) < 0.10
+    assert image_quality_score(white) < 0.10
+    assert image_quality_score(blurred) < image_quality_score(sharp)
+
+
+def test_dual_illumination_mask_recovers_shadow_color_without_losing_original():
+    """阴影色块可由增强分支补回，正常原图颜色仍保留。"""
+    original = np.zeros((80, 120, 3), dtype=np.uint8)
+    enhanced = np.zeros_like(original)
+    # 暗橙色原图低于 V 下限；增强图恢复亮度但保持色相。
+    cv2.rectangle(original, (10, 20), (50, 60), (0, 35, 70), -1)
+    cv2.rectangle(enhanced, (10, 20), (50, 60), (0, 90, 180), -1)
+    # 第二个正常橙色块只存在于原图，验证掩膜确实取并集。
+    cv2.rectangle(original, (70, 20), (105, 60), (0, 90, 180), -1)
+    lower = np.asarray((5, 80, 70), dtype=np.uint8)
+    upper = np.asarray((25, 255, 255), dtype=np.uint8)
+    mask = combined_hsv_mask(original, enhanced, lower, upper)
+    assert mask[40, 30] == 255
+    assert mask[40, 85] == 255
+
+
+def test_specular_glare_edges_are_removed_but_colored_edges_remain():
+    """白色过曝反光不应形成横杆轮廓，邻近蓝色结构仍可检测。"""
+    image = np.zeros((100, 160, 3), dtype=np.uint8)
+    cv2.rectangle(image, (10, 20), (70, 40), (255, 255, 255), -1)
+    cv2.rectangle(image, (90, 20), (150, 40), (180, 60, 20), -1)
+    edges = cv2.Canny(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), 30, 80)
+    filtered = suppress_specular_edges(edges, image, 25, 245, 7)
+    assert cv2.countNonZero(filtered[:, 5:76]) == 0
+    assert cv2.countNonZero(filtered[:, 85:156]) > 0
 
 
 def test_color_feature_is_normalized():
@@ -260,6 +304,23 @@ def test_grid_ground_segmentation_detects_wall_without_biasing_plane():
     assert abs(result.slope_pitch) < 0.03
 
 
+def test_grid_ground_segmentation_detects_competition_height_bar_clearance():
+    """离地约 0.30 m 的细横杆不能被同一切片中的地面点误判为墙。"""
+    floor = _dense_floor()
+    bar = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in np.arange(-0.40, 0.41, 0.04)
+            for z in (0.29, 0.31, 0.33, 0.35)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, bar)))
+    assert result.valid
+    assert result.obstacle_type == BAR
+    assert 0.25 <= result.clearance_height <= 0.33
+
+
 def test_grid_ground_segmentation_requires_real_low_returns_for_pit():
     """坑洞分类必须由真实低处回波支持。"""
     floor = _dense_floor()
@@ -293,6 +354,22 @@ def test_disconnected_depth_speckles_do_not_form_an_obstacle():
     assert result.obstacle_type == CLEAR
 
 
+def test_connected_but_weak_depth_speckles_do_not_form_an_obstacle():
+    """相邻栅格中各两个飞点仍不足以证明存在连续障碍表面。"""
+    floor = _dense_floor()
+    weak_cluster = np.asarray(
+        [
+            point
+            for x, y in ((0.60, 0.00), (0.65, 0.00), (0.70, 0.00))
+            for point in ((x, y, 0.30), (x, y, 0.31))
+        ],
+        dtype=np.float64,
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, weak_cluster)))
+    assert result.valid
+    assert result.obstacle_type == CLEAR
+
+
 def test_robust_ground_fit_preserves_long_slope_with_high_outliers():
     """A long ramp remains a ramp when a small elevated cluster is present."""
     floor = _dense_floor()
@@ -308,3 +385,14 @@ def test_robust_ground_fit_preserves_long_slope_with_high_outliers():
     result = analyze_terrain_geometry(np.vstack((floor, outliers)))
     assert result.valid
     assert abs(result.slope_pitch - np.arctan(0.15)) < 0.03
+
+
+def test_competition_fourteen_degree_ramp_remains_ground_not_wall():
+    """规则中的 10°/14° 坡面应拟合为地面坡度，而不是高墙或台阶。"""
+    floor = _dense_floor()
+    slope = np.tan(np.deg2rad(14.0))
+    floor[:, 2] += slope * floor[:, 0]
+    result = analyze_terrain_geometry(floor)
+    assert result.valid
+    assert result.obstacle_type == CLEAR
+    assert abs(result.slope_pitch - np.deg2rad(14.0)) < 0.03

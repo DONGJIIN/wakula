@@ -34,8 +34,9 @@ terrain_safety_assessor（quadruped_planning）
   注意：这是导航约束节点，不发布动作、Action 或关节命令；STEP/CLIMB 的速度上限为零。
 
 navigation_speed_gate（quadruped_planning）
-  输入：/cmd_vel_smoothed、/terrain/speed_limit。
-  输出：/cmd_vel_terrain_safe。Nav2 命令或决策任一超时即持续输出零 Twist。
+  输入：/cmd_vel_smoothed、/terrain/speed_limit、/navigation/healthy。
+  输出：/cmd_vel_terrain_safe。Nav2 命令、决策、导航健康任一为 false 或超时即持续输出
+  零 Twist；require_navigation_health=false 只允许在脱离 Nav2 的隔离调试中使用。
 
 nav2_readiness_monitor（slam）
   输入：/scan、/odom、TF map -> base_link。
@@ -109,7 +110,8 @@ robot_state_publisher
   obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、width、
   clearance_height、time_skew、valid_points。
   融合约束：点云提供米制尺度；视觉 BAR 需点云 clearance_height 支持，POLE 需点云窄宽度
-  支持。视觉/几何冲突时类别保持点云结果并降低 confidence。
+  支持。视觉/几何冲突时类别保持点云结果并降低 confidence。所有类别、连续字段、视觉框
+  和有效位在融合消费者处二次校验；旧/未来 Header 不得维持 perception_valid。
 
 五、决策和速度接口
 --------------
@@ -123,6 +125,8 @@ robot_state_publisher
   类型均为 geometry_msgs/msg/Twist。分别表示 Nav2 原始、平滑后、地形门后、碰撞监控后。
 
 /navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
+  健康监控检查 LaserScan 厂商量程、NaN/±Inf、里程计有限性/协方差/四元数、采样时间戳、
+  接收超时、TF 和位置突跳。正 Inf 表示量程内无障碍，仍是合法 LaserScan 回波。
 
 /terrain/visual_assist_active，std_msgs/msg/Bool
   表示当前速度上限是否受稳定视觉证据限制，仅供调试和 rosbag 统计。

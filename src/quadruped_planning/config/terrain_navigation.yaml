@@ -10,6 +10,8 @@ terrain_safety_assessor:
     max_roughness: 0.06
     min_points: 30
     sensor_timeout: 0.7
+    # Reject delayed/replayed frames and timestamps too far ahead of the ROS clock.
+    future_stamp_tolerance: 0.10
     # vision=true makes the timestamped fused message authoritative. With
     # vision=false, launch disables this and uses /terrain/features directly.
     prefer_fused_obstacle: true
@@ -31,4 +33,6 @@ navigation_speed_gate:
     output_topic: /cmd_vel_terrain_safe
     command_timeout: 0.5
     assessment_timeout: 0.7
+    navigation_health_timeout: 0.5
+    require_navigation_health: true
     default_speed_limit: 0.0

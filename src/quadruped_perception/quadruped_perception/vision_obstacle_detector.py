@@ -254,15 +254,77 @@ def image_quality_score(gray: np.ndarray) -> float:
     usable_exposure = float(np.mean((image > 8) & (image < 247)))
     low, high = np.quantile(image, (0.10, 0.90))
     contrast = float(np.clip((float(high) - float(low)) / 45.0, 0.0, 1.0))
+    median = float(np.median(image))
+    # 中位亮度接近任一裁剪端时，即使 CLAHE 后看起来有纹理，原始信噪比仍然不可靠。
+    exposure_balance = float(
+        np.clip(min(median / 32.0, (255.0 - median) / 32.0), 0.0, 1.0)
+    )
     laplacian_variance = float(cv2.Laplacian(image, cv2.CV_32F).var())
     sharpness = float(np.clip(laplacian_variance / 80.0, 0.0, 1.0))
     return float(
         np.clip(
-            usable_exposure * (0.40 + 0.30 * contrast + 0.30 * sharpness),
+            usable_exposure
+            * (
+                0.15
+                + 0.25 * exposure_balance
+                + 0.30 * contrast
+                + 0.30 * sharpness
+            ),
             0.0,
             1.0,
         )
     )
+
+
+def combined_hsv_mask(
+    original_bgr: np.ndarray,
+    enhanced_bgr: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> np.ndarray:
+    """合并原图与光照增强图的 HSV 分割结果。
+
+    原图在正常曝光时保留最可信的色相；增强图补回阴影中的低亮度颜色。二者取并集后仍
+    要经过面积、填充率、多帧和点云复核，因此不会单凭扩大的颜色区域批准越障。
+    """
+    original_hsv = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2HSV)
+    original_mask = cv2.inRange(original_hsv, lower, upper)
+    if enhanced_bgr is original_bgr:
+        return original_mask
+    enhanced_hsv = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2HSV)
+    return cv2.bitwise_or(
+        original_mask, cv2.inRange(enhanced_hsv, lower, upper)
+    )
+
+
+def suppress_specular_edges(
+    edge_mask: np.ndarray,
+    bgr: np.ndarray,
+    saturation_max: int = 25,
+    value_min: int = 245,
+    dilation_size: int = 7,
+) -> np.ndarray:
+    """移除贴近大面积白色高光的边缘，降低灯光反射造成的假横杆。
+
+    只屏蔽低饱和且接近传感器上限的像素，不删除正常白色区域之外的结构边缘；蓝白限高
+    杆仍由蓝色色块和剩余轮廓支持。膨胀范围有上限，避免整幅强光画面产生巨大掩膜。
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    glare = cv2.inRange(
+        hsv,
+        np.asarray((0, 0, int(np.clip(value_min, 0, 255))), dtype=np.uint8),
+        np.asarray(
+            (179, int(np.clip(saturation_max, 0, 255)), 255), dtype=np.uint8
+        ),
+    )
+    kernel_size = max(1, min(31, int(dilation_size)))
+    kernel_size += 1 if kernel_size % 2 == 0 else 0
+    if kernel_size > 1:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
+        glare = cv2.dilate(glare, kernel, iterations=1)
+    return cv2.bitwise_and(edge_mask, cv2.bitwise_not(glare))
 
 
 def apply_image_quality(
@@ -496,8 +558,13 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("adaptive_canny", True)
         self.declare_parameter("adaptive_canny_sigma", 0.33)
         self.declare_parameter("illumination_normalization", True)
+        self.declare_parameter("dual_illumination_color_mask", True)
         self.declare_parameter("clahe_clip_limit", 2.0)
         self.declare_parameter("clahe_grid_size", 8)
+        self.declare_parameter("suppress_specular_glare", True)
+        self.declare_parameter("glare_saturation_max", 25)
+        self.declare_parameter("glare_value_min", 245)
+        self.declare_parameter("glare_dilation_size", 7)
         self.declare_parameter("roi_top_ratio", 0.05)
         self.declare_parameter("roi_bottom_ratio", 0.95)
         self.declare_parameter("roi_side_margin_ratio", 0.02)
@@ -538,11 +605,26 @@ class VisionObstacleDetector(Node):
         self.illumination_normalization = bool(
             self.get_parameter("illumination_normalization").value
         )
+        self.dual_illumination_color_mask = bool(
+            self.get_parameter("dual_illumination_color_mask").value
+        )
         self.clahe_clip_limit = max(
             0.1, float(self.get_parameter("clahe_clip_limit").value)
         )
         self.clahe_grid_size = max(
             2, int(self.get_parameter("clahe_grid_size").value)
+        )
+        self.suppress_specular_glare = bool(
+            self.get_parameter("suppress_specular_glare").value
+        )
+        self.glare_saturation_max = int(
+            np.clip(self.get_parameter("glare_saturation_max").value, 0, 255)
+        )
+        self.glare_value_min = int(
+            np.clip(self.get_parameter("glare_value_min").value, 0, 255)
+        )
+        self.glare_dilation_size = max(
+            1, int(self.get_parameter("glare_dilation_size").value)
         )
         self.roi_top_ratio = float(
             np.clip(self.get_parameter("roi_top_ratio").value, 0.0, 0.95)
@@ -690,22 +772,34 @@ class VisionObstacleDetector(Node):
                 interpolation=cv2.INTER_AREA,
             )
 
+        # 必须在增强前评估曝光；否则 CLAHE 可能把严重暗光噪声伪装成“清晰纹理”。
+        raw_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        quality = image_quality_score(raw_gray)
         # CLAHE 只处理亮度通道，在阴影与局部强光下保留较稳定的 HSV 色相。
         processed_bgr = (
             enhance_illumination(bgr, self.clahe_clip_limit, self.clahe_grid_size)
             if self.illumination_normalization
             else bgr
         )
-        # HSV 负责颜色，灰度 Canny 负责轮廓；两者不做神经网络推理。
-        hsv = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2HSV)
+        # 正常曝光原图与 CLAHE 图共同提供颜色证据，兼顾色相保真和阴影区域召回率。
+        color_source = bgr if self.dual_illumination_color_mask else processed_bgr
         orange_mask = self._clean_mask(
-            cv2.inRange(hsv, self.orange_lower, self.orange_upper)
+            combined_hsv_mask(
+                color_source,
+                processed_bgr,
+                self.orange_lower,
+                self.orange_upper,
+            )
         )
         blue_mask = self._clean_mask(
-            cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+            combined_hsv_mask(
+                color_source,
+                processed_bgr,
+                self.blue_lower,
+                self.blue_upper,
+            )
         )
         gray = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2GRAY)
-        quality = image_quality_score(gray)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         edge_low, edge_high = (
             adaptive_canny_thresholds(
@@ -717,6 +811,14 @@ class VisionObstacleDetector(Node):
         edge_mask = cv2.Canny(gray, edge_low, edge_high)
         edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_CLOSE, self.kernel)
         edge_mask = cv2.dilate(edge_mask, self.kernel, iterations=1)
+        if self.suppress_specular_glare:
+            edge_mask = suppress_specular_edges(
+                edge_mask,
+                bgr,
+                self.glare_saturation_max,
+                self.glare_value_min,
+                self.glare_dilation_size,
+            )
         # 去掉天花板、机身边缘和镜头黑边等通常不属于前向通道的区域。
         orange_mask = apply_detection_roi(
             orange_mask,

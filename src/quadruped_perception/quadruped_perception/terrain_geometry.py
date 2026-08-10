@@ -135,6 +135,22 @@ def _largest_connected_region(
     return np.asarray(largest, dtype=np.int64)
 
 
+def _region_has_support(
+    cells: np.ndarray,
+    region: np.ndarray,
+    min_region_cells: int,
+    min_region_points: int,
+) -> bool:
+    """同时检查异常区域的空间连续性和原始回波数量。
+
+    连续的少量飞点可能恰好落入相邻栅格，仅检查格数仍会误报。第 6 列保存每格原始点数，
+    因而可在不增加一次点云遍历的前提下要求真实表面具有足够回波支撑。
+    """
+    return len(region) >= max(2, int(min_region_cells)) and int(
+        np.sum(cells[region, 5])
+    ) >= max(4, int(min_region_points))
+
+
 def analyze_terrain_geometry(
     xyz: np.ndarray,
     *,
@@ -143,8 +159,10 @@ def analyze_terrain_geometry(
     step_height: float = 0.08,
     pit_depth: float = 0.08,
     wall_height: float = 0.25,
+    bar_min_clearance: float = 0.18,
     min_cells: int = 12,
     min_region_cells: int = 3,
+    min_region_points: int = 12,
 ) -> GeometryEstimate:
     """分割地面并识别台阶、坑洞、墙面、横杆和立柱。
 
@@ -187,11 +205,22 @@ def analyze_terrain_geometry(
     width = 0.0
     clearance = 0.0
 
-    minimum_region = max(2, int(min_region_cells))
     negative_region = _largest_connected_region(cells, negative, cell_size)
     positive_region = _largest_connected_region(cells, positive, cell_size)
+    negative_supported = _region_has_support(
+        cells,
+        negative_region,
+        min_region_cells,
+        min_region_points,
+    )
+    positive_supported = _region_has_support(
+        cells,
+        positive_region,
+        min_region_cells,
+        min_region_points,
+    )
 
-    if len(negative_region) >= minimum_region:
+    if negative_supported:
         selected = cells[negative_region]
         measured_pit = max(
             0.0, -float(np.quantile(low_relative[negative_region], 0.10))
@@ -200,8 +229,9 @@ def analyze_terrain_geometry(
         distance = float(np.quantile(selected[:, 0], 0.10))
         width = float(np.ptp(selected[:, 1]) + cell_size)
         confidence = min(0.96, 0.42 + 0.07 * len(selected))
-    elif len(positive_region) >= minimum_region:
+    elif positive_supported:
         selected_cells = cells[positive_region]
+        supporting_points = int(np.sum(selected_cells[:, 5]))
         obstacle_height = max(
             0.0, float(np.quantile(high_relative[positive_region], 0.90))
         )
@@ -212,32 +242,64 @@ def analyze_terrain_geometry(
             (points[:, 0] >= distance - cell_size)
             & (points[:, 0] <= distance + 2.0 * cell_size)
         ]
-        if len(front) >= 8:
-            z_span = float(np.ptp(front[:, 2]))
-            y_span = float(np.ptp(front[:, 1]))
-            low_clearance = float(np.quantile(front[:, 2], 0.10) - (a * distance + c))
-            x_span = float(np.ptp(front[:, 0]))
+        front_relative = front[:, 2] - (
+            a * front[:, 0] + b * front[:, 1] + c
+        )
+        elevated_front = front[front_relative >= step_height]
+        elevated_relative = front_relative[front_relative >= step_height]
+        if len(elevated_front) >= 8:
+            # 只在高于地面的物体回波中估计净空；否则同一 x 切片的地面点会把横杆
+            # low_clearance 拉到零，导致比赛中的悬空细杆被误判为墙。
+            z_span = float(np.ptp(elevated_front[:, 2]))
+            y_span = float(np.ptp(elevated_front[:, 1]))
+            low_clearance = float(np.quantile(elevated_relative, 0.10))
+            x_span = float(np.ptp(elevated_front[:, 0]))
             vertical_score = min(1.0, z_span / max(wall_height, 1e-3))
-            if z_span >= wall_height and y_span >= 0.25 and low_clearance <= step_height:
+            if (
+                obstacle_height >= wall_height
+                and z_span >= wall_height * 0.70
+                and y_span >= 0.25
+                and low_clearance < max(bar_min_clearance, step_height * 1.5)
+            ):
                 obstacle_type = WALL
                 confidence = min(
-                    0.96, 0.50 + 0.30 * vertical_score + 0.02 * len(selected_cells)
+                    0.96,
+                    0.50
+                    + 0.30 * vertical_score
+                    + 0.01 * len(selected_cells)
+                    + 0.002 * supporting_points,
                 )
-            elif z_span >= 0.12 and y_span >= 0.25 and low_clearance > step_height:
+            elif (
+                obstacle_height >= 0.12
+                and y_span >= 0.25
+                and low_clearance >= max(step_height, bar_min_clearance)
+            ):
                 obstacle_type = BAR
                 clearance = max(0.0, low_clearance)
                 confidence = min(
-                    0.92, 0.50 + y_span * 0.35 + 0.02 * len(selected_cells)
+                    0.92,
+                    0.50
+                    + y_span * 0.35
+                    + 0.01 * len(selected_cells)
+                    + 0.002 * supporting_points,
                 )
             elif z_span >= 0.15 and y_span <= 0.18 and x_span <= 0.18:
                 obstacle_type = POLE
                 confidence = min(
-                    0.90, 0.46 + z_span * 0.8 + 0.02 * len(selected_cells)
+                    0.90,
+                    0.46
+                    + z_span * 0.8
+                    + 0.01 * len(selected_cells)
+                    + 0.002 * supporting_points,
                 )
             else:
                 obstacle_type = STEP
                 confidence = min(
-                    0.92, 0.46 + obstacle_height + 0.025 * len(selected_cells)
+                    0.92,
+                    0.46
+                    + obstacle_height
+                    + 0.012 * len(selected_cells)
+                    + 0.002 * supporting_points,
                 )
         else:
             obstacle_type = STEP

@@ -204,3 +204,21 @@ collision_monitor:
       min_height: 0.05
       max_height: 2.0
       enabled: true
+
+navigation_health_monitor:
+  ros__parameters:
+    global_frame: map
+    base_frame: base_link
+    sensor_timeout: 1.0
+    minimum_scan_valid_ratio: 0.60
+    max_xy_covariance: 1.0
+    max_odom_jump: 0.75
+    future_stamp_tolerance: 0.10
+
+nav2_readiness_monitor:
+  ros__parameters:
+    global_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+    odom_topic: /odom
+    sensor_timeout: 1.0

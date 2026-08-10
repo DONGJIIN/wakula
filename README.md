@@ -44,7 +44,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门、强类型真机对接合同和 rosbag 离线评估：7 个 ROS 2 包可编译，47 项
+决策、速度超时门、强类型真机对接合同和 rosbag 离线评估：7 个 ROS 2 包可编译，58 项
 测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -150,14 +150,16 @@ wakula/
 
 主要节点：
 
-- `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并用曝光/清晰度、投票率和目标框 IoU 做多帧确认。
-- `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格和连通域估计台阶、坡度、坑洞、墙、横杆和立柱。
+- `vision_obstacle_detector`：OpenCV 双光照 HSV + Canny 轮廓识别，并用原始曝光、清晰度、
+  高光抑制、投票率和目标框 IoU 做多帧确认。
+- `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格、连通域和原始回波支撑量
+  估计台阶、坡度、坑洞、墙、悬空横杆和立柱。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；点云始终掌握尺度权限。
 - `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，原子发布地形模式、Nav2
   速度上限、有效性与几何摘要，供未来运动团队只读接入。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳。
 - `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
-- `navigation_speed_gate`：检查 Nav2 命令和地形评估心跳，任一失效立即输出零速。
+- `navigation_speed_gate`：检查 Nav2 命令、地形评估和导航健康心跳，任一失效立即输出零速。
 - `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
@@ -446,9 +448,11 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 - HSV 橙色/蓝色区域：对比赛场地中颜色明显的杆和横杆优先识别。
 - 灰度 Canny 轮廓：颜色不可靠时，利用细长双立柱、宽横条和大矩形补充判断。
 
-每帧先用 CLAHE 归一化局部光照，再执行形态学去噪、自适应 Canny、前向 ROI 和轮廓筛选。
-严重欠曝、过曝或失焦的图像会在进入历史窗口前被拒绝；最小轮廓面积同时采用像素下限和
-图像面积比例，避免切换分辨率后检测尺度突变。
+每帧先在未经增强的原图上评估曝光、动态范围和清晰度，避免 CLAHE 把暗光噪声伪装成
+有效纹理；随后合并原图与 CLAHE 图的 HSV 掩膜，在保留正常色相的同时补回阴影中的橙/蓝
+区域。接近纯白且低饱和的高光区域会从 Canny 边缘中膨胀剔除，降低场馆灯光、金属反射和
+局部过曝形成假横杆的概率。严重欠曝、过曝或失焦图像在进入历史窗口前被拒绝；最小轮廓
+面积同时采用像素下限和图像面积比例，避免切换分辨率后检测尺度突变。
 双立柱必须同时满足高度、垂直重叠、间距、宽度和填充率一致性；颜色候选与边缘支持共同
 计算置信度。最近 5 帧不仅要求至少 3 帧且达到 60% 同类投票，还要求位置、尺寸和目标框
 IoU 连续，因此反光、画面边缘、无关竖条和跨帧跳变不容易形成稳定证据。输出接口保持不变：
@@ -470,13 +474,14 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 ```
 
 只有证据置信度达到 `vision_min_confidence`、目标位于行进方向中央且结果未超时，才会
-将正常 `WALK` 降速为 `VERIFY_VISUAL_OBSTACLE_WITH_DEPTH`。视觉不会覆盖已经由点云
-给出的 `STEP`、`CLIMB` 或 `STOP`。
+把正常 `WALK` 的速度上限降到 `vision_speed_scale`，并设置
+`visual_assist_active=true`。视觉不会覆盖已经由点云给出的 `STEP`、`CLIMB` 或 `STOP`。
 
-现场必须按真实相机和光照标定 `vision.yaml` 中的 HSV、ROI、Canny、图像质量、轮廓和多帧参数。
+现场必须按真实相机和光照标定 `vision.yaml` 中的 HSV、ROI、Canny、图像质量、高光、轮廓和多帧参数。
 建议依次调整 ROI → HSV → `min_image_quality` → `min_area_px`/`min_area_ratio` → Canny →
 `temporal_match_ratio`/`min_temporal_iou`，
-避免同时修改全部参数而无法定位误差来源。CLAHE、自适应 Canny 均可单独关闭以做对照。
+避免同时修改全部参数而无法定位误差来源。CLAHE、双光照掩膜、高光抑制和自适应 Canny
+均可单独关闭以做 A/B 对照。
 可临时开启 `publish_debug_mask`，在 `/vision/debug_mask` 检查分割与边缘效果；标定完成后
 关闭，以减少图像复制。
 
@@ -518,7 +523,9 @@ obstacle_type, confidence, width, clearance_height]
 启用 OpenCV 时，决策层优先消费 `/perception/fused_obstacle`：它在一个带 Header 的消息中
 同时携带几何/视觉确认位、点数、粗糙度、坡度和时间差，避免不同帧字段被拼成一次决策。
 同步器会在有界小队列内寻找全局时间差最小的一对消息，能处理常见的回调乱序；零时间戳、
-重复旧帧和时间差超过 `0.10 s` 的观测不会融合。几何未确认、置信度不足或点数不足时保持停车。关闭
+重复旧帧和时间差超过 `0.10 s` 的观测不会融合。融合层还会二次校验类别、NaN/Inf、
+归一化视觉框和连续量范围；决策层拒绝超龄/未来时间戳。几何未确认、置信度不足或点数
+不足时保持停车。关闭
 OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达的真机继续使用。
 
 判定默认值：高度 `0.08 m` 起分类为 `STEP`，`0.18 m` 起分类为 `CLIMB`，`0.32 m` 起
@@ -527,8 +534,10 @@ OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达
 
 兼容字段仍使用纵向低分位地面包络；强类型输出另将点云压成 XY 高度栅格，从占多数的
 高度层迭代 MAD 剔除离群格并拟合 `z=ax+by+c` 主地面，再计算俯仰/横滚坡度、坑深、墙面
-垂直跨度、横杆净空和立柱宽度。高处/低处异常必须形成可配置的八邻域连通区域，分散飞点
-不会组成障碍。坑洞必须看到真实低处回波，单纯无点按未知处理，避免把盲区误判成坑。
+垂直跨度、横杆净空和立柱宽度。高处/低处异常不仅必须形成可配置的八邻域连通区域，还要
+达到最小原始回波数，分散或相邻的少量飞点都不会组成障碍。横杆净空只用高于地面的物体
+回波计算，避免同一切片的地面点把约 0.30 m 悬空杆误判成墙。坑洞必须看到真实低处回波，
+单纯无点按未知处理，避免把盲区误判成坑。
 `frontal_obstacle_height`
 只统计中央通道，`lookahead` 是最近成片障碍的实际 x 距离，不再是固定 ROI 长度。
 
@@ -573,7 +582,8 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 
 - Nav2 controller 只发布 `/cmd_vel_nav`。
 - Velocity Smoother 限制加速度并发布 `/cmd_vel_smoothed`。
-- `navigation_speed_gate` 应用 `/terrain/speed_limit`，同时检查命令和评估心跳。
+- `navigation_speed_gate` 应用 `/terrain/speed_limit`，同时检查命令、评估和
+  `/navigation/healthy` 心跳。
 - Collision Monitor 读取 `/scan`，并作为 `/cmd_vel` 唯一发布者。
 
 规划命令或地形决策心跳任意一项超时，速度门都会发布零速度。这只是导航软件层的失效
@@ -583,8 +593,13 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
 视觉细分类也不能无条件覆盖点云：横杆必须同时具有米制离地净空，立柱必须满足点云窄宽度；
 视觉与几何冲突时保留几何类别并降低置信度，等待后续同步帧确认。
-高度、坡度、粗糙度、点数和超时等运行参数也在节点入口及纯决策函数处进行合法性防御；
-NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通行。
+高度、坡度、粗糙度、点数、消息采样时刻和超时等运行参数也在节点入口及纯决策函数处
+进行合法性防御；NaN、Inf、旧帧、未来帧、退化里程计四元数、越量程雷达回波或乱序高度
+阈值都不能被解释为可通行。
+
+已加入规则针对性合成回归：橙色双杆、蓝色横杆、约 0.30 m 悬空限高杆、0.30 m 高墙、
+真实低回波坑洞及 14° 坡面；同时覆盖黑场、白场、阴影、运动模糊、镜面高光、点云飞点、
+相机/点云乱序和旧时间戳。合成测试只能防止代码回退，真机阶段仍必须按比赛场地录包验收。
 
 核心 Python 文件使用模块级职责说明、函数输入输出/单位、关键算法“为什么”和失效行为
 注释；`/terrain/features` 的下标已集中为具名常量。维护时不要为逐行翻译代码而增加注释，

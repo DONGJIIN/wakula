@@ -4,6 +4,8 @@ from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObsta
 from quadruped_perception.perception_fusion import (
     find_synchronized_pair,
     fuse_observations,
+    terrain_observation_valid,
+    vision_observation_valid,
 )
 
 
@@ -21,10 +23,22 @@ def terrain(obstacle_type=TerrainFeatures.STEP):
     return msg
 
 
+def vision(obstacle_type=VisionObstacle.WALL, confidence=0.8):
+    """构造带合法归一化框的视觉观测。"""
+    return VisionObstacle(
+        obstacle_type=obstacle_type,
+        confidence=confidence,
+        center_x=0.5,
+        center_y=0.5,
+        width=0.3,
+        height=0.4,
+    )
+
+
 def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
     """同类视觉提高置信度但不能替代几何有效位。"""
     cloud = terrain(TerrainFeatures.WALL)
-    camera = VisionObstacle(obstacle_type=VisionObstacle.WALL, confidence=0.8)
+    camera = vision()
     result = fuse_observations(cloud, camera, 0.03, 0.55)
     assert result.obstacle_type == FusedObstacle.WALL
     assert result.geometry_confirmed
@@ -36,10 +50,7 @@ def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
 
 def test_visual_bar_only_refines_existing_positive_geometry():
     """横杆细分类必须同时满足点云离地净空。"""
-    camera = VisionObstacle(
-        obstacle_type=VisionObstacle.HEIGHT_BAR,
-        confidence=0.9,
-    )
+    camera = vision(VisionObstacle.HEIGHT_BAR, 0.9)
     compatible = terrain()
     compatible.clearance_height = 0.12
     result = fuse_observations(compatible, camera, 0.02, 0.55)
@@ -84,3 +95,38 @@ def test_pairing_rejects_zero_or_out_of_window_timestamps():
     cloud = _stamp(terrain(), 20)
     image = _stamp(VisionObstacle(), 21)
     assert find_synchronized_pair([cloud], [image], 0.10) is None
+
+
+def test_fusion_rejects_invalid_numeric_fields_and_visual_boxes():
+    """生产者有效位不能掩盖 NaN、未知类别或退化视觉框。"""
+    cloud = terrain()
+    camera = vision()
+    assert terrain_observation_valid(cloud)
+    assert vision_observation_valid(camera, 0.55)
+
+    cloud.slope_roll = float("nan")
+    result = fuse_observations(cloud, camera, 0.01, 0.55)
+    assert not result.geometry_confirmed
+    assert result.obstacle_type == FusedObstacle.UNKNOWN
+    assert result.slope_roll == 0.0
+
+    cloud = terrain()
+    camera.width = 0.0
+    result = fuse_observations(cloud, camera, 0.01, 0.55)
+    assert result.geometry_confirmed
+    assert not result.vision_confirmed
+    camera = vision()
+    camera.center_x = 0.95
+    assert not vision_observation_valid(camera, 0.55)
+    cloud.obstacle_height = -0.1
+    result = fuse_observations(cloud, camera, 0.01, 0.55)
+    assert not result.geometry_confirmed
+    assert result.obstacle_height == 0.0
+
+
+def test_fusion_rejects_nan_visual_confidence():
+    """NaN 比较不能意外绕过视觉置信度阈值。"""
+    camera = vision(confidence=float("nan"))
+    assert not vision_observation_valid(camera, 0.55)
+    result = fuse_observations(terrain(), camera, 0.01, 0.55)
+    assert not result.vision_confirmed

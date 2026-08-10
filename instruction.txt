@@ -15,13 +15,15 @@ Wakula 算法说明
    nav2.yaml：全局/局部代价地图、规划器、控制器、平滑器、行为与碰撞监控参数。
    navigate_to_pose_wakula.xml：规划失败、控制失败时清图、等待、后退、旋转再规划。
    nav2_readiness_monitor.py：只有 scan、odom 和 map->base_link 可用且新鲜才激活 Nav2。
-   navigation_health_monitor.py：检查激光有效率、里程计跳变、协方差、TF 与断流，发布诊断。
+   navigation_health_monitor.py：检查激光量程/有效率、采样时间戳、里程计四元数/协方差/
+   跳变、TF 与断流，发布诊断并参与速度门联锁。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
-   自适应 Canny、形态学、ROI 过滤和轮廓几何；先拒绝严重欠曝/过曝/失焦图像，再通过
-   同类投票率、位置/尺寸抖动和目标框 IoU 去除瞬时误检。
+   自适应 Canny、形态学、ROI 过滤和轮廓几何。曝光质量必须在原图上计算；原图/CLAHE
+   双 HSV 掩膜补偿阴影，高光掩膜抑制灯光和金属反射边缘；随后通过同类投票率、位置/
+   尺寸抖动和目标框 IoU 去除瞬时误检。
    它输出归一化图像框和置信度，不把像素尺寸伪装成真实米制高度。
 
    terrain_analyzer.py：把 PointCloud2 按采样时间变换到 base_link，截取前方 ROI，估计
@@ -29,13 +31,15 @@ Wakula 算法说明
    提供给规划层和 Nav2 local costmap。只缓存最新帧并限制点数，避免 RK3588 积压。
 
    terrain_geometry.py：独立的 NumPy 几何算法，便于脱离 ROS 做单元测试。地面使用网格
-   高度统计、迭代 MAD 离群剔除和稳健拟合；高低异常格必须形成八邻域连通区域，再根据
+   高度统计、迭代 MAD 离群剔除和稳健拟合；高低异常格必须同时达到八邻域格数和原始
+   回波数，再根据
    高度突变、占据分布、空洞和净空分类 CLEAR/STEP/PIT/
    WALL/BAR/POLE。无真机数据时阈值只能作为初值。
 
    perception_fusion.py：在两个有界小队列中全局寻找 Header 时间差最小的相机/点云对，
    能容忍回调乱序；零时间戳、重复旧帧或超过 sync_slop 的观测拒绝融合。输出把点数、
-   粗糙度、坡度及确认位放入同一个原子消息。几何仍是主证据；视觉细分横杆/立柱还必须
+   粗糙度、坡度及确认位放入同一个原子消息。融合前再次校验类别、有限数值、归一化框和
+   物理量范围，非法字段不会穿透接口。几何仍是主证据；视觉细分横杆/立柱还必须
    分别满足点云净空/窄宽度，冲突时不覆盖几何类别。
 
 3. quadruped_planning
@@ -45,8 +49,9 @@ Wakula 算法说明
    有效性和当前几何摘要原子发布为 NavigationSafety，避免未来团队跨话题拼接。不发布
    动作建议，NavigationSafety 也不能直接驱动关节。
 
-   cmd_vel_gate.py（可执行名 navigation_speed_gate）：同时要求 Nav2 命令和地形评估心跳
-   新鲜，按速度上限缩放；任一路断流或上限为零就输出零 Twist。它是导航软件保护，不
+   cmd_vel_gate.py（可执行名 navigation_speed_gate）：同时要求 Nav2 命令、地形评估和
+   /navigation/healthy 心跳新鲜，按速度上限缩放；任一路断流、异常或上限为零就输出零
+   Twist。它是导航软件保护，不
    替代未来驱动器急停和硬件看门狗。
 
 4. quadruped_tools
@@ -74,6 +79,8 @@ Wakula 算法说明
 4. 用斜坡和不平路面调 max_slope、max_roughness。
 5. 用坑洞、墙、横杆、立柱 rosbag 调几何阈值并统计混淆矩阵。
 6. 最后在不同光照下调 HSV、CLAHE、Canny、min_image_quality、面积比例、投票率和 IoU。
+   必须包含黑场、白场、阴影、逆光、频闪、反光、运动模糊和局部遮挡；分别关闭
+   dual_illumination_color_mask 与 suppress_specular_glare 做 A/B 对照。
 7. 只有离线指标和低速实测都通过后，才逐步放宽速度。
 
 五、rosbag 标注与评估

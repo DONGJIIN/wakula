@@ -18,8 +18,15 @@ vision_obstacle_detector:
     adaptive_canny_sigma: 0.33
     # CLAHE improves HSV/Canny stability under shadows and uneven venue lighting.
     illumination_normalization: true
+    # Preserve original hue while also recovering colored regions in shadows.
+    dual_illumination_color_mask: true
     clahe_clip_limit: 2.0
     clahe_grid_size: 8
+    # Suppress Canny edges caused by clipped white reflections and venue lamps.
+    suppress_specular_glare: true
+    glare_saturation_max: 25
+    glare_value_min: 245
+    glare_dilation_size: 7
     # Ignore likely ceiling, robot-body and lens-border pixels.
     roi_top_ratio: 0.05
     roi_bottom_ratio: 0.95

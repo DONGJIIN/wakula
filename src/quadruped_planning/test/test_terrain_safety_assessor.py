@@ -11,7 +11,9 @@ from quadruped_planning.terrain_safety_assessor import (
     finite_or_zero,
     fused_observation_valid,
     navigation_mode_code,
+    nonnegative_finite_or_zero,
     nonnegative_integer_or_zero,
+    observation_stamp_is_current,
     select_fused_assessment,
     select_terrain_assessment,
     validate_height_thresholds,
@@ -79,9 +81,21 @@ def test_typed_handoff_codes_and_numeric_sanitization_are_stable():
     assert navigation_mode_code("future-mode") == NavigationSafety.MODE_UNKNOWN
     assert finite_or_zero(float("nan")) == 0.0
     assert finite_or_zero(float("inf")) == 0.0
+    assert nonnegative_finite_or_zero(-0.2) == 0.0
     assert nonnegative_integer_or_zero(float("nan")) == 0
     assert nonnegative_integer_or_zero(-1.0) == 0
     assert nonnegative_integer_or_zero(42.9) == 42
+
+
+def test_observation_timestamp_rejects_replay_and_future_clock_errors():
+    """重复发布旧数据或错误未来时间戳不能维持可通行状态。"""
+    assert observation_stamp_is_current(100.0, 99.5, 0.7, 0.1)
+    assert not observation_stamp_is_current(100.0, 0.0, 0.7, 0.1)
+    assert not observation_stamp_is_current(100.0, 98.0, 0.7, 0.1)
+    assert not observation_stamp_is_current(100.0, 100.2, 0.7, 0.1)
+    assert not observation_stamp_is_current(
+        100.0, float("nan"), 0.7, 0.1
+    )
 
 
 def test_visual_assist_only_limits_clear_terrain():
@@ -150,6 +164,8 @@ def test_velocity_gate_requires_fresh_command_and_assessment():
     assert abs(output.angular.z - 0.2) < 1e-6
     assert gated_twist(command, 1.0, False, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, False).linear.x == 0.0
+    assert gated_twist(command, 1.0, True, True, False, True).linear.x == 0.0
+    assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
     assert gated_twist(command, float("nan"), True, True).linear.x == 0.0
 
 
