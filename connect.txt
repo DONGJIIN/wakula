@@ -1,984 +1,143 @@
-Wakula ROS 2 通信接口说明（connect.txt）
-========================
+Wakula 通信合同
+===============
 
-文档用途
---------
+一、约定
+------
+ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法内部坐标目标为 base_link，
+导航 TF 树为 map -> odom -> base_link -> sensor_frame。话题显式覆盖优先于 profile；默认
+名称尽量遵循 ROS 2，以便更换设备时只 remap。
 
-本文件集中记录 Wakula 当前代码使用的节点名称、话题、消息类型、数据方向、字段协议、
-Action、Service、TF、QoS 和超时机制。接入相机、雷达、机器狗 SDK 或自研控制器时，
-应优先保持这里记录的默认接口名称，通过 ROS 2 remap 或启动参数适配特殊设备。
+二、节点信息
+----------
+terrain_analyzer（quadruped_perception）
+  输入：一个 sensor_msgs/msg/PointCloud2。input_topic 非空时只订阅该话题；为空时按
+  terrain.yaml 的候选列表自动选择首个活跃源，源超时后可切换。
+  TF：消息 frame_id -> base_link，按消息采样时间查询。
+  输出：/terrain/features、/terrain/features_stamped、/perception/obstacle_points、/diagnostics。
 
-本文件描述源码定义的接口。Nav2、SLAM Toolbox 和 ros2_control 会根据 ROS 2 版本生成
-额外的生命周期服务及调试话题，实际运行结果以以下命令为准：
+vision_obstacle_detector（quadruped_perception）
+  输入：一个 sensor_msgs/msg/Image；image_topic 非空时固定，否则自动选择常见候选话题。
+  输出：/vision/color_features、/vision/obstacle_evidence、/vision/obstacle_stamped、
+  /vision/obstacle_hint；可选 /vision/debug_mask。
 
-  ros2 node list
-  ros2 topic list -t
-  ros2 action list -t
-  ros2 service list -t
-  ros2 run tf2_tools view_frames
+perception_fusion（quadruped_perception）
+  输入：/terrain/features_stamped、/vision/obstacle_stamped。
+  输出：/perception/fused_obstacle、/diagnostics。
+  同步：按 Header 时间戳最近邻配对，默认最大时间差 0.10 s，不同步就不发布融合结果。
 
+obstacle_crossing_manager（quadruped_planning）
+  输入：/terrain/features、/vision/obstacle_evidence。
+  输出：/crossing/mode、/crossing/action、/crossing/speed_scale、
+  /crossing/visual_assist_active。
+  注意：这是感知决策节点，不是腿部越障控制器；STEP/CLIMB 目前输出零速度。
 
-一、节点名称和职责
-------------------
+quadruped_cmd_vel_gate（quadruped_planning）
+  输入：/cmd_vel_smoothed、/crossing/speed_scale。
+  输出：/cmd_vel_terrain_safe。Nav2 命令或决策任一超时即持续输出零 Twist。
+
+nav2_readiness_monitor（slam）
+  输入：/scan、/odom、TF map -> base_link。
+  接口：/lifecycle_manager_navigation/manage_nodes；条件满足后一次性请求 STARTUP。
+
+navigation_health_monitor（slam）
+  输入：/scan、/odom、TF map -> base_link。
+  输出：/navigation/healthy、/diagnostics。检查断流、scan 有效率、协方差和里程计跳变。
+
+SLAM Toolbox
+  输入：/scan、TF odom -> base_link；输出 /map 与 map -> odom。
+
+Nav2
+  输入：/map、/scan、/perception/obstacle_points、/odom、TF 和目标位姿。
+  输出链：controller/behavior -> /cmd_vel_nav -> velocity_smoother -> /cmd_vel_smoothed
+  -> quadruped_cmd_vel_gate -> /cmd_vel_terrain_safe -> collision_monitor -> /cmd_vel。
+  `/cmd_vel` 当前没有硬件消费者。
 
 robot_state_publisher
-  读取 robot_description，根据 /joint_states 发布机器人关节 TF 和固定 TF。
+  输入：占位 URDF；输出固定传感器 TF。robot_model:=false 时不启动，适合由真机模型接管。
 
-joint_state_publisher_gui
-  仅由模型 display.launch.py 启动，通过滑块发布模拟 /joint_states 以检查 URDF；不能与
-  真机 joint_state_broadcaster 或厂商 SDK 同时作为关节状态的权威来源。
+三、标准输入接口
+------------
+/scan
+  类型：sensor_msgs/msg/LaserScan
+  用途：SLAM、Nav2 costmap、启动检查和健康监控。
 
-controller_manager
-  管理 ros2_control 硬件接口、joint_state_broadcaster 和 leg_controller。
+/odom
+  类型：nav_msgs/msg/Odometry
+  配套 TF：odom -> base_link
+  用途：Nav2 控制与健康监控。当前仓库不生成真实 odom。
 
-controller_manager spawner
-  非仿真 use_control:=true 或仿真实体创建完成后加载 joint_state_broadcaster 和
-  leg_controller；完成后进程退出，控制器继续由 controller_manager 托管。
+/camera/image_raw（推荐默认）
+  类型：sensor_msgs/msg/Image，推荐 bgr8/rgb8；其他常见命名由候选列表/profile 适配。
 
-basic_motion_controller
-  订阅最终 /cmd_vel、安全心跳、IMU、足端接触和越障执行命令，以解析 IK 生成 12 关节
-  JointTrajectory，并发布动作状态。simulation:=true 时默认启动；真机需 basic_control:=true。
+/camera/depth/points（推荐默认）
+  类型：sensor_msgs/msg/PointCloud2，必须包含 x/y/z，单位 m，并有有效 Header.frame_id。
 
-wakula_gz_bridge / ros_gz_sim create
-  仿真时分别把 Gazebo 传感器桥接到 ROS 标准话题、从 robot_description 生成机器人实体。
-  gz_ros2_control 在 Gazebo 进程内提供 /controller_manager，不另起 ros2_control_node。
+/tf、/tf_static
+  类型：tf2_msgs/msg/TFMessage
+  最低要求：map->odom、odom->base_link、base_link->lidar/camera/pointcloud frame。
 
-terrain_analyzer
-  接收一个深度点云，转换到 base_link，发布兼容数组、带时间戳强类型地形特征和 Nav2 障碍点云。
+四、感知输出字段
+------------
+/terrain/features
+  类型：std_msgs/msg/Float32MultiArray，兼容旧 bag。
+  索引：0 ground_height；1 obstacle_height；2 frontal_height；3 valid_points；
+  4 slope_pitch；5 roughness；6 frontal_height；7 lookahead_distance；8 hazard_score；
+  9 pit_depth；10 slope_roll；11 obstacle_type；12 confidence；13 width；14 clearance_height。
+  新程序优先使用带 Header 的强类型话题。
 
-vision_obstacle_detector
-  接收一个 RGB 图像，使用 OpenCV 发布兼容数组和带时间戳的多帧确认障碍证据。
+/terrain/features_stamped
+  类型：quadruped_interfaces/msg/TerrainFeatures
+  字段：header、valid、obstacle_type、confidence、ground_height、obstacle_height、pit_depth、
+  slope_pitch、slope_roll、roughness、distance、width、clearance_height、valid_points。
 
-perception_fusion
-  对 /terrain/features_stamped 与 /vision/obstacle_stamped 做有界近似时间同步，发布
-  /perception/fused_obstacle；视觉只能细分类或增强置信度，不能替代点云尺度确认。
+/vision/obstacle_evidence
+  类型：std_msgs/msg/Float32MultiArray
+  六字段：[type, confidence, center_x, center_y, width, height]，后四项归一化为 0..1。
 
-obstacle_crossing_manager
-  普通模式越障管理器，融合地形和视觉，发布模式、动作和速度倍率。
+/vision/obstacle_stamped
+  类型：quadruped_interfaces/msg/VisionObstacle，字段与上面一致并增加 header。
+  类型码：0 NONE，1 POLES，2 HEIGHT_BAR，3 WALL，4 COLORED_OBSTACLE。
 
-crossing_action_server
-  提供 /crossing/traverse_obstacle，将 Action Goal 转换为带 UUID 的控制器命令，并汇总
-  反馈、取消、超时和结果。一键启动时始终运行。
+/perception/fused_obstacle
+  类型：quadruped_interfaces/msg/FusedObstacle
+  类别码：0 UNKNOWN，1 CLEAR，2 STEP，3 PIT，4 WALL，5 BAR，6 POLE。
+  字段：header、obstacle_type、confidence、geometry_confirmed、obstacle_height、pit_depth、
+  slope_pitch、slope_roll、distance、clearance_height、time_skew。
 
-crossing_action_coordinator
-  把稳定 STEP/CLIMB 和地形距离自动转换为 Action Goal；限制重试，越障期间锁住 Nav2
-  速度，并在 STOP 或安全停车时取消活动 Goal。auto_crossing:=true 时启动。
+五、决策和速度接口
+--------------
+/crossing/mode，std_msgs/msg/String
+  WALK：地形允许 Nav2；STEP/CLIMB：识别类别但当前必须停车；STOP：危险或数据无效。
 
-system_safety_supervisor
-  汇总软件急停、标准 IMU、JointState、BatteryState 和数据心跳，发布统一停车互锁及诊断。
-  safety_supervisor:=true 时启动。
+/crossing/action，std_msgs/msg/String
+  典型值：NAVIGATE、VERIFY_VISUAL_OBSTACLE_WITH_DEPTH、STOP_FOR_STEP、
+  STOP_FOR_CLIMB_OR_REPLAN、REPLAN_AROUND_PIT、REPLAN_AROUND_WALL、STOP_FOR_LOW_BAR、
+  NAVIGATE_AROUND_POLE、WAIT_FOR_TERRAIN。它是说明文本，不是执行命令。
 
-mock_sdk_adapter
-  只实现 execution_command/status 通信合同，不驱动电机；支持成功、失败、失联和非法进度
-  故障注入，仅在 mock_hardware:=true 时启动。
+/crossing/speed_scale，std_msgs/msg/Float32
+  0..1。无地形心跳默认 0；WALK 通常 1；视觉复核和立柱绕行会限速；STEP/CLIMB/STOP 为 0。
 
-mock_hardware_state
-  仅在 mock_hardware:=true 时发布静止 /joint_states、/imu/data、/battery_state 和
-  /hardware/status；不发布电机命令，也不模拟动力学。
+/cmd_vel_nav、/cmd_vel_smoothed、/cmd_vel_terrain_safe、/cmd_vel
+  类型均为 geometry_msgs/msg/Twist。分别表示 Nav2 原始、平滑后、地形门后、碰撞监控后。
 
-competition_obstacle_manager
-  比赛模式越障管理器。它与 obstacle_crossing_manager 互斥启动，避免重复发布决策。
+/navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
 
-course_waypoint_navigator
-  比赛模式下把障碍接近点转换为 Nav2 NavigateToPose 目标。
+六、设备替换合同
+------------
+驱动只需发布正确消息和 TF，不要求算法认识厂商品牌。优先保持默认话题；否则：
 
-quadruped_cmd_vel_gate
-  接收 Nav2 平滑速度和越障速度倍率，输出具有双心跳保护的安全速度。
+  ros2 launch slam slam.launch.py sensor_profile:=realsense_d400
 
-async_slam_toolbox_node
-  使用 /scan、/odom 和 TF 建图定位，发布 /map 和 map -> odom。
+或：
 
-controller_server、planner_server、smoother_server、behavior_server
-  Nav2 控制、规划、路径平滑和恢复行为服务器。
+  ros2 launch slam slam.launch.py scan_topic:=/x/scan odom_topic:=/x/odom \
+    camera_topic:=/x/image_raw point_cloud_topic:=/x/points
 
-bt_navigator、waypoint_follower、velocity_smoother、collision_monitor
-  Nav2 行为树导航、路点跟随、速度平滑和最终碰撞保护。
+若 3D 雷达只有 PointCloud2，当前 2D SLAM 仍需用厂家工具或 pointcloud_to_laserscan 生成
+LaserScan。相机和点云最好使用同一时间源；硬件同步优先，软件时间差应稳定低于 0.10 s。
 
-lifecycle_manager_navigation
-  按顺序配置和激活 Nav2 生命周期节点。
-
-nav2_readiness_monitor
-  等待实时 /scan、/odom 和 map -> base_link TF，再调用生命周期启动服务。
-
-navigation_health_monitor
-  Nav2 激活后持续检查 scan/odom 断流、无效回波、协方差、里程计突跳和 map->base_link TF，
-  发布 /navigation/healthy 和 quadruped/navigation_health 诊断。
-
-rviz2
-  显示 TF、机器人模型、激光、点云、地图、路径和 Nav2 状态；只用于可视化与目标交互，
-  关闭后不应影响 SLAM、导航或越障算法运行。
-
-不同 ROS 2 Jazzy 补丁版本可能生成额外的内部或临时节点名，实际运行时使用
-`ros2 node list | sort` 和 `ros2 node info /节点名` 核对。
-
-
-二、外部传感器输入
-------------------
-
-公共适配原则：用户统一运行 `slam.launch.py`。它读取 `sensor_profiles.yaml`，把厂商
-话题集中映射到 /scan、/odom 和 ROS 标准消息合同，并启动 SLAM、Nav2、OpenCV、地形、
-越障安全及 RViz，避免分别修改各节点。`sensor_compat.launch.py` 只保留为旧命令别名。
-
-一键入口的传感器参数：
-
-  sensor_profile        默认 ros_default；选择一个 YAML 预置组合
-  sensor_profiles_file  默认使用本包配置；可指向现场自定义 YAML
-  scan_topic            非空时覆盖 profile 的 LaserScan 来源
-  odom_topic            非空时覆盖 profile 的 Odometry 来源
-  camera_topic          非空时覆盖 profile 的 Image 来源
-  point_cloud_topic     非空时覆盖 profile 的 PointCloud2 来源
-
-一键入口的运行开关：
-
-  slam_enabled          是否启动 SLAM Toolbox，默认 true
-  nav2_enabled          是否启动全部 Nav2 节点，默认 true
-  nav2_autostart        输入和 TF 就绪后是否激活 Nav2，默认 true
-  vision                是否启动 OpenCV，默认 true
-  rviz                  是否启动 RViz，默认 true
-  competition           是否切换比赛状态机，默认 false
-  auto_crossing         是否自动发送越障 Action，默认 true
-  safety_supervisor     是否启动统一软件安全监督，默认 true
-  mock_hardware         是否启动无电机模拟 SDK 后端，默认 false
-  simulation            是否启动 Gazebo、传感器桥和 gz_ros2_control，默认 false
-  simulation_headless   是否关闭 Gazebo GUI，默认 false
-  simulation_world      SDF 世界路径，默认 wakula_training.sdf
-  basic_control         是否启动基础关节轨迹节点，默认值跟随 simulation
-  use_control           是否启动 ros2_control，默认 false
-  use_sim_time          是否使用 /clock，默认 false
-  nav2_log_level        Nav2 日志等级，默认 info
-
-一键入口可覆盖的配置文件：
-
-  slam_params_file      SLAM Toolbox YAML
-  nav2_params_file      Nav2 YAML
-  vision_params_file    OpenCV YAML
-  terrain_params_file   点云地形 YAML
-  crossing_params_file  越障融合和速度门 YAML
-  hardware_params_file  安全监督和模拟 SDK YAML
-  rviz_config_file      RViz 配置
-
-注意：quadruped_cmd_vel_gate 和 crossing_action_coordinator 都监视 /safety/stop 心跳。
-关闭 safety_supervisor 后，必须由外部安全节点继续发布该接口，否则系统按失联处理并保持停车。
-
-显式参数优先于 profile。当前 profile 包括 rplidar、ydlidar、ldlidar、hokuyo、
-realsense_d400、orbbec_gemini2、zed2、oak_d、velodyne、ouster、livox、hesai、
-robosense 和 lslidar；名字只代表常见话题默认值，消息类型与 TF 合同不会改变。
-
-1. 二维激光雷达
-
-名称：/scan
-类型：sensor_msgs/msg/LaserScan
-发送方：2D 雷达驱动或仿真器
-接收方：SLAM Toolbox、Nav2 local_costmap、Nav2 global_costmap、Collision Monitor、
-        nav2_readiness_monitor
-主要字段：
-  header.stamp       采样时间，必须与 TF 使用同一时间基准
-  header.frame_id    通常为 lidar_link
-  angle_min/max      扫描起止角
-  angle_increment    相邻光束角度
-  range_min/max      传感器有效距离
-  ranges             每束激光距离
-QoS：传感器数据 QoS，通常 Best Effort、Volatile、较小队列。
-要求：frame_id 到 base_link 的 TF 必须存在；频率和时间戳必须连续。
-适配方式：一键入口的 scan_topic 将外部来源统一 remap 给所有 /scan 消费者。
-
-2. 里程计
-
-名称：/odom
-类型：nav_msgs/msg/Odometry
-发送方：机器狗状态估计器、轮腿里程计、视觉惯性里程计或仿真器
-接收方：SLAM Toolbox、Nav2、velocity_smoother、competition_obstacle_manager、
-        nav2_readiness_monitor
-主要字段：
-  header.frame_id          应为 odom
-  child_frame_id           应为 base_link
-  pose.pose                odom 中的机器人位姿
-  twist.twist              机器人估计速度
-  pose/twist covariance    定位与速度不确定度
-配套 TF：状态估计器必须持续发布 odom -> base_link。
-适配方式：一键入口的 odom_topic 将外部来源统一 remap 给所有 /odom 消费者。
-
-3. RGB 图像自动兼容输入
-
-候选名称：
-  /camera/image_raw
-  /camera/color/image_raw
-  /image_raw
-类型：sensor_msgs/msg/Image
-发送方：任意 ROS 2 RGB/深度相机驱动
-接收方：vision_obstacle_detector
-编码：节点通过 cv_bridge 转成 bgr8，驱动应发布 cv_bridge 支持的标准编码。
-QoS：Sensor Data QoS。
-选择机制：首个持续发布的话题被锁定；其他候选被忽略。当前源超过
-          source_switch_timeout 未更新时，其他候选可以接管。切换相机时清空历史投票，
-          防止不同相机帧混合。
-覆盖方式：启动参数 camera_topic:=/自定义图像话题。
-
-4. 深度点云自动兼容输入
-
-候选名称：
-  /camera/depth/points
-  /camera/depth/color/points
-  /camera/points
-  /points
-类型：sensor_msgs/msg/PointCloud2
-发送方：RGB-D 相机、双目深度、3D 雷达或点云转换节点
-接收方：terrain_analyzer
-必需字段：x、y、z，单位为米，数据类型需被 sensor_msgs_py 支持。
-QoS：Sensor Data QoS。
-TF：header.frame_id 到 base_link 的带时间戳变换必须存在。
-选择机制：与 RGB 图像相同，锁定一个来源，超时后自动切换。
-覆盖方式：启动参数 point_cloud_topic:=/自定义点云话题。
-
-5. 相机标定信息（预留标准接口）
-
-推荐名称：与图像同命名空间的 camera_info，例如 /camera/camera_info 或
-          /camera/color/camera_info
-类型：sensor_msgs/msg/CameraInfo
-发送方：相机驱动或 camera_info_manager
-当前接收方：无；当前 OpenCV 只做归一化二维轮廓，不依赖内参。
-预留用途：图像去畸变、检测框与深度/点云投影、实际尺寸和距离估计。
-要求：时间戳和 frame_id 与对应 Image 一致。后续消费者应使用参数或 remap 适配，不定义
-      厂商私有标定消息。
-
-6. 足端接触
-
-名称：/foot_contacts
-类型：std_msgs/msg/UInt8MultiArray
-发送方：足端力传感器处理节点或机器狗 SDK 适配器
-接收方：competition_obstacle_manager
-字段协议：data 前四项依次表示四只脚是否接触地面；0 为未接触，大于 0 为接触。
-用途：验证砂砾坑、斜坡、木桥和 T 字台阶的单足接地限制。
-
-7. 基础控制足端接触（真机预留）
-
-名称：/feet/contact
-类型：std_msgs/msg/Float32MultiArray
-发送方：足底力阈值节点、厂商 SDK 适配器或状态估计器
-接收方：basic_motion_controller
-字段协议：data[0..3] 依次为 FL、FR、RL、RR；大于 0.5 表示可靠接触。
-用途：越障动作结束时至少三足接触才允许报告成功。Gazebo 当前无足力模型，只有
-      simulation:=true 时启动文件才显式允许定时完成，真机不得沿用该覆盖。
-
-
-三、感知输出接口
+七、明确不存在的接口
 ----------------
-
-1. 稳定视觉障碍证据
-
-名称：/vision/obstacle_evidence
-类型：std_msgs/msg/Float32MultiArray
-发送方：vision_obstacle_detector
-接收方：obstacle_crossing_manager
-兼容字段顺序：
-  data[0] type_code    0=none，1=poles，2=height_bar，3=wall，4=colored_obstacle
-  data[1] confidence   0.0～1.0，多帧一致性修正后的置信度
-  data[2] center_x     障碍中心横坐标，0.0～1.0
-  data[3] center_y     障碍中心纵坐标，0.0～1.0
-  data[4] width        障碍包围框宽度比例，0.0～1.0
-  data[5] height       障碍包围框高度比例，0.0～1.0
-发布条件：每个已处理图像都会发布；未形成稳定证据时六项为零。
-安全规则：未知类型码、NaN、置信度不足、画面边缘目标或超时结果均被拒绝。
-稳定条件：默认 5 帧窗口至少 3 帧同类型，且 center_x、center_y、width、height 的跨帧
-          跳变不超过 vision.yaml 中对应阈值。接口字段和 ROS 话题未因准确率改进而变化。
-
-2. 可读视觉提示
-
-名称：/vision/obstacle_hint
-类型：std_msgs/msg/String
-发送方：vision_obstacle_detector
-接收方：调试工具或上层记录节点
-内容：none、poles、height_bar、wall、colored_obstacle。
-说明：普通越障决策使用 obstacle_evidence，而不是解析此字符串。
-
-3. 颜色调试特征
-
-名称：/vision/color_features
-类型：std_msgs/msg/Float32MultiArray
-发送方：vision_obstacle_detector
-接收方：标定工具或兼容旧调试程序
-字段顺序：
-  [orange_area_ratio, orange_cx, orange_cy, orange_width, orange_height,
-   blue_area_ratio,   blue_cx,   blue_cy,   blue_width,   blue_height]
-说明：坐标和尺寸归一化；对应颜色未检测到时该组五项为零。
-
-4. 视觉调试图
-
-名称：/vision/debug_mask
-类型：sensor_msgs/msg/Image
-发送方：vision_obstacle_detector
-接收方：RViz、rqt_image_view 或标定工具
-启用条件：vision.yaml 中 publish_debug_mask=true。
-通道协议：B=蓝色区域，G=Canny 边缘，R=橙色区域。
-图像内容：已经过 CLAHE/自适应 Canny、形态学和前向 ROI 处理，可直接用于检查算法真正
-          参与判断的像素；ROI 外为黑色。
-
-5. 地形特征
-
-名称：/terrain/features
-类型：std_msgs/msg/Float32MultiArray
-发送方：terrain_analyzer
-接收方：obstacle_crossing_manager
-字段顺序：
-  data[0] ground_z                 地面估计高度，米
-  data[1] high_z                   高分位顶部高度，米
-  data[2] obstacle_height          障碍相对高度，米
-  data[3] valid_points             ROI 有效点数
-  data[4] slope                    低分位地面包络对 x 的拟合斜率
-  data[5] roughness                地面包络和低层点离散度，米
-  data[6] frontal_obstacle_height  中央半宽通道的相对障碍高度，米
-  data[7] lookahead                最近成片高点的 x 距离；未发现时为 ROI x_max
-  data[8] traversability           0.0～1.0，可通行度
-  data[9] pit_depth                主地面以下实测坑深，米
-  data[10] slope_roll              横向地面坡度角，弧度
-  data[11] obstacle_type           0未知/1平地/2台阶/3坑/4墙/5横杆/6立柱
-  data[12] confidence              几何启发式置信度，0.0～1.0
-  data[13] width                   障碍横向宽度，米
-  data[14] clearance_height        横杆下沿相对地面净空，米
-失效行为：点数不足时不发布新特征，并通过 /diagnostics 报警；决策节点超时后 STOP。
-实现约束：前 9 个下标保持兼容，扩展字段也使用具名常量；任何字段增删或重排都属于接口
-变更，必须同步离线工具、测试和本文档。新代码优先使用下面的强类型话题。
-
-名称：/terrain/features_stamped
-类型：quadruped_interfaces/msg/TerrainFeatures
-时间/坐标：沿用输入 PointCloud2 的 header，坐标为 base_link。
-字段：valid、obstacle_type、confidence、ground_height、obstacle_height、pit_depth、
-      slope_pitch、slope_roll、roughness、distance、width、clearance_height、valid_points。
-
-名称：/vision/obstacle_stamped
-类型：quadruped_interfaces/msg/VisionObstacle
-时间/坐标：沿用输入 Image 的 header；检测框为归一化图像坐标。
-字段：obstacle_type、confidence、center_x、center_y、width、height。
-
-名称：/perception/fused_obstacle
-类型：quadruped_interfaces/msg/FusedObstacle
-发送方：perception_fusion
-同步：默认最大时间差 0.10 s，队列 10；输出 time_skew 记录实际差值。
-关键字段：geometry_confirmed 必须为 true 才有几何尺度权限；相机不能独立把 UNKNOWN 提升
-          为可执行 STEP/CLIMB。
-
-6. Nav2 深度障碍点云
-
-名称：/perception/obstacle_points
-类型：sensor_msgs/msg/PointCloud2
-发送方：terrain_analyzer
-接收方：Nav2 local_costmap obstacle_layer 的 terrain_points 数据源
-坐标系：base_link
-内容：经过有限值过滤、前方 ROI 裁剪和最多 nav2_cloud_max_points 点降采样的 x/y/z。
-QoS：Sensor Data QoS。
-Nav2 行为：marking=true、clearing=false；激光 /scan 继续负责清障。
-
-7. 诊断
-
-名称：/diagnostics
-类型：diagnostic_msgs/msg/DiagnosticArray
-发送方：terrain_analyzer
-接收方：rqt_robot_monitor、诊断聚合器或日志工具
-状态名：quadruped/terrain_analyzer
-键值：valid_points、obstacle_height_m、slope、roughness_m。
-
-
-四、越障决策接口
-----------------
-
-普通模式由 obstacle_crossing_manager 发布；competition=true 时改由
-competition_obstacle_manager 发布。启动文件保证两者互斥。
-
-1. 越障模式
-
-名称：/crossing/mode
-类型：std_msgs/msg/String
-发送方：当前活动的越障管理器
-接收方：机器狗 SDK/步态适配器、状态显示工具
-普通模式值：WALK、STEP、CLIMB、STOP。
-比赛模式还会根据比赛 FSM 使用相同四种上层模式。
-
-2. 越障动作
-
-名称：/crossing/action
-类型：std_msgs/msg/String
-发送方：当前活动的越障管理器
-接收方：机器狗 SDK/步态控制器
-普通模式主要值：
-  NAVIGATE
-  VERIFY_VISUAL_OBSTACLE_WITH_DEPTH
-  CROSS_STEP
-  CROSS_CLIMB
-  REPLAN_OR_REQUEST_FOOTSTEPS
-  WAIT_FOR_TERRAIN
-比赛模式值由 PROFILES 和 FSM 产生，例如 FOLLOW_S_CORRIDOR、LOW_PROFILE、
-CROSS_T_STAIRS_SINGLE_SUPPORT、CLIMB_OR_JUMP_0P30_WALL、RETRY_OBSTACLE。
-说明：这些是动作请求字符串，不是关节轨迹。
-
-3. 速度倍率
-
-名称：/crossing/speed_scale
-类型：std_msgs/msg/Float32
-发送方：当前活动的越障管理器
-接收方：quadruped_cmd_vel_gate
-范围：0.0～1.0。0.0 表示停止，1.0 表示保留 Nav2 原速度。
-心跳：普通模式收到有效地形后发布；比赛模式由 10 Hz FSM 心跳发布。
-超时：cmd_vel_gate 的 decision_timeout 默认 0.7 秒，超时即输出零速度。
-
-4. 视觉辅助状态
-
-名称：/crossing/visual_assist_active
-类型：std_msgs/msg/Bool
-发送方：obstacle_crossing_manager
-接收方：状态显示、调试记录节点
-含义：true 表示视觉已让 WALK 进入点云复核减速状态。
-
-5. 越障执行互锁
-
-名称：/crossing/execution_active
-类型：std_msgs/msg/Bool
-发送方：crossing_action_coordinator
-接收方：quadruped_cmd_vel_gate、状态记录节点
-含义：true 表示 TraverseObstacle 已由后端接管；速度门必须停止普通 Nav2 Twist。
-
-6. 最近自动越障结果
-
-名称：/crossing/last_result
-类型：std_msgs/msg/String
-发送方：crossing_action_coordinator
-接收方：比赛/任务逻辑、操作界面、rosbag
-格式：`SUCCESS: 说明` 或 `FAILED: 说明`。它用于状态展示；强类型最终结果仍以 Action 为准。
-
-
-五、Nav2 速度接口
-----------------
-
-1. /cmd_vel_nav
-
-类型：geometry_msgs/msg/Twist
-发送方：Nav2 controller_server
-接收方：velocity_smoother
-说明：Nav2 原始控制速度。navigation.launch.py 将 controller 的 cmd_vel 重映射到此名称。
-
-2. /cmd_vel_smoothed
-
-类型：geometry_msgs/msg/Twist
-发送方：Nav2 velocity_smoother
-接收方：quadruped_cmd_vel_gate
-说明：经过速度、加速度和减速度限制的命令。
-
-3. /cmd_vel_terrain_safe
-
-类型：geometry_msgs/msg/Twist
-发送方：quadruped_cmd_vel_gate
-接收方：Nav2 collision_monitor
-说明：应用 crossing/speed_scale，并验证速度、决策和安全监督心跳后的命令。
-互锁：/safety/stop 或 /crossing/execution_active 为 true 时始终为零。
-超时：command_timeout 默认 0.5 秒；decision_timeout 默认 0.7 秒。
-
-4. /cmd_vel
-
-类型：geometry_msgs/msg/Twist
-发送方：collision_monitor，必须保持为唯一最终发布者
-接收方：机器狗 SDK 适配器、底盘速度控制器或自研运动控制器
-字段：linear.x 为前进速度，angular.z 为偏航角速度；当前 Nav2 配置不使用侧向速度。
-安全要求：SDK 接收端还必须实现独立通信超时和急停，不能无限保持最后一帧。
-
-5. Collision Monitor 状态
-
-名称：/collision_monitor_state
-发送方：collision_monitor
-用途：报告当前碰撞监控动作状态。具体消息类型由安装的 Nav2 Jazzy 版本决定，
-      使用 ros2 topic type /collision_monitor_state 查询。
-
-名称：/collision_monitor_polygon
-发送方：collision_monitor
-用途：显示 FootprintApproach 预测区域，供 RViz 调试。
-
-
-六、统一安全与故障注入接口
---------------------------
-
-1. 标准状态输入
-
-  /imu/data       sensor_msgs/msg/Imu
-  /joint_states   sensor_msgs/msg/JointState
-  /battery_state  sensor_msgs/msg/BatteryState
-  /hardware/status quadruped_interfaces/msg/HardwareStatus
-
-发送方：未来 IMU 驱动、状态估计器、joint_state_broadcaster、厂商 SDK 或 BMS 适配器。
-接收方：system_safety_supervisor。未选硬件阶段 require_* 默认 false；某来源一旦出现，
-非法值或超过 sensor_timeout 不再更新仍会触发停车。真机阶段必须逐项启用 require_*。
-minimum_battery_voltage 在选型前为 0.0，仅检查非有限电压；确定电池串数后必须改为实测
-欠压保护阈值，且底层 BMS/驱动保护应早于 ROS 软件动作。
-
-HardwareStatus 字段：header、state(DISCONNECTED/STANDBY/ENABLED/FAULT)、command_ready、
-actuators_enabled、fault_code、fault_text。真机 Adapter 必须周期发布；设置
-require_hardware_status:=true 后，缺失、断流、FAULT、非零故障码或 command_ready=false
-都会进入 /safety/stop。模拟节点只发布 STANDBY，永远不会声称执行器已使能。
-
-2. 急停输入与测试服务
-
-名称：/safety/emergency_stop
-类型：std_msgs/msg/Bool
-发送方：硬件急停状态适配器或上位安全控制器
-接收方：system_safety_supervisor
-含义：true 无条件请求软件停车；false 只释放本项原因，其他故障仍可保持 STOP。
-
-名称：/safety/set_emergency_stop
-类型：std_srvs/srv/SetBool
-服务端：system_safety_supervisor
-客户端：fault_injector 或人工台架测试
-限制：只是软件故障注入入口，不能代替串入驱动使能/供电回路的物理急停。
-
-3. 统一停车输出
-
-名称：/safety/stop
-类型：std_msgs/msg/Bool
-发送方：system_safety_supervisor
-接收方：quadruped_cmd_vel_gate、crossing_action_coordinator
-QoS：Reliable、Transient Local、深度 1，并以 20 Hz 持续发布。
-含义：true 时速度门输出零且活动越障 Goal 被取消。速度门启动时内部默认值为 true，收到
-安全监督器明确的 false 之前不放行速度。
-
-名称：/safety/state
-类型：std_msgs/msg/String
-格式：OK，或 `STOP:reason1,reason2`。原因包括 emergency_stop、attitude_limit，以及
-IMU、关节、电池的 invalid、stale 或 missing 状态。
-
-诊断：/diagnostics 中状态名为 quadruped/system_safety。
-
-名称：/navigation/healthy
-类型：std_msgs/msg/Bool（Reliable + Transient Local）
-发送方：navigation_health_monitor
-接收方：crossing_action_coordinator
-含义：false 表示 scan、odom、map->base_link TF、里程计协方差或突跳检查至少一项失败；
-      默认禁止新越障 Goal，并取消活动 Goal 后交给 Nav2/任务层重规划。
-
-4. 模拟 SDK 故障入口
-
-名称：/testing/mock_controller_fault
-类型：std_msgs/msg/String
-发送方：quadruped_tools/fault_injector 或人工测试
-接收方：mock_sdk_adapter
-值：none、fail、silence、invalid_progress。仅 mock_hardware:=true 时有效，禁止把该接口
-实现到真实电机驱动中。
-
-
-七、SLAM、地图和 TF 接口
-------------------------
-
-1. 地图
-
-名称：/map
-类型：nav_msgs/msg/OccupancyGrid
-发送方：SLAM Toolbox
-接收方：Nav2 global_costmap、RViz、地图保存工具
-QoS：地图通常使用 Transient Local，使后启动的节点也能收到最后一张地图。
-
-2. TF 主链
-
-map -> odom
-  发布方：SLAM Toolbox。
-  含义：校正长期里程计漂移，将 odom 坐标系放入地图。
-
-odom -> base_link
-  发布方：机器狗状态估计器。
-  含义：短时间连续的机器人运动估计。
-
-base_link -> lidar_link
-base_link -> camera_link -> camera_optical_frame
-base_link -> imu_link
-base_link -> 四条腿各级 link
-  发布方：robot_state_publisher，其中固定关节走 /tf_static，运动关节走 /tf。
-
-未定型真机的建议外参起点（仅用于机械预留，不得当作标定结果）：
-  lidar_link：x=0～+0.08 m，y≈0，z=+0.10～+0.15 m，roll/pitch/yaw≈0。
-  camera_link：x=+0.28～+0.32 m，y≈0，z=0～+0.06 m，光轴向下俯 10°～15°。
-最终值必须按实际光心/扫描中心测量；camera_optical_frame 仍按 ROS 光学坐标约定建立。
-当前通用 URDF 名义值：lidar_link=(0.04, 0, 0.12) m；camera_link=(0.29, 0, 0.03) m，
-pitch=+12°（使相机 +x 光轴向下俯）。真机替换这些固定关节后，通信话题无需改变。
-
-ROS 话题：
-  /tf         tf2_msgs/msg/TFMessage，动态变换
-  /tf_static  tf2_msgs/msg/TFMessage，静态变换，Transient Local
-
-要求：任何传感器 header.stamp 对应时刻都必须能查询到传感器 frame 到 base_link 的 TF。
-
-3. Nav2 激活服务
-
-名称：/lifecycle_manager_navigation/manage_nodes
-类型：nav2_msgs/srv/ManageLifecycleNodes
-服务端：lifecycle_manager_navigation
-客户端：nav2_readiness_monitor
-使用命令：STARTUP=0。
-调用条件：/scan 和 /odom 消息年龄均不超过 sensor_timeout，map -> base_link TF 存在，
-          且服务已就绪。
-
-
-八、ROS 2 Action 接口
---------------------
-
-1. 真机越障 Action
-
-名称：/crossing/traverse_obstacle
-类型：quadruped_interfaces/action/TraverseObstacle
-服务端：crossing_action_server
-客户端：crossing_action_coordinator、比赛 FSM 适配器、人工调试程序
-同一时刻：只允许一个活动 Goal。
-
-Goal：
-  mode               uint8，1=STEP，2=CLIMB，3=LOW_PROFILE
-  obstacle_height    float32，米，必须非负
-  obstacle_distance  float32，米，必须非负
-  speed_scale        float32，(0, 1]
-  timeout            float32，秒，默认配置允许 0.1～60
-
-Feedback：
-  phase              0=ACCEPTED，1=PREPARING，2=EXECUTING，
-                     3=VERIFYING_CONTACT，4=RECOVERING
-  progress           0.0～1.0
-  elapsed            秒
-  contact_verified   足端/姿态闭环是否已经确认
-  message            控制器状态说明
-
-Result：success、error_code、message、duration。error_code：0=OK、1=INVALID_GOAL、
-2=CONTROLLER_TIMEOUT、3=EXECUTION_FAILED、4=CANCELED。非法 Goal 在接受前直接拒绝。
-
-2. Action 网关与真机控制器合同
-
-名称：/crossing/execution_command
-类型：quadruped_interfaces/msg/CrossingCommand
-发送方：crossing_action_server
-接收方：机器狗 SDK、落脚点规划器或 MPC/WBC/步态控制器
-字段：command（1=START、2=CANCEL）、goal_id、mode、obstacle_height、
-      obstacle_distance、speed_scale、timeout。
-
-名称：/crossing/execution_status
-类型：quadruped_interfaces/msg/CrossingStatus
-发送方：机器狗 SDK 或全身控制器
-接收方：crossing_action_server
-字段：goal_id、state（0=RUNNING、1=SUCCEEDED、2=FAILED、3=CANCELED）、phase、
-      progress、contact_verified、message。
-要求：goal_id 必须原样返回；运行期间应以高于 1/controller_status_timeout 的频率更新。
-默认超过 1.5 秒没有同 UUID 状态即取消后端命令并中止 Goal。
-严谨性：RUNNING/SUCCEEDED 进度不得倒退；state、phase、progress 非法的状态不会刷新心跳。
-默认 SUCCEEDED 还要求 progress>=0.95 且 contact_verified=true，否则返回 EXECUTION_FAILED。
-所有 UUID、状态枚举、阶段、进度和心跳验证的原因均已写在 Action 网关源码注释中；硬件
-SDK 适配器必须遵守这些合同，不能仅发布无 UUID 的字符串表示完成。
-
-兼容名称：/crossing/action_request，std_msgs/msg/String。它只给旧 SDK 显示 STEP/CLIMB/
-LOW_PROFILE，不携带结果，不能作为新控制器的完成判据。
-
-3. Nav2 Action
-
-项目直接使用的 Action：
-
-名称：/navigate_to_pose
-类型：nav2_msgs/action/NavigateToPose
-服务端：bt_navigator
-客户端：course_waypoint_navigator、RViz Nav2 Goal 工具或用户程序
-目标字段：goal.pose.header.frame_id=map，位置 x/y，四元数方向。
-结果：比赛路点节点根据 GoalStatus 判断到达或失败，并发送比赛提示/失败事件。
-
-Nav2 标准节点还会提供以下常用 Action，名称以运行时 action list 为准：
-
-  /navigate_through_poses       nav2_msgs/action/NavigateThroughPoses
-  /follow_waypoints             nav2_msgs/action/FollowWaypoints
-  /compute_path_to_pose         nav2_msgs/action/ComputePathToPose
-  /compute_path_through_poses   nav2_msgs/action/ComputePathThroughPoses
-  /follow_path                  nav2_msgs/action/FollowPath
-  /smooth_path                  nav2_msgs/action/SmoothPath
-  /spin                         nav2_msgs/action/Spin
-  /backup                       nav2_msgs/action/BackUp
-  /drive_on_heading             nav2_msgs/action/DriveOnHeading
-  /wait                         nav2_msgs/action/Wait
-
-这些 Action 主要由 bt_navigator 内部编排；外部通常只需要调用 navigate_to_pose。
-
-
-九、比赛模式通信
-----------------
-
-输入到 competition_obstacle_manager：
-
-/competition/obstacle_hint
-  类型：std_msgs/msg/String
-  发送方：course_waypoint_navigator 或障碍识别/裁判适配器
-  内容：straight_poles、gravel_wood_pit、height_bar、slope、bridge_a、bridge_b、
-        t_stairs、high_wall。
-
-/competition/obstacle_complete
-  类型：std_msgs/msg/Bool
-  true 表示请求完成当前障碍；FSM 仍会检查接触、距离和台阶条件。
-
-/competition/obstacle_failed
-  类型：std_msgs/msg/Bool
-  true 表示当前障碍失败并进入 RETRY_REQUIRED。
-
-/competition/retry
-  类型：std_msgs/msg/Bool
-  true 表示从 RETRY_REQUIRED 重新开始当前障碍。
-
-/competition/returned_to_start
-  类型：std_msgs/msg/Bool
-  全部障碍完成后 true 表示返回启动区，可触发返回奖励。
-
-/competition/stair_levels_touched
-  类型：std_msgs/msg/Int32
-  内容：已经有效接触的不同台阶顶面数量，FSM 只保留历史最大值。
-
-/competition/stair_sides_completed
-  类型：std_msgs/msg/Int32
-  0=未完成，1=只完成上或下一个方向，2=上下两个方向都完成。
-
-/odom 与 /foot_contacts
-  用于有效行走距离和足端接触规则验证，定义见前文。
-
-competition_obstacle_manager 输出：
-
-/competition/current_obstacle  std_msgs/msg/String
-  当前障碍名称；没有活动障碍时根据剩余顺序给出下一个，全部完成后为 none。
-
-/competition/state             std_msgs/msg/String
-  SEARCH、EXECUTE、RETRY_REQUIRED、RETURN、FINISHED 或 TIMEOUT。
-
-/competition/score             std_msgs/msg/Int32
-  当前累计分数。
-
-/competition/time_remaining    std_msgs/msg/Float32
-  剩余比赛时间，单位秒，默认总时长 210 秒。
-
-/crossing/mode、/crossing/action、/crossing/speed_scale
-  复用统一越障输出接口，使 SDK 适配器无需区分普通模式和比赛模式。
-
-course_waypoint_navigator 通信闭环：
-
-  /competition/current_obstacle
-      -> 查询 course_waypoints.yaml
-      -> /navigate_to_pose Action
-      -> 成功：/competition/obstacle_hint
-      -> 失败：/competition/obstacle_failed
-
-
-十、ros2_control 与关节接口
----------------------------
-
-joint_state_broadcaster：
-
-名称：/joint_states
-类型：sensor_msgs/msg/JointState
-发送方：joint_state_broadcaster
-接收方：robot_state_publisher、RViz、状态记录节点
-字段：12 个髋、腿、膝关节的 name、position、velocity。
-
-leg_controller：
-
-控制器类型：joint_trajectory_controller/JointTrajectoryController
-命令接口：position
-状态接口：position、velocity
-关节数量：12
-
-常用 Topic：
-  /leg_controller/joint_trajectory
-  类型：trajectory_msgs/msg/JointTrajectory
-
-常用 Action：
-  /leg_controller/follow_joint_trajectory
-  类型：control_msgs/action/FollowJointTrajectory
-
-控制器管理服务位于 /controller_manager 命名空间，例如 list_controllers、
-load_controller、configure_controller、switch_controller。实际名称和类型使用
-ros2 service list -t | grep controller_manager 查询。
-
-注意：当前 URDF 使用 mock_components/GenericSystem，仅用于调试。真机 SDK 适配器可以：
-
-方案 A：实现 ros2_control hardware plugin，让 leg_controller 直接控制硬件。
-方案 B：订阅 /cmd_vel、/crossing/mode、/crossing/action，自行调用厂商 SDK。
-方案 C：由自研 MPC/WBC 接收高层指令，再发布关节轨迹或力矩到硬件层。
-
-无论使用哪种方案，都不得绕过急停、姿态限制、关节限位和通信看门狗。
-
-
-十一、QoS、时间和命名约定
--------------------------
-
-1. 高频传感器输入使用 qos_profile_sensor_data：Best Effort、Volatile，避免网络抖动时
-   积压旧图像或旧点云。
-2. 普通状态和决策话题当前使用深度 10 的默认 Reliable QoS。
-3. 地图和静态 TF 使用 Transient Local，保证晚加入节点能收到最后状态。
-4. 图像和点云节点只缓存最新一帧，并分别限制为默认 8 Hz 和 10 Hz 处理。
-5. 所有距离单位为米，角度在配置和消息中使用弧度，时间戳使用 ROS Clock。
-6. 全局接口使用以 / 开头的绝对名称；Nav2 内部 remap 最终仍解析到根命名空间。
-7. 特殊硬件尽量使用启动参数或 remap，不直接修改核心默认名称。
-8. 同一个话题只能有明确的职责所有者，尤其 /cmd_vel 必须只有 Collision Monitor 发布。
-9. 算法内部只保留 /scan、/odom；设备 profile 和覆盖参数集中在 slam.launch.py。
-10. profile 不改变消息类型、单位、QoS 或 TF，只选择来源名称；显式非空参数优先。
-11. camera_topic、point_cloud_topic 为空时由感知节点自动选择 ROS 常用候选源。
-
-多电脑 DDS 通信约定：
-
-1. 开发电脑与 RK3588 使用相同 ROS 2 Jazzy、ROS_DOMAIN_ID 和 RMW_IMPLEMENTATION。
-2. ROS_LOCALHOST_ONLY 必须为 0；局域网应允许 DDS 使用的 UDP 和组播流量。
-3. 所有电脑通过 NTP、chrony 或同一局域网时间源同步，避免传感器时间戳与 TF 不匹配。
-4. 推荐同一路由器或有线局域网；校园访客网络、VPN 和严格防火墙可能阻断节点发现。
-5. 先用 ros2 node list 和 ros2 topic list -t 验证发现，再检查 /scan、/odom 的频率。
-6. 单机和多机的 Topic、Action、Service、TF 名称完全相同，不因主机名改变接口。
-
-
-十二、失效与超时通信
---------------------
-
-视觉超时：
-  vision_timeout 默认 0.6 秒。超时后视觉辅助自动失效，不阻塞纯点云越障。
-
-地形超时：
-  sensor_timeout 默认 0.7 秒。没有新 /terrain/features 时发布 STOP。
-
-速度命令超时：
-  command_timeout 默认 0.5 秒。没有新 /cmd_vel_smoothed 时速度门输出零 Twist。
-
-决策心跳超时：
-  decision_timeout 默认 0.7 秒。没有新 /crossing/speed_scale 时输出零 Twist。
-
-Nav2 激活输入超时：
-  readiness sensor_timeout 默认 1.0 秒。/scan 或 /odom 不新鲜时不激活 Nav2。
-
-相机来源切换：
-  source_switch_timeout 默认 2.0 秒。活动 RGB 或点云源失联后才允许备用话题接管。
-
-Collision Monitor 数据超时：
-  source_timeout 默认 1.0 秒。碰撞数据源超时按 Nav2 安全策略处理。
-
-安全状态输入超时：
-  system_safety_supervisor sensor_timeout 默认 1.0 秒。已出现或 require_* 为 true 的 IMU、
-  JointState、BatteryState 超时后发布 /safety/stop=true。
-
-安全监督输出超时：
-  cmd_vel_gate 和 crossing_action_coordinator 的 safety_timeout 默认 0.5 秒。超过时间没有
-  新 `/safety/stop` 时，速度门归零且协调器取消活动 Goal。
-
-越障 Action 地形输入超时：
-  crossing_action_coordinator observation_timeout 默认 0.7 秒。过期地形不会触发新 Goal。
-
-
-十三、接入厂商 SDK 的最小合同
------------------------------
-
-本节只是上层 ROS 2 与真机之间的最小软件边界，不代表整机接口已经完成。机械、电气、
-电源、执行器、实时总线、状态估计、步态/MPC/WBC、硬件急停和故障管理仍需分别设计，
-并最终由 SDK 适配器或 ros2_control hardware plugin 汇总到以下 ROS 2 合同。
-
-SDK 适配器至少订阅：
-
-  /cmd_vel                 geometry_msgs/msg/Twist
-  /crossing/mode           std_msgs/msg/String
-  /crossing/execution_command  quadruped_interfaces/msg/CrossingCommand
-
-SDK 或状态估计器至少发布：
-
-  /odom                    nav_msgs/msg/Odometry
-  odom -> base_link        TF
-  /joint_states            sensor_msgs/msg/JointState，若不由 ros2_control 发布
-  /crossing/execution_status quadruped_interfaces/msg/CrossingStatus
-
-比赛功能还需发布：
-
-  /foot_contacts
-  /competition/obstacle_complete
-  /competition/obstacle_failed
-  台阶进度及返回启动区事件
-
-建议的 SDK 行为：
-
-1. WALK + NAVIGATE：执行 /cmd_vel 的普通步态。
-2. WALK + VERIFY_VISUAL_OBSTACLE_WITH_DEPTH：按已缩放 /cmd_vel 低速接近。
-3. STEP：进入台阶跨越状态机，并在动作完成前限制普通速度输入。
-4. CLIMB：进入攀爬/跳跃控制器，必须有姿态和接触保护。
-5. STOP：立即停止推进并保持稳定站立。
-6. ROS 命令超过驱动侧超时时间：无条件停止，不能保持最后速度。
-
-安全监督器已经订阅、但仍需由真机驱动提供的 ROS 2 标准接口：
-
-  /imu/data              sensor_msgs/msg/Imu          原始或滤波后的机身 IMU
-  /joint_states          sensor_msgs/msg/JointState   12 关节位置、速度和力矩
-  /battery_state         sensor_msgs/msg/BatteryState 电压、电流、电量和健康状态
-  /diagnostics           diagnostic_msgs/msg/DiagnosticArray 驱动、传感器和温度故障
-  /odom                  nav_msgs/msg/Odometry        融合后的机身里程计
-  odom -> base_link      TF                            连续局部位姿
-
-STEP/CLIMB/LOW_PROFILE 已使用带反馈、取消、结果和超时的 TraverseObstacle Action。
-厂商适配器必须实现 execution_command/status 合同；`/crossing/action` 只保留为上层建议，
-`/crossing/action_request` 只用于旧接口兼容。站起、趴下和普通步态切换若以后新增 Action，
-应沿用相同 UUID、心跳、取消和终态原则，而不是继续扩展 String 命令。
-
-
-十四、通信调试命令
-------------------
-
-检查 ROS 环境和包发现：
-  source ~/.bashrc
-  ros2 pkg prefix slam
-  printenv AMENT_PREFIX_PATH
-
-`ros2 pkg prefix slam` 必须指向 `~/wakula/install/slam`。若只显示 `/opt/ros/jazzy` 搜索
-路径，当前终端没有 source Wakula 工作空间，后续 Topic/Node 调试也不会看到项目节点。
-
-查看发送方和接收方：
-  ros2 topic info /cmd_vel --verbose
-  ros2 topic info /terrain/features --verbose
-  ros2 topic info /perception/obstacle_points --verbose
-
-查看频率：
-  ros2 topic hz /scan
-  ros2 topic hz /odom
-  ros2 topic hz /vision/obstacle_evidence
-  ros2 topic hz /terrain/features
-
-查看数据：
-  ros2 topic echo /vision/obstacle_evidence
-  ros2 topic echo /terrain/features
-  ros2 topic echo /vision/obstacle_stamped
-  ros2 topic echo /terrain/features_stamped
-  ros2 topic echo /perception/fused_obstacle
-  ros2 topic echo /crossing/action
-  ros2 topic echo /crossing/speed_scale
-  ros2 topic echo /crossing/execution_active
-  ros2 topic echo /crossing/last_result
-  ros2 topic echo /safety/stop
-  ros2 topic echo /safety/state
-  ros2 topic echo /hardware/status
-  ros2 topic echo /navigation/healthy
-
-查看 TF：
-  ros2 run tf2_ros tf2_echo map base_link
-  ros2 run tf2_ros tf2_echo odom base_link
-  ros2 run tf2_ros tf2_echo base_link camera_link
-
-查看 Nav2 生命周期：
-  ros2 lifecycle get /controller_server
-  ros2 service type /lifecycle_manager_navigation/manage_nodes
-
-查看 Action：
-  ros2 action info /navigate_to_pose
-  ros2 action info /leg_controller/follow_joint_trajectory
-
-故障注入（仅台架/模拟后端）：
-  ros2 run quadruped_tools fault_injector --estop on
-  ros2 run quadruped_tools fault_injector --estop off
-  ros2 run quadruped_tools fault_injector --controller-fault silence
-  ros2 run quadruped_tools fault_injector --controller-fault none
-
-检查 /cmd_vel 唯一发布者：
-  ros2 topic info /cmd_vel --verbose
-
-
-十五、文档同步约定
-------------------
-
-以后每次修改 Wakula 项目时，同时检查并按需更新以下四个根目录文件：
-
-  README.md        面向使用者的文档导航、当前状态、待办、安装和总体架构说明
-  instruction.txt 面向开发者的模块作用、算法原理和调试步骤
-  connect.txt     面向集成工作的节点、话题、类型、字段、QoS 和超时合同
-  quickstart.txt  面向接手开发者的启动命令、当前进度、问题和后续路线
-
-新增、删除或重命名任何 Topic、Action、Service、TF、节点、参数或字段协议时，必须同步
-更新 connect.txt；改变算法或模块职责时更新 instruction.txt；改变安装、启动、目录结构
-或主要功能时更新 README.md；改变完成进度、限制或后续计划时更新 quickstart.txt。
-完成代码修改后应运行构建和测试，再直接提交并推送 main，禁止强制推送。
+当前没有 TraverseObstacle Action、CrossingCommand/CrossingStatus、hardware/status、
+joint trajectory、ros2_control controller、模拟 SDK、比赛状态机或故障注入控制接口。
+未来真机模块应单独设计，不能让感知话题直接驱动关节。

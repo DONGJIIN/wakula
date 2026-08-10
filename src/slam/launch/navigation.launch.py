@@ -28,7 +28,11 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     log_level = LaunchConfiguration("log_level")
     tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
-    cmd_remaps = tf_remaps + [("cmd_vel", "cmd_vel_nav")]
+    controller_remaps = tf_remaps + [("cmd_vel", "/cmd_vel_nav")]
+    smoother_remaps = tf_remaps + [
+        ("cmd_vel", "/cmd_vel_nav"),
+        ("cmd_vel_smoothed", "/cmd_vel_smoothed"),
+    ]
     lifecycle_nodes = [
         "controller_server",
         "smoother_server",
@@ -60,7 +64,7 @@ def generate_launch_description():
             "controller_server",
             configured_params,
             log_level,
-            cmd_remaps,
+            controller_remaps,
         ),
         nav2_node(
             "nav2_smoother",
@@ -81,14 +85,14 @@ def generate_launch_description():
             "behavior_server",
             configured_params,
             log_level,
-            cmd_remaps,
+            controller_remaps,
         ),
         nav2_node(
             "nav2_velocity_smoother",
             "velocity_smoother",
             configured_params,
             log_level,
-            cmd_remaps,
+            smoother_remaps,
         ),
         nav2_node(
             "nav2_collision_monitor",

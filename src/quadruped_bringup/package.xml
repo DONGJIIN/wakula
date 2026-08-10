@@ -6,13 +6,9 @@
   <maintainer email="developer@example.com">Quadruped Developer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
-  <exec_depend>controller_manager</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>quadruped_control</exec_depend>
   <exec_depend>quadruped_description</exec_depend>
-  <exec_depend>quadruped_hardware</exec_depend>
-  <exec_depend>quadruped_control</exec_depend>
   <exec_depend>quadruped_perception</exec_depend>
   <exec_depend>quadruped_planning</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>

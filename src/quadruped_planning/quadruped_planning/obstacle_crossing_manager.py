@@ -2,7 +2,8 @@
 
 职责边界：本节点只发布模式、动作意图和速度缩放，不生成腿部轨迹，也不宣称越障已经
 完成。几何点云是动作等级的主证据；单目 OpenCV 没有可靠尺度，只能在 WALK 时请求
-减速复核。真正的执行与成功判定由 ``crossing_action_server`` 和底层控制器完成。
+减速或停车复核。项目当前没有腿部越障执行器，因此 STEP/CLIMB 只作为感知分类发布，
+速度门会保持停车；真机控制系统完成后再单独接入执行层。
 """
 
 from math import isfinite
@@ -58,7 +59,7 @@ class ConservativeDecisionFilter:
             return self.current
         if candidate_level > current_level:
             # 紧急 STOP 不允许防抖延迟；STEP/CLIMB 则要求短暂连续几何证据，
-            # 防止深度飞点在单帧内触发真实抬腿动作。
+            # 防止深度飞点在单帧内触发错误地形分类。
             if candidate[0] == "STOP" or self.hazard_frames == 1:
                 self.current = candidate
                 self.pending_mode = None
@@ -142,9 +143,9 @@ def select_terrain_decision(
     if obstacle_height >= stop_threshold or absolute_slope >= max_slope * 1.5:
         return "STOP", "REPLAN_OR_REQUEST_FOOTSTEPS", 0.0
     if obstacle_height >= climb_threshold or absolute_slope >= max_slope:
-        return "CLIMB", "CROSS_CLIMB", 0.20
+        return "CLIMB", "STOP_FOR_CLIMB_OR_REPLAN", 0.0
     if obstacle_height >= step_threshold or roughness >= max_roughness:
-        return "STEP", "CROSS_STEP", 0.45
+        return "STEP", "STOP_FOR_STEP", 0.0
     return "WALK", "NAVIGATE", 1.0
 
 
@@ -191,17 +192,17 @@ def apply_geometry_classification(
 ) -> Decision:
     """在高度判定之上加入显式几何危险规则。
 
-    坑洞没有可安全踩踏的默认动作，必须停车重规划；墙面沿用高度等级；横杆请求低姿态
-    Action；立柱交给 Nav2 绕行并限速。未知类别不改变旧行为，便于回放旧 rosbag。
+    坑洞、墙面、横杆在没有真机运动控制器时一律停车；立柱交给 Nav2 绕行并限速。
+    未知类别不改变旧行为，便于回放旧 rosbag。
     """
     if obstacle_type == GEOMETRY_PIT and pit_depth > 0.0:
         return "STOP", "REPLAN_AROUND_PIT", 0.0
     if obstacle_type == GEOMETRY_BAR:
-        return "CLIMB", "CROSS_LOW_PROFILE", min(decision[2], 0.20)
+        return "STOP", "STOP_FOR_LOW_BAR", 0.0
     if obstacle_type == GEOMETRY_POLE and decision[0] == "WALK":
         return "WALK", "NAVIGATE_AROUND_POLE", min(decision[2], 0.35)
-    if obstacle_type == GEOMETRY_WALL and decision[0] == "STEP":
-        return "CLIMB", "CROSS_CLIMB", 0.20
+    if obstacle_type == GEOMETRY_WALL:
+        return "STOP", "REPLAN_AROUND_WALL", 0.0
     return decision
 
 

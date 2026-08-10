@@ -21,7 +21,6 @@ setup(
         "console_scripts": [
             "perception_bag_evaluator = "
             "quadruped_tools.perception_bag_evaluator:main",
-            "fault_injector = quadruped_tools.fault_injector:main",
         ],
     },
 )

@@ -1,186 +1,70 @@
-"""Start the shared robot, perception, planning, and safety pipeline."""
+"""Start only the hardware-independent perception and navigation helpers."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import (
-    Command,
-    FindExecutable,
-    LaunchConfiguration,
-    PathJoinSubstitution,
-    PythonExpression,
-)
+from launch.conditions import IfCondition
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def package_file(package: str, folder: str, filename: str):
-    """Build a package share path without repeating launch boilerplate."""
+    """Build an installed package resource path."""
     return PathJoinSubstitution([FindPackageShare(package), folder, filename])
 
 
 def generate_launch_description():
+    """Declare the sensor-only stack shared by SLAM and Nav2."""
     use_sim_time = LaunchConfiguration("use_sim_time")
-    use_control = LaunchConfiguration("use_control")
-    simulation = LaunchConfiguration("simulation")
-    basic_control = LaunchConfiguration("basic_control")
     vision = LaunchConfiguration("vision")
+    robot_model = LaunchConfiguration("robot_model")
     camera_topic = LaunchConfiguration("camera_topic")
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
     terrain_params_file = LaunchConfiguration("terrain_params_file")
     vision_params_file = LaunchConfiguration("vision_params_file")
     crossing_params_file = LaunchConfiguration("crossing_params_file")
-    hardware_params_file = LaunchConfiguration("hardware_params_file")
-    competition = LaunchConfiguration("competition")
-    auto_crossing = LaunchConfiguration("auto_crossing")
-    safety_supervisor = LaunchConfiguration("safety_supervisor")
-    mock_hardware = LaunchConfiguration("mock_hardware")
 
     description_file = package_file(
         "quadruped_description", "urdf", "quadruped.urdf.xacro"
     )
-    controllers_file = package_file(
-        "quadruped_control", "config", "controllers.yaml"
-    )
-    basic_control_file = package_file(
-        "quadruped_control", "config", "basic_control.yaml"
-    )
-    default_terrain_file = package_file(
-        "quadruped_perception", "config", "terrain.yaml"
-    )
-    default_vision_file = package_file(
-        "quadruped_perception", "config", "vision.yaml"
-    )
-    default_crossing_file = package_file(
-        "quadruped_planning", "config", "crossing.yaml"
-    )
-    competition_file = package_file(
-        "quadruped_planning", "config", "competition.yaml"
-    )
-    waypoint_file = package_file(
-        "quadruped_planning", "config", "course_waypoints.yaml"
-    )
-    default_hardware_file = package_file(
-        "quadruped_hardware", "config", "hardware.yaml"
-    )
     robot_description = ParameterValue(
-        Command(
-            [
-                FindExecutable(name="xacro"),
-                " ",
-                description_file,
-                " simulation:=",
-                simulation,
-                " controllers_file:=",
-                controllers_file,
-            ]
-        ),
+        Command([FindExecutable(name="xacro"), " ", description_file]),
         value_type=str,
     )
-
     common_time = {"use_sim_time": use_sim_time}
+
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("use_control", default_value="true"),
-            DeclareLaunchArgument("simulation", default_value="false"),
-            DeclareLaunchArgument("basic_control", default_value="false"),
             DeclareLaunchArgument("vision", default_value="true"),
+            DeclareLaunchArgument("robot_model", default_value="true"),
+            DeclareLaunchArgument("camera_topic", default_value=""),
+            DeclareLaunchArgument("point_cloud_topic", default_value=""),
             DeclareLaunchArgument(
-                "camera_topic",
-                default_value="",
-                description="RGB topic override; empty auto-detects common defaults.",
+                "terrain_params_file",
+                default_value=package_file(
+                    "quadruped_perception", "config", "terrain.yaml"
+                ),
             ),
             DeclareLaunchArgument(
-                "point_cloud_topic",
-                default_value="",
-                description="Point-cloud override; empty auto-detects common defaults.",
+                "vision_params_file",
+                default_value=package_file(
+                    "quadruped_perception", "config", "vision.yaml"
+                ),
             ),
             DeclareLaunchArgument(
-                "terrain_params_file", default_value=default_terrain_file
-            ),
-            DeclareLaunchArgument(
-                "vision_params_file", default_value=default_vision_file
-            ),
-            DeclareLaunchArgument(
-                "crossing_params_file", default_value=default_crossing_file
-            ),
-            DeclareLaunchArgument("competition", default_value="false"),
-            DeclareLaunchArgument("auto_crossing", default_value="true"),
-            DeclareLaunchArgument("safety_supervisor", default_value="true"),
-            DeclareLaunchArgument("mock_hardware", default_value="false"),
-            DeclareLaunchArgument(
-                "hardware_params_file", default_value=default_hardware_file
+                "crossing_params_file",
+                default_value=package_file(
+                    "quadruped_planning", "config", "crossing.yaml"
+                ),
             ),
             Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
                 output="screen",
-                parameters=[
-                    {
-                        "robot_description": robot_description,
-                        "use_sim_time": use_sim_time,
-                    }
-                ],
-            ),
-            Node(
-                package="controller_manager",
-                executable="ros2_control_node",
-                output="screen",
-                condition=IfCondition(
-                    PythonExpression(
-                        ["'", use_control, "' == 'true' and '", simulation, "' != 'true'"]
-                    )
-                ),
-                parameters=[
-                    {"robot_description": robot_description},
-                    controllers_file,
-                    common_time,
-                ],
-            ),
-            Node(
-                package="controller_manager",
-                executable="spawner",
-                arguments=[
-                    "joint_state_broadcaster",
-                    "--controller-manager",
-                    "/controller_manager",
-                ],
-                condition=IfCondition(
-                    PythonExpression(
-                        ["'", use_control, "' == 'true' and '", simulation, "' != 'true'"]
-                    )
-                ),
-            ),
-            Node(
-                package="controller_manager",
-                executable="spawner",
-                arguments=[
-                    "leg_controller",
-                    "--controller-manager",
-                    "/controller_manager",
-                ],
-                condition=IfCondition(
-                    PythonExpression(
-                        ["'", use_control, "' == 'true' and '", simulation, "' != 'true'"]
-                    )
-                ),
-            ),
-            Node(
-                package="quadruped_control",
-                executable="basic_motion_controller",
-                output="screen",
-                parameters=[
-                    basic_control_file,
-                    {
-                        "allow_open_loop_crossing_success": ParameterValue(
-                            simulation, value_type=bool
-                        )
-                    },
-                    common_time,
-                ],
-                condition=IfCondition(basic_control),
+                parameters=[{"robot_description": robot_description}, common_time],
+                condition=IfCondition(robot_model),
             ),
             Node(
                 package="quadruped_perception",
@@ -215,55 +99,6 @@ def generate_launch_description():
                 executable="obstacle_crossing_manager",
                 output="screen",
                 parameters=[crossing_params_file, common_time],
-                condition=UnlessCondition(competition),
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="crossing_action_server",
-                output="screen",
-                parameters=[crossing_params_file, common_time],
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="crossing_action_coordinator",
-                output="screen",
-                parameters=[crossing_params_file, common_time],
-                condition=IfCondition(auto_crossing),
-            ),
-            Node(
-                package="quadruped_hardware",
-                executable="system_safety_supervisor",
-                output="screen",
-                parameters=[hardware_params_file, common_time],
-                condition=IfCondition(safety_supervisor),
-            ),
-            Node(
-                package="quadruped_hardware",
-                executable="mock_sdk_adapter",
-                output="screen",
-                parameters=[hardware_params_file, common_time],
-                condition=IfCondition(mock_hardware),
-            ),
-            Node(
-                package="quadruped_hardware",
-                executable="mock_hardware_state",
-                output="screen",
-                parameters=[hardware_params_file, common_time],
-                condition=IfCondition(mock_hardware),
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="competition_obstacle_manager",
-                output="screen",
-                parameters=[competition_file, common_time],
-                condition=IfCondition(competition),
-            ),
-            Node(
-                package="quadruped_planning",
-                executable="course_waypoint_navigator",
-                output="screen",
-                parameters=[waypoint_file, common_time],
-                condition=IfCondition(competition),
             ),
             Node(
                 package="quadruped_planning",

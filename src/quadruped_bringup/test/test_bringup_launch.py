@@ -13,7 +13,7 @@ def test_bringup_launch_description_is_constructible():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
-    assert len(description.entities) >= 10
+    assert len(description.entities) >= 9
     arguments = {
         entity.name
         for entity in description.entities
@@ -23,10 +23,7 @@ def test_bringup_launch_description_is_constructible():
         "vision_params_file",
         "terrain_params_file",
         "crossing_params_file",
-        "hardware_params_file",
-        "auto_crossing",
-        "safety_supervisor",
-        "mock_hardware",
-        "simulation",
-        "basic_control",
+        "robot_model",
+        "camera_topic",
+        "point_cloud_topic",
     } <= arguments

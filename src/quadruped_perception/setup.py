@@ -17,7 +17,7 @@ setup(
     zip_safe=True,
     maintainer="Quadruped Developer",
     maintainer_email="developer@example.com",
-    description="Terrain perception nodes for autonomous obstacle crossing.",
+    description="Lightweight camera and point-cloud terrain perception.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
