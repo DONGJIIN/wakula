@@ -647,6 +647,9 @@ OpenCV：
 含义或 Action 状态机，必须同步 README.md、instruction.txt、connect.txt、quickstart.txt
 以及相应单元测试。
 
+查看完整节点职责先读 connect.txt 第一节；文件尾部补充了 RViz、模型调试关节滑块和
+ros2_control spawner。它们是可视化/装载辅助进程，不属于自主导航与越障决策闭环。
+
 
 八、目前未完成的部分
 --------------------

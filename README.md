@@ -14,7 +14,7 @@ SDK、MPC/WBC 或落脚点规划器实现，不能把本工程未经标定就用
 | `README.md` | 项目简介、总体架构、安装和启动入口 | 第一次了解或运行项目 |
 | `quickstart.txt` | 新电脑完整复现、依赖插件、当前进度和后续路线 | 换电脑部署或接手开发 |
 | `instruction.txt` | 各模块作用、算法原理、参数和调试步骤 | 修改 SLAM、Nav2、OpenCV 或越障算法 |
-| `connect.txt` | Topic、Action、Service、TF、QoS、字段和超时 | 接入相机、雷达、SDK 或其他节点 |
+| `connect.txt` | 节点、Topic、Action、Service、TF、QoS、字段和超时 | 接入相机、雷达、SDK 或其他节点 |
 
 ## 四足整机研发状态与待完成工作
 
