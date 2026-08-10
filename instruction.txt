@@ -41,7 +41,9 @@ Wakula 算法说明
 3. quadruped_planning
    terrain_safety_assessor.py：vision=true 时优先使用同步后的 FusedObstacle，vision=false
    时使用旧数组路径；两种路径都只转换为 WALK/STEP/CLIMB/STOP 地形模式和 0～1 Nav2
-   速度上限。STOP 立即生效；风险降低和 STEP/CLIMB 分类需多帧确认。不发布动作建议。
+   速度上限。STOP 立即生效；风险降低和 STEP/CLIMB 分类需多帧确认。它还把模式、限速、
+   有效性和当前几何摘要原子发布为 NavigationSafety，避免未来团队跨话题拼接。不发布
+   动作建议，NavigationSafety 也不能直接驱动关节。
 
    cmd_vel_gate.py（可执行名 navigation_speed_gate）：同时要求 Nav2 命令和地形评估心跳
    新鲜，按速度上限缩放；任一路断流或上限为零就输出零 Twist。它是导航软件保护，不
@@ -90,4 +92,17 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 2. 在 sensor_profiles.yaml 新增 profile，或启动时传四个 topic 覆盖参数。
 3. 修改 URDF 中传感器固定 TF，并用静态场景核验点云方向。
 4. 用真机 rosbag 重调参数；上层算法无需绑定具体厂家 SDK。
-5. 底盘稳定输出 /odom、odom->base_link 并消费最终 /cmd_vel 后，再讨论运动控制与越障层。
+5. 真机模型接管 TF 时设置 robot_model:=false，避免重复发布固定变换。
+6. 底盘稳定输出 /odom、odom->base_link 并消费最终 /cmd_vel 后，运行
+   scripts/check_integration.sh 核验类型、TF 和消费者。
+7. 未来运动/越障模块优先读取 /terrain/navigation_safety，并检查 perception_valid、时间戳
+   和模式；这只是环境约束输入，动作执行、反馈、取消和硬件安全须由其独立实现。
+
+七、跨团队接口设计原则
+------------------
+1. 核心算法只依赖标准 Image、PointCloud2、LaserScan、Odometry、TF 和 Twist，不导入厂家 SDK。
+2. 厂家话题差异只放进 sensor_profiles.yaml 或 launch 参数，不复制感知节点。
+3. /perception/fused_obstacle 是感知内部原子结果；/terrain/navigation_safety 是交给未来
+   导航/运动团队的稳定只读摘要；/cmd_vel 是 Nav2 给未来底盘的标准速度输出。
+4. 接口消息中的 NaN/Inf 在发布边界归零；任何关键证据非法、点数不足或超时均按 STOP。
+5. 新硬件先录 rosbag 离线调参，再断开执行器运行全栈，最后才由硬件团队低速接入 /cmd_vel。

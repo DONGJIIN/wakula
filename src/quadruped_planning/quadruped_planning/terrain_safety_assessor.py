@@ -8,18 +8,24 @@
 是 0～1 的无量纲比例。证据不足、字段非法或消息超时均按 STOP 处理。
 """
 
-from math import isfinite
+from math import atan, isfinite
 from typing import Sequence, Tuple
 
 import rclpy
-from quadruped_interfaces.msg import FusedObstacle
+from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32, Float32MultiArray, String
+from std_msgs.msg import Bool, Float32, Float32MultiArray, Header, String
 
 
 Assessment = Tuple[str, float]
 MODE_SEVERITY = {"WALK": 0, "STEP": 1, "CLIMB": 2, "STOP": 3}
+MODE_CODES = {
+    "WALK": NavigationSafety.MODE_WALK,
+    "STEP": NavigationSafety.MODE_STEP,
+    "CLIMB": NavigationSafety.MODE_CLIMB,
+    "STOP": NavigationSafety.MODE_STOP,
+}
 
 # ``/terrain/features`` 是旧 rosbag 兼容接口。下标集中在这里，避免回调中出现难以审查
 # 的魔法数字；新代码优先读取带 Header 的 FusedObstacle。
@@ -28,8 +34,13 @@ TERRAIN_VALID_POINTS = 3
 TERRAIN_GROUND_SLOPE = 4
 TERRAIN_ROUGHNESS = 5
 TERRAIN_FRONTAL_HEIGHT = 6
+TERRAIN_LOOKAHEAD = 7
 TERRAIN_PIT_DEPTH = 9
+TERRAIN_SLOPE_ROLL = 10
 TERRAIN_OBSTACLE_TYPE = 11
+TERRAIN_CONFIDENCE = 12
+TERRAIN_WIDTH = 13
+TERRAIN_CLEARANCE_HEIGHT = 14
 
 # 与 TerrainFeatures/FusedObstacle 的类别常量一致。
 GEOMETRY_CLEAR, GEOMETRY_STEP, GEOMETRY_PIT = 1, 2, 3
@@ -93,6 +104,23 @@ def validate_height_thresholds(
     if all(isfinite(value) for value in values) and 0.0 <= step < climb < stop:
         return values
     return 0.08, 0.18, 0.32
+
+
+def navigation_mode_code(mode: str) -> int:
+    """把可读字符串模式映射为稳定消息常量，未知值保持 UNKNOWN。"""
+    return int(MODE_CODES.get(mode, NavigationSafety.MODE_UNKNOWN))
+
+
+def finite_or_zero(value: float) -> float:
+    """将接口边界处的 NaN/Inf 收敛为零，避免污染下游控制或日志。"""
+    numeric = float(value)
+    return numeric if isfinite(numeric) else 0.0
+
+
+def nonnegative_integer_or_zero(value: float) -> int:
+    """安全转换点数；旧 rosbag 中的 NaN/Inf/负数均视为无有效点。"""
+    numeric = float(value)
+    return int(numeric) if isfinite(numeric) and numeric >= 0.0 else 0
 
 
 def select_terrain_assessment(
@@ -199,6 +227,35 @@ def apply_geometry_classification(
     return assessment
 
 
+def fused_observation_valid(
+    msg: FusedObstacle, min_confidence: float, min_points: int
+) -> bool:
+    """验证融合消息能否作为跨模块的一帧完整观测。
+
+    ``geometry_confirmed`` 只是生产者声明；消费者还要独立检查类别、置信度、点数和所有
+    连续量，防止部分损坏的 DDS/rosbag 数据被标为有效。
+    """
+    metrics = (
+        msg.confidence,
+        msg.obstacle_height,
+        msg.pit_depth,
+        msg.slope_pitch,
+        msg.slope_roll,
+        msg.roughness,
+        msg.distance,
+        msg.width,
+        msg.clearance_height,
+    )
+    confidence_limit = max(0.0, min(1.0, float(min_confidence)))
+    return (
+        bool(msg.geometry_confirmed)
+        and GEOMETRY_CLEAR <= int(msg.obstacle_type) <= GEOMETRY_POLE
+        and all(isfinite(float(value)) for value in metrics)
+        and confidence_limit <= float(msg.confidence) <= 1.0
+        and int(msg.valid_points) >= max(1, int(min_points))
+    )
+
+
 def select_fused_assessment(
     msg: FusedObstacle,
     min_confidence: float,
@@ -211,12 +268,7 @@ def select_fused_assessment(
     vision_speed_scale: float,
 ) -> Assessment:
     """从一条时间同步融合消息生成原子导航评估。"""
-    confidence = float(msg.confidence)
-    if (
-        not msg.geometry_confirmed
-        or not isfinite(confidence)
-        or confidence < max(0.0, min(1.0, min_confidence))
-    ):
+    if not fused_observation_valid(msg, min_confidence, min_points):
         return "STOP", 0.0
     assessment = select_terrain_assessment(
         float(msg.obstacle_height),
@@ -262,6 +314,7 @@ class TerrainSafetyAssessor(Node):
         self.declare_parameter("clear_confirmation_frames", 5)
         self.declare_parameter("hazard_confirmation_frames", 3)
         self.declare_parameter("vision_assist_enabled", True)
+        self.declare_parameter("output_frame", "base_link")
 
         configured_thresholds = tuple(
             float(self.get_parameter(name).value)
@@ -299,6 +352,9 @@ class TerrainSafetyAssessor(Node):
             self.get_parameter("vision_center_margin").value
         )
         self.vision_speed_scale = self._unit_parameter("vision_speed_scale")
+        self.output_frame = (
+            str(self.get_parameter("output_frame").value) or "base_link"
+        )
         self.assessment_filter = ConservativeAssessmentFilter(
             int(self.get_parameter("clear_confirmation_frames").value),
             ("STOP", 0.0),
@@ -311,6 +367,11 @@ class TerrainSafetyAssessor(Node):
         self.speed_pub = self.create_publisher(Float32, "/terrain/speed_limit", 10)
         self.visual_active_pub = self.create_publisher(
             Bool, "/terrain/visual_assist_active", 10
+        )
+        # 未来运动控制/硬件团队应优先订阅这个原子只读接口，而不是在不同时间分别读取
+        # mode、speed_limit 和 FusedObstacle 后自行拼接。
+        self.navigation_safety_pub = self.create_publisher(
+            NavigationSafety, "/terrain/navigation_safety", 10
         )
         self.create_subscription(
             Float32MultiArray, "/terrain/features", self.features_callback, 10
@@ -330,6 +391,9 @@ class TerrainSafetyAssessor(Node):
         self.last_features_time = self.get_clock().now()
         self.last_vision_time = None
         self.visual_target = False
+        self.visual_assist_active = False
+        self.perception_valid = False
+        self.latest_observation = None
         self.last_assessment = None
         self.create_timer(0.1, self.timeout_callback)
         self.publish_assessment("STOP", 0.0)
@@ -364,6 +428,67 @@ class TerrainSafetyAssessor(Node):
             and isfinite(float(msg.data[TERRAIN_OBSTACLE_TYPE]))
             else 0
         )
+        # 兼容数组没有 Header；构造一条等价几何上下文，使下游仍只需订阅一个强类型接口。
+        observation = FusedObstacle()
+        observation.header = Header(
+            stamp=self.get_clock().now().to_msg(), frame_id=self.output_frame
+        )
+        observation.obstacle_type = obstacle_type
+        observation.obstacle_height = float(msg.data[height_index])
+        observation.valid_points = nonnegative_integer_or_zero(
+            msg.data[TERRAIN_VALID_POINTS]
+        )
+        observation.slope_pitch = atan(
+            float(msg.data[TERRAIN_GROUND_SLOPE])
+            if len(msg.data) > TERRAIN_GROUND_SLOPE
+            else 0.0
+        )
+        observation.slope_roll = (
+            float(msg.data[TERRAIN_SLOPE_ROLL])
+            if len(msg.data) > TERRAIN_SLOPE_ROLL
+            else 0.0
+        )
+        observation.roughness = (
+            float(msg.data[TERRAIN_ROUGHNESS])
+            if len(msg.data) > TERRAIN_ROUGHNESS
+            else 0.0
+        )
+        observation.distance = (
+            float(msg.data[TERRAIN_LOOKAHEAD])
+            if len(msg.data) > TERRAIN_LOOKAHEAD
+            else 0.0
+        )
+        observation.pit_depth = (
+            float(msg.data[TERRAIN_PIT_DEPTH])
+            if len(msg.data) > TERRAIN_PIT_DEPTH
+            else 0.0
+        )
+        observation.confidence = (
+            float(msg.data[TERRAIN_CONFIDENCE])
+            if len(msg.data) > TERRAIN_CONFIDENCE
+            else 0.0
+        )
+        observation.width = (
+            float(msg.data[TERRAIN_WIDTH])
+            if len(msg.data) > TERRAIN_WIDTH
+            else 0.0
+        )
+        observation.clearance_height = (
+            float(msg.data[TERRAIN_CLEARANCE_HEIGHT])
+            if len(msg.data) > TERRAIN_CLEARANCE_HEIGHT
+            else 0.0
+        )
+        observation.geometry_confirmed = all(
+            isfinite(value)
+            for value in (
+                observation.obstacle_height,
+                observation.slope_pitch,
+                observation.slope_roll,
+                observation.roughness,
+            )
+        ) and observation.valid_points >= self.min_points
+        self.latest_observation = observation
+        self.perception_valid = bool(observation.geometry_confirmed)
         assessment = select_terrain_assessment(
             float(msg.data[height_index]),
             float(msg.data[TERRAIN_VALID_POINTS]),
@@ -394,6 +519,7 @@ class TerrainSafetyAssessor(Node):
             assessment, visual_active, self.vision_speed_scale
         )
         self.visual_active_pub.publish(Bool(data=visual_active))
+        self.visual_assist_active = visual_active
         self.publish_assessment(*assessment)
 
     def fused_callback(self, msg: FusedObstacle) -> None:
@@ -401,6 +527,10 @@ class TerrainSafetyAssessor(Node):
         if not self.prefer_fused:
             return
         self.last_features_time = self.get_clock().now()
+        self.latest_observation = msg
+        self.perception_valid = fused_observation_valid(
+            msg, self.fused_min_confidence, self.min_points
+        )
         assessment = select_fused_assessment(
             msg,
             self.fused_min_confidence,
@@ -415,6 +545,7 @@ class TerrainSafetyAssessor(Node):
         assessment = self.assessment_filter.update(assessment)
         visual_active = bool(msg.vision_confirmed) and assessment[0] == "WALK"
         self.visual_active_pub.publish(Bool(data=visual_active))
+        self.visual_assist_active = visual_active
         self.publish_assessment(*assessment)
 
     def vision_callback(self, msg: Float32MultiArray) -> None:
@@ -435,6 +566,9 @@ class TerrainSafetyAssessor(Node):
         """独立检查感知心跳；断流时持续发布零速度上限。"""
         age = (self.get_clock().now() - self.last_features_time).nanoseconds / 1e9
         if age > self.sensor_timeout:
+            self.perception_valid = False
+            self.visual_assist_active = False
+            self.latest_observation = None
             self._publish_candidate(("STOP", 0.0))
 
     def _publish_candidate(self, candidate: Assessment) -> None:
@@ -442,11 +576,43 @@ class TerrainSafetyAssessor(Node):
         self.publish_assessment(*self.assessment_filter.update(candidate))
 
     def publish_assessment(self, mode: str, speed: float) -> None:
-        """原子发布模式与速度心跳，并仅在变化时记录日志。"""
+        """发布人类可读话题及强类型原子接口，并仅在变化时记录日志。"""
         safe_mode = mode if mode in MODE_SEVERITY else "STOP"
         safe_speed = max(0.0, min(1.0, speed)) if isfinite(speed) else 0.0
         self.mode_pub.publish(String(data=safe_mode))
         self.speed_pub.publish(Float32(data=safe_speed))
+        safety = NavigationSafety()
+        observation = self.latest_observation
+        safety.header = (
+            observation.header
+            if observation is not None
+            else Header(
+                stamp=self.get_clock().now().to_msg(), frame_id=self.output_frame
+            )
+        )
+        safety.mode = navigation_mode_code(safe_mode)
+        safety.speed_limit = safe_speed
+        safety.perception_valid = bool(self.perception_valid)
+        safety.visual_assist_active = bool(self.visual_assist_active)
+        if observation is not None:
+            safety.obstacle_type = int(observation.obstacle_type)
+            safety.confidence = finite_or_zero(observation.confidence)
+            safety.obstacle_height = finite_or_zero(
+                observation.obstacle_height
+            )
+            safety.pit_depth = finite_or_zero(observation.pit_depth)
+            safety.slope_pitch = finite_or_zero(observation.slope_pitch)
+            safety.slope_roll = finite_or_zero(observation.slope_roll)
+            safety.roughness = finite_or_zero(observation.roughness)
+            safety.distance = finite_or_zero(observation.distance)
+            safety.width = finite_or_zero(observation.width)
+            safety.clearance_height = finite_or_zero(
+                observation.clearance_height
+            )
+            safety.valid_points = nonnegative_integer_or_zero(
+                observation.valid_points
+            )
+        self.navigation_safety_pub.publish(safety)
         assessment = (safe_mode, safe_speed)
         if assessment != self.last_assessment:
             self.get_logger().info(

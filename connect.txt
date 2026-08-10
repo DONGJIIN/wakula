@@ -29,7 +29,8 @@ perception_fusion（quadruped_perception）
 terrain_safety_assessor（quadruped_planning）
   首选输入：/perception/fused_obstacle（vision=true）。
   兼容输入：/terrain/features、/vision/obstacle_evidence（vision=false 时使用点云路径）。
-  输出：/terrain/navigation_mode、/terrain/speed_limit、/terrain/visual_assist_active。
+  输出：/terrain/navigation_safety（首选原子接口）、/terrain/navigation_mode、
+  /terrain/speed_limit、/terrain/visual_assist_active。
   注意：这是导航约束节点，不发布动作、Action 或关节命令；STEP/CLIMB 的速度上限为零。
 
 navigation_speed_gate（quadruped_planning）
@@ -126,6 +127,15 @@ robot_state_publisher
 /terrain/visual_assist_active，std_msgs/msg/Bool
   表示当前速度上限是否受稳定视觉证据限制，仅供调试和 rosbag 统计。
 
+/terrain/navigation_safety，quadruped_interfaces/msg/NavigationSafety（跨团队首选）
+  Header：感知观测时间及算法使用的 base_link 坐标系；感知超时时使用当前时间。
+  模式：MODE_UNKNOWN=0、MODE_WALK=1、MODE_STEP=2、MODE_CLIMB=3、MODE_STOP=4。
+  有效性：perception_valid、visual_assist_active；无效或断流时 mode=STOP、speed_limit=0。
+  几何：obstacle_type、confidence、obstacle_height、pit_depth、slope_pitch、slope_roll、
+  roughness、distance、width、clearance_height、valid_points。障碍码与 FusedObstacle 一致。
+  语义：同一条消息给出一个原子只读快照，供未来运动/越障模块做输入校验；它不是动作、
+  关节、足端或控制器切换命令。消费者必须检查 perception_valid、Header 新鲜度和 mode。
+
 六、设备替换合同
 ------------
 驱动只需发布正确消息和 TF，不要求算法认识厂商品牌。优先保持默认话题；否则：
@@ -139,6 +149,16 @@ robot_state_publisher
 
 若 3D 雷达只有 PointCloud2，当前 2D SLAM 仍需用厂家工具或 pointcloud_to_laserscan 生成
 LaserScan。相机和点云最好使用同一时间源；硬件同步优先，软件时间差应稳定低于 0.10 s。
+
+未来硬件/状态估计团队必须提供：/scan、/odom、odom->base_link、传感器固定 TF，以及实际
+相机和点云话题；未来底盘/运动团队必须订阅最终 /cmd_vel。真机负责发布自身 URDF/TF 时，
+启动本项目须设置 robot_model:=false。算法启动后运行：
+
+  ./scripts/check_integration.sh /实际图像话题 /实际点云话题
+
+脚本只读检查标准类型、map/odom 到 base_link 的 TF、算法输出以及 /cmd_vel 是否有消费者，
+不会启动或驱动机器人；返回非零表示对接合同未满足。VS Code 中同样提供任务
+“ROS: check robot integration contract”。
 
 七、明确不存在的接口
 ----------------

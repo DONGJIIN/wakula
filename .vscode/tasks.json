@@ -37,6 +37,12 @@
       "type": "shell",
       "command": "${workspaceFolder}/scripts/diagnose.sh",
       "problemMatcher": []
+    },
+    {
+      "label": "ROS: check robot integration contract",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/check_integration.sh",
+      "problemMatcher": []
     }
   ]
 }

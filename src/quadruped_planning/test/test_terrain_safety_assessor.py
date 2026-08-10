@@ -1,13 +1,17 @@
 """地形安全评估和 Nav2 速度门的纯逻辑回归测试。"""
 
 from geometry_msgs.msg import Twist
-from quadruped_interfaces.msg import FusedObstacle
+from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
 
 from quadruped_planning.cmd_vel_gate import gated_twist
 from quadruped_planning.terrain_safety_assessor import (
     ConservativeAssessmentFilter,
     apply_geometry_classification,
     apply_visual_assist,
+    finite_or_zero,
+    fused_observation_valid,
+    navigation_mode_code,
+    nonnegative_integer_or_zero,
     select_fused_assessment,
     select_terrain_assessment,
     validate_height_thresholds,
@@ -66,6 +70,20 @@ def test_invalid_height_thresholds_restore_safe_defaults():
     assert validate_height_thresholds(0.30, 0.10, 0.20) == (0.08, 0.18, 0.32)
 
 
+def test_typed_handoff_codes_and_numeric_sanitization_are_stable():
+    """跨团队接口必须保持稳定常量，并阻止非法浮点数泄漏到消费者。"""
+    assert navigation_mode_code("WALK") == NavigationSafety.MODE_WALK
+    assert navigation_mode_code("STEP") == NavigationSafety.MODE_STEP
+    assert navigation_mode_code("CLIMB") == NavigationSafety.MODE_CLIMB
+    assert navigation_mode_code("STOP") == NavigationSafety.MODE_STOP
+    assert navigation_mode_code("future-mode") == NavigationSafety.MODE_UNKNOWN
+    assert finite_or_zero(float("nan")) == 0.0
+    assert finite_or_zero(float("inf")) == 0.0
+    assert nonnegative_integer_or_zero(float("nan")) == 0
+    assert nonnegative_integer_or_zero(-1.0) == 0
+    assert nonnegative_integer_or_zero(42.9) == 42
+
+
 def test_visual_assist_only_limits_clear_terrain():
     """单目视觉只能降低 WALK 上限，不能改变危险类别。"""
     walk = ("WALK", 1.0)
@@ -83,13 +101,30 @@ def test_fused_observation_is_atomic_and_fail_closed():
     msg.obstacle_type = FusedObstacle.STEP
     msg.obstacle_height = 0.12
     msg.valid_points = 100
+    assert fused_observation_valid(msg, 0.25, 30)
     assert select_fused_assessment(
         msg, 0.25, 30, 0.08, 0.18, 0.32, 0.45, 0.06, 0.35
     ) == ("STEP", 0.0)
     msg.geometry_confirmed = False
+    assert not fused_observation_valid(msg, 0.25, 30)
     assert select_fused_assessment(
         msg, 0.25, 30, 0.08, 0.18, 0.32, 0.45, 0.06, 0.35
     ) == ("STOP", 0.0)
+
+
+def test_fused_observation_rejects_partial_or_invalid_contract_data():
+    """生产者确认位不能掩盖未知类别、低点数或任一损坏的几何字段。"""
+    msg = FusedObstacle()
+    msg.geometry_confirmed = True
+    msg.obstacle_type = FusedObstacle.CLEAR
+    msg.confidence = 0.8
+    msg.valid_points = 100
+    assert fused_observation_valid(msg, 0.25, 30)
+    msg.distance = float("nan")
+    assert not fused_observation_valid(msg, 0.25, 30)
+    msg.distance = 0.0
+    msg.obstacle_type = FusedObstacle.UNKNOWN
+    assert not fused_observation_valid(msg, 0.25, 30)
 
 
 def test_fused_visual_confirmation_only_limits_clear_geometry():

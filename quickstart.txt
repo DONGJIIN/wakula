@@ -5,7 +5,8 @@ Wakula 后续开发快速上手
 ----------
 已完成：SLAM Toolbox、Nav2、带图像质量/IoU 多帧门控的 OpenCV 障碍证据、稳健平面与
 连通域点云分类、支持乱序回调的时间同步融合、保守速度门、传感器 profile、rosbag
-离线评估、测试和 CI。算法只输出环境类别与导航依据，不指挥机器人腿部动作。
+离线评估、强类型 NavigationSafety 对接合同、一键接口检查、测试和 CI。算法只输出环境
+类别与导航依据，不指挥机器人腿部动作。
 
 未完成且暂不开发：Gazebo、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、站立步态、
 关节控制、真正越障 Action、比赛流程。STEP/CLIMB 只识别并停车。
@@ -103,6 +104,7 @@ SLAM 产生 map -> odom。启用地形感知还需：
   ros2 topic hz /vision/obstacle_stamped
   ros2 topic echo /terrain/navigation_mode
   ros2 topic echo /terrain/speed_limit
+  ros2 topic echo /terrain/navigation_safety
   ros2 run tf2_ros tf2_echo base_link <点云frame>
   ros2 run tf2_ros tf2_echo map base_link
   ./scripts/diagnose.sh
@@ -143,7 +145,26 @@ SLAM 产生 map -> odom。启用地形感知还需：
 6. 底盘能安全消费 `/cmd_vel` 后低速接入 Nav2。
 7. 最后才设计真机越障控制与 Nav2 切换；不得把当前文字 action 当作控制命令。
 
-九、RK3588 建议
+九、其他团队一键对齐
+------------------
+硬件/状态估计组交付以下标准接口即可：/scan（LaserScan）、/odom（Odometry）、
+odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组订阅最终 /cmd_vel
+（Twist）；需要环境信息时只读订阅 /terrain/navigation_safety，不要直接把其 STEP/CLIMB
+转换成关节动作。该消息把时间戳、有效性、模式、限速和几何量放在同一帧中。
+
+真机发布自身 URDF/TF 时这样启动：
+
+  ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
+
+全栈稳定后执行只读验收：
+
+  ./scripts/check_integration.sh /camera/image_raw /camera/depth/points
+
+实际话题不同就替换两个参数，或先在 sensor_profiles.yaml 添加设备 profile。检查脚本验证
+话题类型、map/odom 到 base_link 的 TF、算法输出和 /cmd_vel 消费者；失败项按 connect.txt
+修正。它不发送速度，也不启动硬件。VS Code 命令面板可直接运行同名 ROS 对接检查任务。
+
+十、RK3588 建议
 -------------
 保持 OpenCV 路径，不启用 YOLO；图像宽度 640、处理 8 Hz，点云处理 10 Hz 并限制最大点数。
 确认 CPU/内存余量后再提高分辨率或频率。优先让相机/雷达驱动在硬件侧完成对齐、降采样

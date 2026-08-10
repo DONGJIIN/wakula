@@ -2,7 +2,7 @@
 <package format="3">
   <name>quadruped_interfaces</name>
   <version>0.1.0</version>
-  <description>Strongly typed terrain and vision perception contracts.</description>
+  <description>Strongly typed perception and navigation handoff contracts.</description>
   <maintainer email="developer@example.com">Quadruped Developer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>

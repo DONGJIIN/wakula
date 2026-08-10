@@ -20,7 +20,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 ## 四足整机研发状态与待完成工作
 
 > **当前只完成了上层 ROS 2 软件雏形，不是一台已经完成的四足机器人。** SLAM、Nav2、
-> OpenCV 和点云解决的是“看环境、定位置、选路线、发动作请求”；机器能否稳定站立、行走、
+> OpenCV 和点云解决的是“看环境、定位置、选路线、生成安全导航约束”；机器能否稳定站立、行走、
 > 抬腿和越障，还取决于机械、电气、驱动、状态估计及运动控制等尚未完成的整机系统。
 
 | 整机子系统 | 当前状态 | 还需要完成 |
@@ -44,8 +44,9 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门和 rosbag 离线评估：7 个 ROS 2 包可编译，45 项测试通过，并提供一键
-启动和 CI。URDF 只用于 RViz 外形与传感器 TF 占位，不能视为运动学或整机控制已完成。
+决策、速度超时门、强类型真机对接合同和 rosbag 离线评估：7 个 ROS 2 包可编译，47 项
+测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与传感器 TF 占位，
+不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
 
 ### 后续工作的实施内容与阶段验收
@@ -125,6 +126,7 @@ wakula/
 ├── scripts/
 │   ├── record_bag.sh           # 记录感知、导航与诊断数据
 │   ├── diagnose.sh             # 检查 ROS 话题和 TF
+│   ├── check_integration.sh    # 一键核验未来真机对接合同
 │   └── build.sh                # 统一编译
 ├── .colcon/defaults.yaml
 ├── .github/workflows/ros2-ci.yaml
@@ -140,7 +142,7 @@ wakula/
 |---|---|---|
 | `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
-| `quadruped_interfaces` | 带时间戳的地形、视觉和融合强类型合同 | 三个 `msg/` 接口 |
+| `quadruped_interfaces` | 带时间戳的感知与导航交接合同 | 四个 `msg/` 接口 |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
 | `quadruped_planning` | 地形风险分类、Nav2 速度上限和失效安全门 | 两个导航辅助节点 |
 | `quadruped_tools` | rosbag 标注匹配与准确率报告 | `perception_bag_evaluator` |
@@ -151,7 +153,8 @@ wakula/
 - `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并用曝光/清晰度、投票率和目标框 IoU 做多帧确认。
 - `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格和连通域估计台阶、坡度、坑洞、墙、横杆和立柱。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；点云始终掌握尺度权限。
-- `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，只生成地形模式和 Nav2 速度上限。
+- `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，原子发布地形模式、Nav2
+  速度上限、有效性与几何摘要，供未来运动团队只读接入。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳。
 - `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
 - `navigation_speed_gate`：检查 Nav2 命令和地形评估心跳，任一失效立即输出零速。
@@ -170,6 +173,7 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
                           └─> /terrain/features（无相机兼容）│
                      /perception/fused_obstacle <───────────┘
                                       └─> terrain safety assessor + rosbag
+                                           └─> /terrain/navigation_safety
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
 
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
@@ -189,6 +193,31 @@ Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
 
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
 点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
+
+### 3.1 与未来硬件、运动控制团队的一键对齐边界
+
+本仓库采用标准 ROS 2 接口隔离厂家 SDK 和上层算法。真机团队不需要修改 SLAM、Nav2 或
+OpenCV 源码，只需完成以下合同：
+
+1. 传感器/状态估计提供 `/scan`、`/odom`、`odom -> base_link`、传感器 TF，以及 Image、
+   PointCloud2；非默认名称通过 `sensor_profile` 或 launch remap 对齐。
+2. 真机底盘或运动控制器订阅最终 `/cmd_vel`。速度含义遵循 ROS REP-103：线速度 m/s、
+   角速度 rad/s，`base_link` 的 `+x` 向前、`+y` 向左、`+z` 向上。
+3. 运动/越障团队若需要上层环境摘要，应优先只读订阅
+   `/terrain/navigation_safety`，其中同一时间戳内包含模式、限速、感知有效性和障碍几何；
+   不要把该消息直接解释为抬腿、攀爬或关节控制命令。
+4. 真机自身发布 URDF/TF 时使用 `robot_model:=false`，避免两个
+   `robot_state_publisher` 同时发布传感器固定 TF。
+5. 全栈启动后执行 `./scripts/check_integration.sh`；若相机/点云名称不同，可将实际话题
+   作为两个参数传入。所有项通过后才算完成上层—真机最小对接。
+
+```bash
+ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
+./scripts/check_integration.sh /camera/image_raw /camera/depth/points
+```
+
+接口的消息类型、字段、TF、超时与设备替换规则以 `connect.txt` 为准。未来可以在独立包中
+新增厂家 SDK、状态估计和运动控制，但不应反向让核心感知算法依赖厂家类型。
 
 ## 4. 默认与可替换传感器接口
 
