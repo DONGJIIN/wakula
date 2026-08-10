@@ -242,6 +242,69 @@ def evidence_from_boxes(
     )
 
 
+def image_quality_score(gray: np.ndarray) -> float:
+    """估计曝光、对比度和清晰度是否足以支持传统视觉检测。
+
+    返回值只是 0～1 的质量门控量，不是障碍概率。严重欠曝、过曝或失焦时，边缘
+    启发式很容易把噪声识别成横杆/墙面，因此应降低该帧权重而不是强行分类。
+    """
+    image = np.asarray(gray, dtype=np.uint8)
+    if image.size < 16:
+        return 0.0
+    usable_exposure = float(np.mean((image > 8) & (image < 247)))
+    low, high = np.quantile(image, (0.10, 0.90))
+    contrast = float(np.clip((float(high) - float(low)) / 45.0, 0.0, 1.0))
+    laplacian_variance = float(cv2.Laplacian(image, cv2.CV_32F).var())
+    sharpness = float(np.clip(laplacian_variance / 80.0, 0.0, 1.0))
+    return float(
+        np.clip(
+            usable_exposure * (0.40 + 0.30 * contrast + 0.30 * sharpness),
+            0.0,
+            1.0,
+        )
+    )
+
+
+def apply_image_quality(
+    evidence: ObstacleEvidence, quality: float, minimum_quality: float
+) -> ObstacleEvidence:
+    """拒绝不可用图像，并对勉强可用图像的启发式置信度降权。"""
+    quality = float(np.clip(quality, 0.0, 1.0))
+    if evidence.hint == "none" or quality < minimum_quality:
+        return ObstacleEvidence()
+    return ObstacleEvidence(
+        hint=evidence.hint,
+        confidence=evidence.confidence * (0.60 + 0.40 * quality),
+        center_x=evidence.center_x,
+        center_y=evidence.center_y,
+        width=evidence.width,
+        height=evidence.height,
+    )
+
+
+def evidence_iou(first: ObstacleEvidence, second: ObstacleEvidence) -> float:
+    """计算两个归一化目标框的交并比，约束多帧证据属于同一目标。"""
+    first_left = first.center_x - first.width / 2
+    first_top = first.center_y - first.height / 2
+    second_left = second.center_x - second.width / 2
+    second_top = second.center_y - second.height / 2
+    first_right, first_bottom = first_left + first.width, first_top + first.height
+    second_right, second_bottom = second_left + second.width, second_top + second.height
+    intersection_width = max(
+        0.0, min(first_right, second_right) - max(first_left, second_left)
+    )
+    intersection_height = max(
+        0.0, min(first_bottom, second_bottom) - max(first_top, second_top)
+    )
+    intersection = intersection_width * intersection_height
+    union = first.width * first.height + second.width * second.height - intersection
+    return (
+        0.0
+        if union <= 1e-9
+        else float(np.clip(intersection / union, 0.0, 1.0))
+    )
+
+
 def detect_obstacle_evidence(
     orange_mask: np.ndarray,
     blue_mask: np.ndarray,
@@ -355,6 +418,8 @@ def stabilize_evidence(
     minimum_matches: int,
     max_center_jitter: float = 0.15,
     max_size_jitter: float = 0.25,
+    minimum_match_ratio: float = 0.60,
+    minimum_iou: float = 0.20,
 ) -> ObstacleEvidence:
     """仅接受在近期多帧重复且位置/尺寸变化合理的非空候选。
 
@@ -366,7 +431,11 @@ def stabilize_evidence(
     if not hints:
         return ObstacleEvidence()
     hint, count = Counter(hints).most_common(1)[0]
-    if count < minimum_matches:
+    required = max(
+        int(minimum_matches),
+        int(np.ceil(len(history) * np.clip(minimum_match_ratio, 0.0, 1.0))),
+    )
+    if count < required:
         return ObstacleEvidence()
     matches = [item for item in history if item.hint == hint]
     center_x = np.asarray([item.center_x for item in matches])
@@ -376,6 +445,17 @@ def stabilize_evidence(
     center_jitter = max(float(np.ptp(center_x)), float(np.ptp(center_y)))
     size_jitter = max(float(np.ptp(widths)), float(np.ptp(heights)))
     if center_jitter > max_center_jitter or size_jitter > max_size_jitter:
+        return ObstacleEvidence()
+    median_box = ObstacleEvidence(
+        hint=hint,
+        center_x=float(np.median(center_x)),
+        center_y=float(np.median(center_y)),
+        width=float(np.median(widths)),
+        height=float(np.median(heights)),
+    )
+    overlaps = [evidence_iou(item, median_box) for item in matches]
+    minimum_overlap = float(min(overlaps))
+    if minimum_overlap < float(np.clip(minimum_iou, 0.0, 1.0)):
         return ObstacleEvidence()
     confidence = float(np.median([item.confidence for item in matches]))
     consistency = count / max(1, len(history))
@@ -389,11 +469,11 @@ def stabilize_evidence(
         # consistency penalty without suppressing a valid 3-of-5 result.
         confidence=confidence
         * (0.8 + 0.2 * consistency)
-        * (0.9 + 0.1 * spatial_consistency),
-        center_x=float(np.median(center_x)),
-        center_y=float(np.median(center_y)),
-        width=float(np.median(widths)),
-        height=float(np.median(heights)),
+        * (0.85 + 0.10 * spatial_consistency + 0.05 * minimum_overlap),
+        center_x=median_box.center_x,
+        center_y=median_box.center_y,
+        width=median_box.width,
+        height=median_box.height,
     )
 
 
@@ -409,6 +489,7 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("processing_hz", 8.0)
         self.declare_parameter("resize_width", 640)
         self.declare_parameter("min_area_px", 300.0)
+        self.declare_parameter("min_area_ratio", 0.0008)
         self.declare_parameter("morphology_size", 5)
         self.declare_parameter("edge_low_threshold", 60)
         self.declare_parameter("edge_high_threshold", 160)
@@ -421,10 +502,13 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("roi_bottom_ratio", 0.95)
         self.declare_parameter("roi_side_margin_ratio", 0.02)
         self.declare_parameter("min_color_fill_ratio", 0.18)
+        self.declare_parameter("min_image_quality", 0.35)
         self.declare_parameter("history_size", 5)
         self.declare_parameter("confirmation_frames", 3)
         self.declare_parameter("max_temporal_center_jitter", 0.15)
         self.declare_parameter("max_temporal_size_jitter", 0.25)
+        self.declare_parameter("temporal_match_ratio", 0.60)
+        self.declare_parameter("min_temporal_iou", 0.20)
         self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("orange_hsv_lower", [5, 80, 70])
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
@@ -439,6 +523,9 @@ class VisionObstacleDetector(Node):
         self.publish_debug = bool(self.get_parameter("publish_debug_mask").value)
         self.resize_width = max(0, int(self.get_parameter("resize_width").value))
         self.min_area = max(1.0, float(self.get_parameter("min_area_px").value))
+        self.min_area_ratio = float(
+            np.clip(self.get_parameter("min_area_ratio").value, 0.0, 0.10)
+        )
         self.edge_low = max(0, int(self.get_parameter("edge_low_threshold").value))
         self.edge_high = max(
             self.edge_low + 1,
@@ -469,6 +556,9 @@ class VisionObstacleDetector(Node):
         self.min_color_fill_ratio = float(
             np.clip(self.get_parameter("min_color_fill_ratio").value, 0.0, 1.0)
         )
+        self.min_image_quality = float(
+            np.clip(self.get_parameter("min_image_quality").value, 0.0, 1.0)
+        )
         history_size = max(1, int(self.get_parameter("history_size").value))
         self.confirmation_frames = min(
             history_size,
@@ -481,6 +571,12 @@ class VisionObstacleDetector(Node):
         self.max_temporal_size_jitter = max(
             0.01,
             float(self.get_parameter("max_temporal_size_jitter").value),
+        )
+        self.temporal_match_ratio = float(
+            np.clip(self.get_parameter("temporal_match_ratio").value, 0.0, 1.0)
+        )
+        self.min_temporal_iou = float(
+            np.clip(self.get_parameter("min_temporal_iou").value, 0.0, 1.0)
         )
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
@@ -538,7 +634,13 @@ class VisionObstacleDetector(Node):
     def _hsv_parameter(self, name: str) -> np.ndarray:
         """读取三通道 HSV 参数并夹紧到 OpenCV uint8 表示范围。"""
         values = np.asarray(self.get_parameter(name).value, dtype=np.int32)
-        return np.clip(values, 0, 255).astype(np.uint8)
+        if values.shape != (3,):
+            self.get_logger().warning(f"{name} must contain H, S and V; using zeros")
+            values = np.zeros(3, dtype=np.int32)
+        # OpenCV 的 Hue 范围是 0～179，S/V 才是 0～255。
+        values[0] = np.clip(values[0], 0, 179)
+        values[1:] = np.clip(values[1:], 0, 255)
+        return values.astype(np.uint8)
 
     def image_callback(self, msg: Image, source: str) -> None:
         """Keep one newest frame so camera rate cannot create a backlog."""
@@ -603,6 +705,7 @@ class VisionObstacleDetector(Node):
             cv2.inRange(hsv, self.blue_lower, self.blue_upper)
         )
         gray = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2GRAY)
+        quality = image_quality_score(gray)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         edge_low, edge_high = (
             adaptive_canny_thresholds(
@@ -647,12 +750,16 @@ class VisionObstacleDetector(Node):
                 ]
             )
         )
+        effective_min_area = max(self.min_area, image_area * self.min_area_ratio)
         raw_evidence = detect_obstacle_evidence(
             orange_mask,
             blue_mask,
             edge_mask,
-            self.min_area,
+            effective_min_area,
             self.min_color_fill_ratio,
+        )
+        raw_evidence = apply_image_quality(
+            raw_evidence, quality, self.min_image_quality
         )
         # 只把稳定后的原子证据交给规划层，避免读取到不同帧的混合字段。
         self.evidence_history.append(raw_evidence)
@@ -661,6 +768,8 @@ class VisionObstacleDetector(Node):
             self.confirmation_frames,
             self.max_temporal_center_jitter,
             self.max_temporal_size_jitter,
+            self.temporal_match_ratio,
+            self.min_temporal_iou,
         )
         self.evidence_pub.publish(Float32MultiArray(data=evidence.as_array()))
         typed = VisionObstacle()

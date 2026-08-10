@@ -9,6 +9,7 @@ from quadruped_perception.terrain_analyzer import (
     transform_xyz,
 )
 from quadruped_perception.terrain_geometry import (
+    CLEAR,
     PIT,
     WALL,
     analyze_terrain_geometry,
@@ -17,9 +18,12 @@ from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
     ObstacleEvidence,
     adaptive_canny_thresholds,
+    apply_image_quality,
     apply_detection_roi,
     detect_obstacle_evidence,
     enhance_illumination,
+    evidence_iou,
+    image_quality_score,
     largest_color_feature,
     stabilize_evidence,
 )
@@ -78,6 +82,28 @@ def test_temporal_confirmation_rejects_spatially_inconsistent_boxes():
     assert stabilize_evidence(history, 3).hint == "none"
 
 
+def test_temporal_confirmation_requires_majority_and_box_overlap():
+    """Old sparse hits and differently sized regions cannot form one stable target."""
+    target = ObstacleEvidence("wall", 0.8, 0.5, 0.5, 0.20, 0.40)
+    sparse_history = [target, target, target] + [ObstacleEvidence()] * 3
+    assert stabilize_evidence(sparse_history, 3, minimum_match_ratio=0.6).hint == "none"
+
+    inconsistent_sizes = [
+        ObstacleEvidence("wall", 0.8, 0.5, 0.5, width, 0.40)
+        for width in (0.05, 0.20, 0.29)
+    ]
+    assert evidence_iou(inconsistent_sizes[0], inconsistent_sizes[1]) < 0.3
+    assert (
+        stabilize_evidence(
+            inconsistent_sizes,
+            3,
+            max_size_jitter=0.25,
+            minimum_iou=0.40,
+        ).hint
+        == "none"
+    )
+
+
 def test_illumination_roi_and_adaptive_edge_helpers():
     """Preprocessing preserves shape, masks borders and returns valid thresholds."""
     image = np.full((80, 120, 3), 25, dtype=np.uint8)
@@ -95,6 +121,19 @@ def test_illumination_roi_and_adaptive_edge_helpers():
     gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
     low, high = adaptive_canny_thresholds(gray, 60, 160, 0.33)
     assert 0 <= low < high <= 255
+
+
+def test_image_quality_rejects_unusable_frames_and_scales_evidence():
+    """Black/defocused frames do not contribute a false temporal vote."""
+    black = np.zeros((120, 160), dtype=np.uint8)
+    checker = 40 + np.indices((120, 160)).sum(axis=0) % 2 * 170
+    assert image_quality_score(black) < 0.35
+    assert image_quality_score(checker.astype(np.uint8)) > 0.7
+    evidence = ObstacleEvidence("wall", 0.8, 0.5, 0.5, 0.4, 0.4)
+    assert apply_image_quality(evidence, image_quality_score(black), 0.35).hint == "none"
+    accepted = apply_image_quality(evidence, 0.8, 0.35)
+    assert accepted.hint == "wall"
+    assert 0.7 < accepted.confidence < evidence.confidence
 
 
 def test_color_feature_is_normalized():
@@ -233,3 +272,36 @@ def test_grid_ground_segmentation_requires_real_low_returns_for_pit():
     assert result.valid
     assert result.obstacle_type == PIT
     assert result.pit_depth >= 0.12
+
+
+def test_disconnected_depth_speckles_do_not_form_an_obstacle():
+    """Several isolated flying pixels are not a spatially coherent hazard surface."""
+    floor = _dense_floor()
+    speckles = np.asarray(
+        [
+            point
+            for x, y in ((0.25, -0.30), (0.75, 0.30), (1.20, -0.20))
+            for point in ((x, y, 0.34), (x, y, 0.36))
+        ],
+        dtype=np.float64,
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, speckles)))
+    assert result.valid
+    assert result.obstacle_type == CLEAR
+
+
+def test_robust_ground_fit_preserves_long_slope_with_high_outliers():
+    """A long ramp remains a ramp when a small elevated cluster is present."""
+    floor = _dense_floor()
+    floor[:, 2] += 0.15 * floor[:, 0]
+    outliers = np.asarray(
+        [
+            (x, y, 0.15 * x + 0.30)
+            for x in (0.60, 0.65)
+            for y in (-0.05, 0.0, 0.05)
+            for _ in range(2)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, outliers)))
+    assert result.valid
+    assert abs(result.slope_pitch - np.arctan(0.15)) < 0.03

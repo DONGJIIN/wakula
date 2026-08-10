@@ -3,8 +3,9 @@ Wakula 后续开发快速上手
 
 一、当前边界
 ----------
-已完成：SLAM Toolbox、Nav2、OpenCV 轻量障碍证据、点云地形分类、带完整安全字段的
-时间同步融合、保守速度门、传感器 profile、rosbag 离线评估、测试和 CI。
+已完成：SLAM Toolbox、Nav2、带图像质量/IoU 多帧门控的 OpenCV 障碍证据、稳健平面与
+连通域点云分类、支持乱序回调的时间同步融合、保守速度门、传感器 profile、rosbag
+离线评估、测试和 CI。算法只输出环境类别与导航依据，不指挥机器人腿部动作。
 
 未完成且暂不开发：Gazebo、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、站立步态、
 关节控制、真正越障 Action、比赛流程。STEP/CLIMB 只识别并停车。

@@ -285,6 +285,7 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("ground_height_bin", 0.03)
         self.declare_parameter("pit_depth_threshold", 0.08)
         self.declare_parameter("wall_height_threshold", 0.25)
+        self.declare_parameter("min_connected_region_cells", 3)
 
         override_topic = str(self.get_parameter("input_topic").value)
         candidates = list(self.get_parameter("input_topic_candidates").value)
@@ -330,6 +331,9 @@ class TerrainAnalyzer(Node):
         )
         self.wall_height_threshold = max(
             0.10, float(self.get_parameter("wall_height_threshold").value)
+        )
+        self.min_connected_region_cells = max(
+            2, int(self.get_parameter("min_connected_region_cells").value)
         )
         if self.x_max <= self.x_min:
             self.get_logger().warning(
@@ -449,6 +453,7 @@ class TerrainAnalyzer(Node):
             pit_depth=self.pit_depth_threshold,
             wall_height=self.wall_height_threshold,
             min_cells=max(8, self.min_points // 3),
+            min_region_cells=self.min_connected_region_cells,
         )
         if geometry.valid:
             # 旧九字段继续由原算法提供，扩展字段和强类型话题承载新几何合同。

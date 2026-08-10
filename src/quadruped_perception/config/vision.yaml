@@ -8,6 +8,8 @@ vision_obstacle_detector:
     processing_hz: 8.0
     resize_width: 640
     min_area_px: 300.0
+    # Effective area is max(pixel threshold, image area * ratio).
+    min_area_ratio: 0.0008
     morphology_size: 5
     edge_low_threshold: 60
     edge_high_threshold: 160
@@ -24,11 +26,15 @@ vision_obstacle_detector:
     roi_side_margin_ratio: 0.02
     # Reject sparse color reflections inside large bounding rectangles.
     min_color_fill_ratio: 0.18
+    # Reject severely under/over-exposed or blurred frames before temporal voting.
+    min_image_quality: 0.35
     history_size: 5
     confirmation_frames: 3
     # The same label must also stay at a similar image position and size.
     max_temporal_center_jitter: 0.15
     max_temporal_size_jitter: 0.25
+    temporal_match_ratio: 0.60
+    min_temporal_iou: 0.20
     # Lock one default topic; fail over only when it has stopped publishing.
     source_switch_timeout: 2.0
     # OpenCV HSV ranges; recalibrate under venue lighting before competition.

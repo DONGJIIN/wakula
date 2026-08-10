@@ -23,7 +23,8 @@ vision_obstacle_detector（quadruped_perception）
 perception_fusion（quadruped_perception）
   输入：/terrain/features_stamped、/vision/obstacle_stamped。
   输出：/perception/fused_obstacle、/diagnostics。
-  同步：按 Header 时间戳最近邻配对，默认最大时间差 0.10 s，不同步就不发布融合结果。
+  同步：在两个有界队列中全局选择 Header 时间差最小的一对，默认最大差 0.10 s；支持
+  回调乱序，每条消息只使用一次，零时间戳或不同步就不发布融合结果。
 
 obstacle_crossing_manager（quadruped_planning）
   首选输入：/perception/fused_obstacle（vision=true）。
@@ -81,8 +82,9 @@ robot_state_publisher
 ------------
 /terrain/features
   类型：std_msgs/msg/Float32MultiArray，兼容旧 bag。
-  索引：0 ground_height；1 obstacle_height；2 frontal_height；3 valid_points；
-  4 slope_pitch；5 roughness；6 frontal_height；7 lookahead_distance；8 hazard_score；
+  索引：0 ground_height；1 high_z；2 obstacle_height；3 valid_points；
+  4 slope_pitch_tan；5 roughness；6 frontal_obstacle_height；7 lookahead_distance；
+  8 traversability；
   9 pit_depth；10 slope_roll；11 obstacle_type；12 confidence；13 width；14 clearance_height。
   新程序优先使用带 Header 的强类型话题。
 
@@ -98,6 +100,7 @@ robot_state_publisher
 /vision/obstacle_stamped
   类型：quadruped_interfaces/msg/VisionObstacle，字段与上面一致并增加 header。
   类型码：0 NONE，1 POLES，2 HEIGHT_BAR，3 WALL，4 COLORED_OBSTACLE。
+  有效性：图像须通过曝光/对比度/清晰度门控，并满足多帧同类比例、抖动和框 IoU。
 
 /perception/fused_obstacle
   类型：quadruped_interfaces/msg/FusedObstacle
@@ -105,6 +108,8 @@ robot_state_publisher
   字段：header、obstacle_type、confidence、geometry_confirmed、vision_confirmed、
   obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、width、
   clearance_height、time_skew、valid_points。
+  融合约束：点云提供米制尺度；视觉 BAR 需点云 clearance_height 支持，POLE 需点云窄宽度
+  支持。视觉/几何冲突时类别保持点云结果并降低 confidence。
 
 五、决策和速度接口
 --------------

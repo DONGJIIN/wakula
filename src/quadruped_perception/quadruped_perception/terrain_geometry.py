@@ -72,13 +72,67 @@ def _dominant_ground_mask(cells: np.ndarray, bin_size: float) -> np.ndarray:
 
 
 def _fit_plane(samples: np.ndarray) -> Tuple[float, float, float, float]:
-    """拟合 z=ax+by+c，并以 MAD 给出抗离群粗糙度。"""
+    """迭代拟合 ``z=ax+by+c``，并以 MAD 剔除残余离群格。
+
+    高度直方图已经去掉大部分障碍，但台阶边缘和混合像素仍可能进入地面候选。
+    两轮 MAD 裁剪比一次普通最小二乘稳定，同时保持确定性和很低的计算量。
+    """
     design = np.column_stack((samples[:, 0], samples[:, 1], np.ones(len(samples))))
-    coefficients, *_ = np.linalg.lstsq(design, samples[:, 3], rcond=None)
-    residual = samples[:, 3] - design @ coefficients
-    median = float(np.median(residual))
-    mad = float(np.median(np.abs(residual - median)) * 1.4826)
+    heights = samples[:, 3]
+    active = np.ones(len(samples), dtype=bool)
+    coefficients = np.zeros(3, dtype=np.float64)
+    for _ in range(3):
+        if np.count_nonzero(active) < 6:
+            break
+        coefficients, *_ = np.linalg.lstsq(design[active], heights[active], rcond=None)
+        residual = heights - design @ coefficients
+        center = float(np.median(residual[active]))
+        mad = float(np.median(np.abs(residual[active] - center)) * 1.4826)
+        # 深度相机地面噪声通常为毫米级；1 cm 下限避免 MAD 接近零时误删正常点。
+        updated = np.abs(residual - center) <= max(0.01, 3.0 * mad)
+        if np.array_equal(updated, active) or np.count_nonzero(updated) < 6:
+            break
+        active = updated
+    residual = heights - design @ coefficients
+    center = float(np.median(residual[active]))
+    mad = float(np.median(np.abs(residual[active] - center)) * 1.4826)
     return float(coefficients[0]), float(coefficients[1]), float(coefficients[2]), mad
+
+
+def _largest_connected_region(
+    cells: np.ndarray, candidate_mask: np.ndarray, cell_size: float
+) -> np.ndarray:
+    """返回候选高度格中最大的八邻域连通区域下标。
+
+    过去只要任意三个异常格就会触发障碍，三个互不相邻的飞点也可能造成误检。
+    真正的台阶、坑洞和墙面应在 XY 高度栅格中形成连续表面，因此先做连通域筛选。
+    """
+    candidate_indices = np.flatnonzero(candidate_mask)
+    if not len(candidate_indices):
+        return candidate_indices
+    coordinates = np.rint(cells[candidate_indices, :2] / cell_size).astype(np.int32)
+    by_coordinate = {
+        (int(coordinate[0]), int(coordinate[1])): int(index)
+        for coordinate, index in zip(coordinates, candidate_indices)
+    }
+    remaining = set(by_coordinate)
+    largest = []
+    while remaining:
+        seed = remaining.pop()
+        stack = [seed]
+        component = []
+        while stack:
+            coordinate = stack.pop()
+            component.append(by_coordinate[coordinate])
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neighbor = (coordinate[0] + dx, coordinate[1] + dy)
+                    if neighbor in remaining:
+                        remaining.remove(neighbor)
+                        stack.append(neighbor)
+        if len(component) > len(largest):
+            largest = component
+    return np.asarray(largest, dtype=np.int64)
 
 
 def analyze_terrain_geometry(
@@ -90,6 +144,7 @@ def analyze_terrain_geometry(
     pit_depth: float = 0.08,
     wall_height: float = 0.25,
     min_cells: int = 12,
+    min_region_cells: int = 3,
 ) -> GeometryEstimate:
     """分割地面并识别台阶、坑洞、墙面、横杆和立柱。
 
@@ -107,6 +162,15 @@ def analyze_terrain_geometry(
     if np.count_nonzero(ground_mask) < max(6, min_cells // 2):
         return GeometryEstimate(valid_points=len(points))
     a, b, c, roughness = _fit_plane(cells[ground_mask])
+    # 用首次平面把同一坡面上落入其他高度箱的地面格吸收回来，再稳健重拟合。
+    # 这一步可避免长坡因直方图被切成多个高度层而只使用一小段地面。
+    initial_plane = a * cells[:, 0] + b * cells[:, 1] + c
+    expanded_ground = np.abs(cells[:, 3] - initial_plane) <= max(
+        0.04, 2.0 * ground_bin_size
+    )
+    if np.count_nonzero(expanded_ground) >= np.count_nonzero(ground_mask):
+        ground_mask = expanded_ground
+        a, b, c, roughness = _fit_plane(cells[ground_mask])
     plane_cells = a * cells[:, 0] + b * cells[:, 1] + c
     low_relative = cells[:, 2] - plane_cells
     high_relative = cells[:, 4] - plane_cells
@@ -123,14 +187,24 @@ def analyze_terrain_geometry(
     width = 0.0
     clearance = 0.0
 
-    if np.count_nonzero(negative) >= 3:
-        selected = cells[negative]
+    minimum_region = max(2, int(min_region_cells))
+    negative_region = _largest_connected_region(cells, negative, cell_size)
+    positive_region = _largest_connected_region(cells, positive, cell_size)
+
+    if len(negative_region) >= minimum_region:
+        selected = cells[negative_region]
+        measured_pit = max(
+            0.0, -float(np.quantile(low_relative[negative_region], 0.10))
+        )
         obstacle_type = PIT
         distance = float(np.quantile(selected[:, 0], 0.10))
         width = float(np.ptp(selected[:, 1]) + cell_size)
-        confidence = min(1.0, 0.45 + 0.08 * len(selected))
-    elif np.count_nonzero(positive) >= 3:
-        selected_cells = cells[positive]
+        confidence = min(0.96, 0.42 + 0.07 * len(selected))
+    elif len(positive_region) >= minimum_region:
+        selected_cells = cells[positive_region]
+        obstacle_height = max(
+            0.0, float(np.quantile(high_relative[positive_region], 0.90))
+        )
         distance = float(np.quantile(selected_cells[:, 0], 0.10))
         width = float(np.ptp(selected_cells[:, 1]) + cell_size)
         # 只看障碍前缘附近的原始点，利用垂直/横向跨度区分几何类别。
@@ -146,17 +220,25 @@ def analyze_terrain_geometry(
             vertical_score = min(1.0, z_span / max(wall_height, 1e-3))
             if z_span >= wall_height and y_span >= 0.25 and low_clearance <= step_height:
                 obstacle_type = WALL
-                confidence = 0.55 + 0.35 * vertical_score
+                confidence = min(
+                    0.96, 0.50 + 0.30 * vertical_score + 0.02 * len(selected_cells)
+                )
             elif z_span >= 0.12 and y_span >= 0.25 and low_clearance > step_height:
                 obstacle_type = BAR
                 clearance = max(0.0, low_clearance)
-                confidence = min(0.90, 0.55 + y_span * 0.35)
+                confidence = min(
+                    0.92, 0.50 + y_span * 0.35 + 0.02 * len(selected_cells)
+                )
             elif z_span >= 0.15 and y_span <= 0.18 and x_span <= 0.18:
                 obstacle_type = POLE
-                confidence = min(0.88, 0.50 + z_span * 0.8)
+                confidence = min(
+                    0.90, 0.46 + z_span * 0.8 + 0.02 * len(selected_cells)
+                )
             else:
                 obstacle_type = STEP
-                confidence = min(0.92, 0.50 + obstacle_height)
+                confidence = min(
+                    0.92, 0.46 + obstacle_height + 0.025 * len(selected_cells)
+                )
         else:
             obstacle_type = STEP
             confidence = 0.50

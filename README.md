@@ -44,7 +44,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门和 rosbag 离线评估：7 个 ROS 2 包可编译，39 项测试通过，并提供一键
+决策、速度超时门和 rosbag 离线评估：7 个 ROS 2 包可编译，45 项测试通过，并提供一键
 启动和 CI。URDF 只用于 RViz 外形与传感器 TF 占位，不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
 
@@ -148,9 +148,9 @@ wakula/
 
 主要节点：
 
-- `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并做多帧确认。
-- `terrain_analyzer`：将点云转换到 `base_link`，以高度栅格分割主地面并估计台阶、坡度、坑洞、墙、横杆和立柱。
-- `perception_fusion`：按消息头时间戳近似同步相机/点云，发布强类型融合观测；点云始终掌握尺度权限。
+- `vision_obstacle_detector`：OpenCV HSV + Canny 轮廓识别，并用曝光/清晰度、投票率和目标框 IoU 做多帧确认。
+- `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格和连通域估计台阶、坡度、坑洞、墙、横杆和立柱。
+- `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；点云始终掌握尺度权限。
 - `obstacle_crossing_manager`：优先读取按时间戳配对的强类型融合观测，生成地形模式、处理建议和速度倍率；不输出腿部动作。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳。
 - `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
@@ -418,9 +418,11 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 - 灰度 Canny 轮廓：颜色不可靠时，利用细长双立柱、宽横条和大矩形补充判断。
 
 每帧先用 CLAHE 归一化局部光照，再执行形态学去噪、自适应 Canny、前向 ROI 和轮廓筛选。
+严重欠曝、过曝或失焦的图像会在进入历史窗口前被拒绝；最小轮廓面积同时采用像素下限和
+图像面积比例，避免切换分辨率后检测尺度突变。
 双立柱必须同时满足高度、垂直重叠、间距、宽度和填充率一致性；颜色候选与边缘支持共同
-计算置信度。最近 5 帧中不仅要求至少 3 帧类型一致，还要求目标位置和尺寸连续，因此反光、
-画面边缘、无关竖条和跨帧跳变不容易形成稳定证据。输出接口保持不变：
+计算置信度。最近 5 帧不仅要求至少 3 帧且达到 60% 同类投票，还要求位置、尺寸和目标框
+IoU 连续，因此反光、画面边缘、无关竖条和跨帧跳变不容易形成稳定证据。输出接口保持不变：
 
 ```text
 /vision/obstacle_evidence  std_msgs/Float32MultiArray
@@ -442,8 +444,9 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 将正常 `WALK` 降速为 `VERIFY_VISUAL_OBSTACLE_WITH_DEPTH`。视觉不会覆盖已经由点云
 给出的 `STEP`、`CLIMB` 或 `STOP`。
 
-现场必须按真实相机和光照标定 `vision.yaml` 中的 HSV、ROI、Canny、轮廓填充率和多帧参数。
-建议依次调整 ROI → HSV → `min_area_px`/`min_color_fill_ratio` → Canny → 时序抖动阈值，
+现场必须按真实相机和光照标定 `vision.yaml` 中的 HSV、ROI、Canny、图像质量、轮廓和多帧参数。
+建议依次调整 ROI → HSV → `min_image_quality` → `min_area_px`/`min_area_ratio` → Canny →
+`temporal_match_ratio`/`min_temporal_iou`，
 避免同时修改全部参数而无法定位误差来源。CLAHE、自适应 Canny 均可单独关闭以做对照。
 可临时开启 `publish_debug_mask`，在 `/vision/debug_mask` 检查分割与边缘效果；标定完成后
 关闭，以减少图像复制。
@@ -485,7 +488,8 @@ obstacle_type, confidence, width, clearance_height]
 
 启用 OpenCV 时，决策层优先消费 `/perception/fused_obstacle`：它在一个带 Header 的消息中
 同时携带几何/视觉确认位、点数、粗糙度、坡度和时间差，避免不同帧字段被拼成一次决策。
-相机与点云时间差超过 `0.10 s`、几何未确认、置信度不足或点数不足时保持停车。关闭
+同步器会在有界小队列内寻找全局时间差最小的一对消息，能处理常见的回调乱序；零时间戳、
+重复旧帧和时间差超过 `0.10 s` 的观测不会融合。几何未确认、置信度不足或点数不足时保持停车。关闭
 OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达的真机继续使用。
 
 判定默认值：高度 `0.08 m` 起分类为 `STEP`，`0.18 m` 起分类为 `CLIMB`，`0.32 m` 起
@@ -493,8 +497,9 @@ OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达
 能力和相机安装误差重新标定。
 
 兼容字段仍使用纵向低分位地面包络；强类型输出另将点云压成 XY 高度栅格，从占多数的
-高度层拟合 `z=ax+by+c` 主地面，再计算俯仰/横滚坡度、坑深、墙面垂直跨度、横杆净空
-和立柱宽度。坑洞必须看到真实低处回波，单纯无点按未知处理，避免把盲区误判成坑。
+高度层迭代 MAD 剔除离群格并拟合 `z=ax+by+c` 主地面，再计算俯仰/横滚坡度、坑深、墙面
+垂直跨度、横杆净空和立柱宽度。高处/低处异常必须形成可配置的八邻域连通区域，分散飞点
+不会组成障碍。坑洞必须看到真实低处回波，单纯无点按未知处理，避免把盲区误判成坑。
 `frontal_obstacle_height`
 只统计中央通道，`lookahead` 是最近成片障碍的实际 x 距离，不再是固定 ROI 长度。
 
@@ -547,6 +552,8 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 
 融合模式采用非对称防抖：紧急 STOP 立即生效；STEP/CLIMB 需要连续几帧几何证据；向
 更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
+视觉细分类也不能无条件覆盖点云：横杆必须同时具有米制离地净空，立柱必须满足点云窄宽度；
+视觉与几何冲突时保留几何类别并降低置信度，等待后续同步帧确认。
 高度、坡度、粗糙度、点数和超时等运行参数也在节点入口及纯决策函数处进行合法性防御；
 NaN、Inf、非正安全上限或乱序高度阈值都不能被解释为可通行。
 

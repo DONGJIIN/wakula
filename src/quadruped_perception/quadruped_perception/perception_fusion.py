@@ -28,6 +28,37 @@ def stamp_seconds(header) -> float:
     return float(header.stamp.sec) + float(header.stamp.nanosec) * 1e-9
 
 
+def find_synchronized_pair(terrain_queue, vision_queue, sync_slop: float):
+    """从两个小队列中选择全局时间差最小且未超窗的一对消息。
+
+    ROS 2 不保证不同传感器回调严格按时间戳到达。只拿“最新点云”寻找图像会在网络
+    抖动或驱动批量发布时漏掉本来可用的旧配对；全局搜索的上限由 queue_size 限制，
+    默认仅 10×10 次比较，对 RK3588 可忽略。
+    """
+    limit = max(0.0, float(sync_slop))
+    candidates = []
+    for terrain in terrain_queue:
+        terrain_time = stamp_seconds(terrain.header)
+        if not math.isfinite(terrain_time) or terrain_time <= 0.0:
+            continue
+        for vision in vision_queue:
+            vision_time = stamp_seconds(vision.header)
+            if not math.isfinite(vision_time) or vision_time <= 0.0:
+                continue
+            skew = abs(vision_time - terrain_time)
+            if skew <= limit:
+                # 时间差相同时优先最新的一对，减少输出观测年龄。
+                candidates.append(
+                    (skew, -max(terrain_time, vision_time), terrain, vision)
+                )
+    if not candidates:
+        return None
+    skew, _, terrain, vision = min(
+        candidates, key=lambda item: (item[0], item[1])
+    )
+    return terrain, vision, float(skew)
+
+
 def fuse_observations(terrain, vision, skew: float, vision_min_confidence: float):
     """融合一对同步消息并返回强类型结果，保持点云几何的安全优先级。"""
     result = FusedObstacle()
@@ -58,14 +89,28 @@ def fuse_observations(terrain, vision, skew: float, vision_min_confidence: float
         TerrainFeatures.BAR,
         TerrainFeatures.POLE,
     ):
-        # 横杆/立柱都必须已有正高度点云；视觉只负责细分类。
-        if visual_type in (FusedObstacle.BAR, FusedObstacle.POLE):
+        # 视觉细分类还必须满足米制几何条件，不能把普通台阶仅凭像素外观改成横杆
+        # 或立柱。横杆要求离地净空；立柱要求点云横向宽度较窄。
+        compatible = visual_type == int(terrain.obstacle_type)
+        if (
+            visual_type == FusedObstacle.BAR
+            and terrain.clearance_height >= 0.05
+            and terrain.obstacle_height >= 0.10
+        ):
+            compatible = True
+        elif (
+            visual_type == FusedObstacle.POLE
+            and 0.0 < terrain.width <= 0.25
+            and terrain.obstacle_height >= 0.10
+        ):
+            compatible = True
+        if compatible:
             result.obstacle_type = visual_type
-        if visual_type == int(terrain.obstacle_type):
             result.confidence = min(
                 1.0, 0.65 * terrain.confidence + 0.45 * vision.confidence
             )
         else:
+            # 冲突证据不改变几何类别，只降低置信度，交由后续帧继续确认。
             result.confidence = max(0.0, 0.75 * terrain.confidence)
     return result
 
@@ -107,24 +152,39 @@ class PerceptionFusion(Node):
     def _try_pair(self) -> None:
         if not self.terrain_queue or not self.vision_queue:
             return
-        terrain = self.terrain_queue[-1]
-        terrain_time = stamp_seconds(terrain.header)
-        candidates = [
-            (abs(stamp_seconds(item.header) - terrain_time), item)
-            for item in self.vision_queue
-        ]
-        skew, vision = min(candidates, key=lambda item: item[0])
-        if not math.isfinite(skew) or skew > self.sync_slop:
-            self._diagnostic(DiagnosticStatus.WARN, "waiting for synchronized camera", skew)
+        pair = find_synchronized_pair(
+            self.terrain_queue, self.vision_queue, self.sync_slop
+        )
+        if pair is None:
+            newest_terrain = stamp_seconds(self.terrain_queue[-1].header)
+            newest_vision = stamp_seconds(self.vision_queue[-1].header)
+            skew = abs(newest_terrain - newest_vision)
+            self._diagnostic(
+                DiagnosticStatus.WARN, "waiting for synchronized camera", skew
+            )
             return
+        terrain, vision, skew = pair
         fused = fuse_observations(
             terrain, vision, skew, self.vision_min_confidence
         )
         self.output_pub.publish(fused)
-        self.terrain_queue.clear()
-        # 丢弃已配对时间之前的视觉帧，防止同一旧图重复增强多帧点云。
+        terrain_time = stamp_seconds(terrain.header)
+        vision_time = stamp_seconds(vision.header)
+        # 一对消息只能使用一次；同时丢弃更早观测，防止旧图重复增强后续点云。
+        self.terrain_queue = deque(
+            (
+                item
+                for item in self.terrain_queue
+                if stamp_seconds(item.header) > terrain_time
+            ),
+            maxlen=self.terrain_queue.maxlen,
+        )
         self.vision_queue = deque(
-            (item for item in self.vision_queue if stamp_seconds(item.header) > terrain_time),
+            (
+                item
+                for item in self.vision_queue
+                if stamp_seconds(item.header) > vision_time
+            ),
             maxlen=self.vision_queue.maxlen,
         )
         self._diagnostic(DiagnosticStatus.OK, "camera/cloud synchronized", skew)

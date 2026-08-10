@@ -1,7 +1,10 @@
 """Tests for timestamped conservative camera/cloud fusion."""
 
 from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObstacle
-from quadruped_perception.perception_fusion import fuse_observations
+from quadruped_perception.perception_fusion import (
+    find_synchronized_pair,
+    fuse_observations,
+)
 
 
 def terrain(obstacle_type=TerrainFeatures.STEP):
@@ -34,10 +37,45 @@ def test_visual_bar_only_refines_existing_positive_geometry():
         obstacle_type=VisionObstacle.HEIGHT_BAR,
         confidence=0.9,
     )
-    result = fuse_observations(terrain(), camera, 0.02, 0.55)
+    compatible = terrain()
+    compatible.clearance_height = 0.12
+    result = fuse_observations(compatible, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.BAR
+
+    ordinary_step = terrain()
+    result = fuse_observations(ordinary_step, camera, 0.02, 0.55)
+    assert result.obstacle_type == FusedObstacle.STEP
+    assert result.confidence < ordinary_step.confidence
 
     invalid = TerrainFeatures(valid=False, obstacle_type=TerrainFeatures.UNKNOWN)
     result = fuse_observations(invalid, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.UNKNOWN
     assert not result.geometry_confirmed
+
+
+def _stamp(msg, seconds, nanoseconds=0):
+    msg.header.stamp.sec = seconds
+    msg.header.stamp.nanosec = nanoseconds
+    return msg
+
+
+def test_pairing_handles_out_of_order_callbacks_and_uses_each_stamp():
+    """A valid older pair is retained even when the newest cloud has no matching image."""
+    old_cloud = _stamp(terrain(), 10)
+    new_cloud = _stamp(terrain(), 11)
+    old_image = _stamp(VisionObstacle(), 10, 40_000_000)
+    too_new_image = _stamp(VisionObstacle(), 11, 250_000_000)
+    pair = find_synchronized_pair(
+        [old_cloud, new_cloud], [old_image, too_new_image], 0.10
+    )
+    assert pair is not None
+    assert pair[0] is old_cloud
+    assert pair[1] is old_image
+    assert abs(pair[2] - 0.04) < 1e-6
+
+
+def test_pairing_rejects_zero_or_out_of_window_timestamps():
+    assert find_synchronized_pair([terrain()], [VisionObstacle()], 0.10) is None
+    cloud = _stamp(terrain(), 20)
+    image = _stamp(VisionObstacle(), 21)
+    assert find_synchronized_pair([cloud], [image], 0.10) is None
