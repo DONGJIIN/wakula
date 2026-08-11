@@ -103,6 +103,9 @@ Xbox 手柄（使用独立 launch，刻意不加入 slam.launch.py）：
 
 先用 `ros2 topic echo /joy` 核对实际轴/按键下标，再查看 `/cmd_vel_joy`。默认不会接管
 `/cmd_vel`；真机阶段增加 twist_mux，将手柄和 Nav2 仲裁结果送入 Collision Monitor。
+LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需松开并重新按下。轴方向相反时
+修改 xbox.yaml 的 linear_x_direction、linear_y_direction 或 angular_z_direction 为 -1.0。
+若手柄断流，节点持续输出零速度；恢复连接后必须先松开并重新按下 LB。
 
 五、快速验收
 ----------

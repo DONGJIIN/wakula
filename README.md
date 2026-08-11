@@ -45,7 +45,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、强类型真机对接合同和 rosbag 离线评估：8 个 ROS 2
-包可编译，66 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+包可编译，69 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -473,14 +473,18 @@ ros2 launch quadruped_teleop xbox_teleop.launch.py
 |---|---|
 | 左摇杆上下/左右 | 前后移动/横移 |
 | 右摇杆左右 | 左右偏航转向 |
-| LB | 按住使能；松开立即归零 |
+| LB | 摇杆回中时按下解锁，持续按住使能；松开立即归零 |
 | A / X / Y | 低速档 / 正常档 / 快速档 |
 | B | 锁存软件急停 |
 | Start | 松开 LB 且摇杆回中时解除软件急停 |
 | RB、Back、Guide、左右摇杆按下 | 预留，当前不产生动作 |
 | LT、RT、十字键、右摇杆上下 | 预留，当前不产生动作 |
 
-调试时查看 `/cmd_vel_joy`、`/teleop/active` 和 `/teleop/emergency_stop`。默认不直接发布
+若带着非零摇杆按下 LB，节点会拒绝解锁；即使随后回中也必须松开并重新按下 LB，避免
+手柄放置姿态造成突然起步。若 `/joy` 断流，重连后同样必须先松开再重新按下 LB，避免
+沿用断流前的使能状态。调试时查看 `/cmd_vel_joy`、`/teleop/active`、
+`/teleop/emergency_stop` 和 `/teleop/speed_mode`。若某个摇杆方向与表格相反，只需在
+`xbox.yaml` 将对应 `*_direction` 改成 `-1.0`。默认不直接发布
 `/cmd_vel`，防止与 Nav2 同时控制；真机应增加 `twist_mux`，在手柄和 Nav2 间仲裁后再进入
 Collision Monitor。该节点只输出机身速度，仍需运动控制团队把 Twist 转换为四足步态。
 

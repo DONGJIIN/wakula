@@ -7,6 +7,7 @@ xbox_teleop:
     output_topic: /cmd_vel_joy
     active_topic: /teleop/active
     emergency_stop_topic: /teleop/emergency_stop
+    speed_mode_topic: /teleop/speed_mode
     publish_rate: 20.0
     joy_timeout: 0.5
     deadzone: 0.12
@@ -15,10 +16,16 @@ xbox_teleop:
     axis_linear_x: 1
     axis_linear_y: 0
     axis_angular_z: 3
+    # 若实测方向相反，将对应 direction 改为 -1；横移默认只保留平移档位的 60%。
+    linear_x_direction: 1.0
+    linear_y_direction: 1.0
+    angular_z_direction: 1.0
+    lateral_speed_scale: 0.60
 
     # 按键索引及用途：
     # A(0)：低速档；B(1)：锁存软件急停；X(2)：正常档；Y(3)：快速档。
-    # LB(4)：使能键，必须一直按住才允许输出非零速度。
+    # LB(4)：摇杆回中时按下完成解锁，之后必须一直按住；松开立即归零。
+    # /joy 断流恢复后也必须先松开再重新按下，不能沿用断流前的使能状态。
     # RB(5)：预留，当前无动作；Back(6)：预留，当前无动作。
     # Start(7)：清除软件急停，仅在松开 LB 且三个控制摇杆居中时有效。
     # Guide/Xbox(8)：系统可能截获，当前不使用。

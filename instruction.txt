@@ -56,10 +56,13 @@ Twist 适配和离线评估。
    替代未来驱动器急停和硬件看门狗。
 
 4. quadruped_teleop
-   xbox_teleop.py：订阅标准 /joy，左摇杆控制前后/横移、右摇杆控制偏航，LB 按住使能，
+   xbox_teleop.py：订阅标准 /joy，左摇杆控制前后/横移、右摇杆控制偏航；LB 只有在摇杆
+   回中时按下才能解锁，之后须持续按住，松开立即归零。带量按 LB 会拒绝解锁，必须松开
+   后重试。横移默认限制为当前平移档位的 60%，三个轴方向可在 YAML 独立翻转。
    A/X/Y 切换三档速度，B 锁存软件急停，Start 仅在 LB 松开且摇杆回中时清除急停。
    默认发布 /cmd_vel_joy，不加入 slam.launch.py；真机阶段必须经 twist_mux 与 Nav2 仲裁，
-   再进入 Collision Monitor。手柄断流超过 0.5 s 会持续发布零速度。
+   再进入 Collision Monitor。手柄断流超过 0.5 s 会持续发布零速度；恢复连接后必须先
+   松开再重新按下 LB，不能沿用断流前的使能状态。
    xbox_teleop.launch.py：独立同时启动 joy_node 和 xbox_teleop；不包含 SLAM/Nav2，方便
    单独调试手柄，也满足主导航 launch 不自动启动手柄的边界。
 

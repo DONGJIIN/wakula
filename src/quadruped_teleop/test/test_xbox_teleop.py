@@ -39,34 +39,95 @@ def test_short_or_invalid_input_is_fail_safe():
 
 
 def test_lb_must_be_held_to_generate_normal_speed_command():
-    """只有按住 LB 时摇杆才按正常档上限生成速度。"""
+    """摇杆回中按下 LB 解锁后，持续按住才按正常档生成速度。"""
     controller = XboxTeleopController(TeleopConfig(deadzone=0.0))
     axes, buttons = joy_state(axes=[0.5, 1.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0])
     inactive = controller.update(axes, buttons)
     assert not inactive.active
     assert inactive.twist.linear.x == 0.0
 
+    armed = controller.update(*joy_state(pressed=(4,)))
+    assert armed.active
+    assert armed.event == "teleop_armed"
+
     axes, buttons = joy_state(axes=axes, pressed=(4,))
     active = controller.update(axes, buttons)
     assert active.active
     assert active.twist.linear.x == 0.25
-    assert active.twist.linear.y == 0.125
+    assert active.twist.linear.y == 0.075
     assert active.twist.angular.z == -0.30
 
 
 def test_a_x_y_select_speed_modes_on_button_edges():
     """A/X/Y 分别选择低速、正常、快速档，松开 LB 后仍保持选中档位。"""
     controller = XboxTeleopController(TeleopConfig(deadzone=0.0))
-    axes, buttons = joy_state(axes=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], pressed=(0, 4))
-    slow = controller.update(axes, buttons)
+    controller.update(*joy_state(pressed=(0,)))
+    controller.update(*joy_state())
+    controller.update(*joy_state(pressed=(4,)))
+    moving = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    slow = controller.update(*joy_state(axes=moving, pressed=(4,)))
     assert slow.speed_mode == "slow"
     assert slow.twist.linear.x == 0.12
 
     controller.update(*joy_state())
-    axes, buttons = joy_state(axes=axes, pressed=(3, 4))
-    fast = controller.update(axes, buttons)
+    controller.update(*joy_state(pressed=(3,)))
+    controller.update(*joy_state())
+    controller.update(*joy_state(pressed=(4,)))
+    fast = controller.update(*joy_state(axes=moving, pressed=(4,)))
     assert fast.speed_mode == "fast"
     assert fast.twist.linear.x == 0.40
+
+
+def test_off_center_lb_is_rejected_until_released_and_pressed_again():
+    """带非零摇杆按下 LB 不得起步，回中后也必须松开并重新按下。"""
+    controller = XboxTeleopController(TeleopConfig(deadzone=0.10))
+    moving = [0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    rejected = controller.update(*joy_state(axes=moving, pressed=(4,)))
+    assert not rejected.active
+    assert rejected.event == "teleop_arm_rejected"
+
+    still_held = controller.update(*joy_state(pressed=(4,)))
+    assert not still_held.active
+    controller.update(*joy_state())
+    armed = controller.update(*joy_state(pressed=(4,)))
+    assert armed.active
+
+
+def test_timeout_requires_lb_release_before_rearming():
+    """断流撤销使能；重连时持续按住 LB 也必须松开并再次安全按下。"""
+    controller = XboxTeleopController(TeleopConfig(deadzone=0.0))
+    controller.update(*joy_state(pressed=(4,)))
+    moving = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert controller.update(*joy_state(axes=moving, pressed=(4,))).active
+
+    controller.disarm_for_timeout()
+    reconnected = controller.update(*joy_state(pressed=(4,)))
+    assert not reconnected.active
+    assert reconnected.event == "teleop_waiting_for_deadman_release"
+    # 持续按住时不重复报告，避免节点按手柄帧率刷日志。
+    assert controller.update(*joy_state(pressed=(4,))).event == ""
+
+    controller.update(*joy_state())
+    armed_again = controller.update(*joy_state(pressed=(4,)))
+    assert armed_again.active
+
+
+def test_axis_directions_and_lateral_limit_are_configurable():
+    """不同驱动轴方向可翻转，横移速度按独立比例保守限制。"""
+    config = TeleopConfig(
+        deadzone=0.0,
+        linear_x_direction=-1.0,
+        linear_y_direction=-1.0,
+        angular_z_direction=-1.0,
+        lateral_speed_scale=0.4,
+    )
+    controller = XboxTeleopController(config)
+    controller.update(*joy_state(pressed=(4,)))
+    axes = [1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    result = controller.update(*joy_state(axes=axes, pressed=(4,)))
+    assert result.twist.linear.x == -0.25
+    assert result.twist.linear.y == -0.10
+    assert result.twist.angular.z == -0.60
 
 
 def test_b_latches_stop_until_safe_start_clear():

@@ -3,7 +3,7 @@
 默认控制布局（Linux ``joy_node`` 常见映射）：
 
 * 左摇杆上下：前进/后退；左摇杆左右：横移；右摇杆左右：原地转向；
-* LB：按住使能（dead-man switch），松手立即输出零速度；
+* LB：摇杆回中时按下完成安全解锁，之后必须持续按住；松手立即输出零速度；
 * A/X/Y：切换低速/正常/快速三档；
 * B：锁存软件急停；Start：在松开 LB 且摇杆回中时解除软件急停；
 * RB、Back、Guide、左右摇杆按下、LT/RT 和十字键：当前预留，不产生动作。
@@ -28,7 +28,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 
 # Xbox 按键的常见 Linux 顺序。配置文件仍可覆盖真正参与控制的按键，以适配不同驱动。
@@ -69,6 +69,10 @@ class TeleopConfig:
     button_deadman: int = XBOX_BUTTON_LB
     button_clear_stop: int = XBOX_BUTTON_START
     deadzone: float = 0.12
+    linear_x_direction: float = 1.0
+    linear_y_direction: float = 1.0
+    angular_z_direction: float = 1.0
+    lateral_speed_scale: float = 0.60
     slow_linear_speed: float = 0.12
     slow_angular_speed: float = 0.35
     normal_linear_speed: float = 0.25
@@ -121,11 +125,22 @@ class XboxTeleopController:
     SPEED_MODES = ("slow", "normal", "fast")
 
     def __init__(self, config: TeleopConfig):
-        """以正常档、未使能、未急停状态启动；运动仍需首次收到 LB。"""
+        """以正常档、未解锁、未急停状态启动；运动前必须在摇杆回中时按下 LB。"""
         self.config = config
         self.speed_mode = "normal"
         self.emergency_stop = False
+        self.armed = False
+        # 输入断流后置位；即使重连时 LB 仍被按住，也必须先松开再重新按下。
+        self.rearm_requires_release = False
+        self.rearm_wait_reported = False
         self.previous_buttons: Sequence[int] = ()
+
+    def disarm_for_timeout(self) -> None:
+        """手柄断流时撤销使能，并要求 LB 完成一次明确的松开动作。"""
+        self.armed = False
+        self.rearm_requires_release = True
+        # 每次新断流只允许打印一次等待提示，避免按 /joy 频率刷屏。
+        self.rearm_wait_reported = False
 
     def _rising_edge(self, buttons: Sequence[int], index: int) -> bool:
         """只在按键从松开变为按下时触发一次，防止每帧重复切档或清急停。"""
@@ -156,10 +171,14 @@ class XboxTeleopController:
         """处理一帧手柄状态；安全事件优先于速度档位和运动输出。"""
         event = ""
         deadman = button_pressed(buttons, self.config.button_deadman)
+        deadman_was_pressed = button_pressed(
+            self.previous_buttons, self.config.button_deadman
+        )
 
         # B 是最高优先级：无论摇杆或 LB 状态如何，按下即锁存急停并输出零速度。
         if self._rising_edge(buttons, self.config.button_stop):
             self.emergency_stop = True
+            self.armed = False
             event = "emergency_stop_latched"
 
         # Start 不能在仍按住使能或摇杆未回中时解除急停，防止解除瞬间突然移动。
@@ -181,19 +200,44 @@ class XboxTeleopController:
             self.speed_mode = "fast"
             event = event or "speed_fast"
 
-        active = deadman and not self.emergency_stop
+        # LB 是两阶段使能：只有从松开变为按下的那一帧摇杆已回中，才进入 armed。
+        # 若带着非零摇杆按下 LB，必须松开后重新按下，防止手柄放置姿态导致突然起步。
+        if not deadman:
+            self.armed = False
+            self.rearm_requires_release = False
+            self.rearm_wait_reported = False
+        elif self.rearm_requires_release:
+            # 断流前若 LB 处于按下状态，重连帧不能直接恢复运动。只有收到明确的
+            # LB 松开帧后，下一次“回中 + 按下”才允许重新解锁。
+            self.armed = False
+            if not self.rearm_wait_reported:
+                event = event or "teleop_waiting_for_deadman_release"
+                self.rearm_wait_reported = True
+        elif not deadman_was_pressed:
+            if not self.emergency_stop and self._sticks_centered(axes):
+                self.armed = True
+                event = event or "teleop_armed"
+            else:
+                self.armed = False
+                event = event or "teleop_arm_rejected"
+
+        active = deadman and self.armed and not self.emergency_stop
         command = zero_twist()
         if active:
             linear_limit, angular_limit = self._speed_limits()
             command.linear.x = apply_deadzone(
                 safe_axis(axes, self.config.axis_linear_x), self.config.deadzone
-            ) * max(0.0, linear_limit)
+            ) * max(0.0, linear_limit) * self.config.linear_x_direction
             command.linear.y = apply_deadzone(
                 safe_axis(axes, self.config.axis_linear_y), self.config.deadzone
-            ) * max(0.0, linear_limit)
+            ) * (
+                max(0.0, linear_limit)
+                * max(0.0, min(1.0, self.config.lateral_speed_scale))
+                * self.config.linear_y_direction
+            )
             command.angular.z = apply_deadzone(
                 safe_axis(axes, self.config.axis_angular_z), self.config.deadzone
-            ) * max(0.0, angular_limit)
+            ) * max(0.0, angular_limit) * self.config.angular_z_direction
 
         # 保存当前按键快照必须放在所有边沿判断之后。
         self.previous_buttons = tuple(buttons)
@@ -218,6 +262,7 @@ class XboxTeleopNode(Node):
         self.declare_parameter("output_topic", "/cmd_vel_joy")
         self.declare_parameter("active_topic", "/teleop/active")
         self.declare_parameter("emergency_stop_topic", "/teleop/emergency_stop")
+        self.declare_parameter("speed_mode_topic", "/teleop/speed_mode")
         self.declare_parameter("publish_rate", 20.0)
         self.declare_parameter("joy_timeout", 0.5)
         self.declare_parameter("deadzone", 0.12)
@@ -226,6 +271,12 @@ class XboxTeleopNode(Node):
         self.declare_parameter("axis_linear_x", XBOX_AXIS_LEFT_Y)
         self.declare_parameter("axis_linear_y", XBOX_AXIS_LEFT_X)
         self.declare_parameter("axis_angular_z", XBOX_AXIS_RIGHT_X)
+        # 方向参数只允许 ±1；若某个驱动轴方向相反，改 YAML 即可，无需改算法。
+        self.declare_parameter("linear_x_direction", 1.0)
+        self.declare_parameter("linear_y_direction", 1.0)
+        self.declare_parameter("angular_z_direction", 1.0)
+        # 横移通常比前进能力弱，默认限制为当前平移档位的 60%。
+        self.declare_parameter("lateral_speed_scale", 0.60)
 
         # A/B/X/Y/LB/Start 的功能映射；所有其他 Xbox 按键明确预留。
         self.declare_parameter("button_slow", XBOX_BUTTON_A)
@@ -259,6 +310,12 @@ class XboxTeleopNode(Node):
                 "button_clear_stop", XBOX_BUTTON_START
             ),
             deadzone=self._bounded_parameter("deadzone", 0.12, 0.0, 0.95),
+            linear_x_direction=self._direction_parameter("linear_x_direction"),
+            linear_y_direction=self._direction_parameter("linear_y_direction"),
+            angular_z_direction=self._direction_parameter("angular_z_direction"),
+            lateral_speed_scale=self._bounded_parameter(
+                "lateral_speed_scale", 0.60, 0.0, 1.0
+            ),
             slow_linear_speed=self._positive_parameter("slow_linear_speed", 0.12),
             slow_angular_speed=self._positive_parameter("slow_angular_speed", 0.35),
             normal_linear_speed=self._positive_parameter(
@@ -291,13 +348,17 @@ class XboxTeleopNode(Node):
         self.stop_pub = self.create_publisher(
             Bool, str(self.get_parameter("emergency_stop_topic").value), state_qos
         )
+        self.mode_pub = self.create_publisher(
+            String, str(self.get_parameter("speed_mode_topic").value), state_qos
+        )
         # joy_node 通常使用 SensorDataQoS；这里采用相同 profile，兼容有线和无线驱动。
         self.create_subscription(
             Joy, input_topic, self.joy_callback, qos_profile_sensor_data
         )
         self.create_timer(1.0 / publish_rate, self.publish_command)
         self.get_logger().info(
-            f"Xbox teleop: {input_topic} -> {output_topic}; hold LB to enable"
+            f"Xbox teleop: {input_topic} -> {output_topic}; "
+            "center sticks, then hold LB to enable"
         )
 
     def _index_parameter(self, name: str, fallback: int) -> int:
@@ -310,6 +371,11 @@ class XboxTeleopNode(Node):
         value = float(self.get_parameter(name).value)
         return value if isfinite(value) and value > 0.0 else fallback
 
+    def _direction_parameter(self, name: str) -> float:
+        """把任意有限正/负配置归一为 +1/-1；零和非法值按 +1 处理。"""
+        value = float(self.get_parameter(name).value)
+        return -1.0 if isfinite(value) and value < 0.0 else 1.0
+
     def _bounded_parameter(
         self, name: str, fallback: float, lower: float, upper: float
     ) -> float:
@@ -319,8 +385,16 @@ class XboxTeleopNode(Node):
 
     def joy_callback(self, msg: Joy) -> None:
         """更新控制状态；B 急停在回调中立即发布一次零速度，缩短停车延迟。"""
+        now = self.get_clock().now()
+        # 回调可能恰好先于周期发布器运行，因此这里也检查消息间隔，确保断流重连
+        # 无论发生在定时器的哪个相位，都不会沿用断流前的 armed 状态。
+        if (
+            self.last_joy_time is not None
+            and (now - self.last_joy_time).nanoseconds / 1e9 > self.joy_timeout
+        ):
+            self.controller.disarm_for_timeout()
         self.latest_result = self.controller.update(msg.axes, msg.buttons)
-        self.last_joy_time = self.get_clock().now()
+        self.last_joy_time = now
         if self.latest_result.event:
             self.get_logger().info(
                 f"Xbox event={self.latest_result.event}, "
@@ -338,11 +412,16 @@ class XboxTeleopNode(Node):
             else (now - self.last_joy_time).nanoseconds / 1e9
         )
         fresh = age <= self.joy_timeout
+        if not fresh:
+            # 重复调用是幂等的。保留 previous_buttons，才能识别断流前 LB 是否仍按下；
+            # rearm_requires_release 会保证重连后必须先收到一次松开帧。
+            self.controller.disarm_for_timeout()
         command = self.latest_result.twist if fresh else zero_twist()
         active = self.latest_result.active and fresh
         self.command_pub.publish(command if active else zero_twist())
         self.active_pub.publish(Bool(data=active))
         self.stop_pub.publish(Bool(data=self.latest_result.emergency_stop))
+        self.mode_pub.publish(String(data=self.latest_result.speed_mode))
 
 
 def main(args=None):

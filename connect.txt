@@ -98,9 +98,10 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 2.5 手柄节点（不随主导航启动）
 
 /xbox_teleop（quadruped_teleop / xbox_teleop）
-  作用：把 Xbox 手柄标准 /joy 转换为带使能、急停和三档限速的机身速度。
+  作用：把 Xbox 手柄标准 /joy 转换为带安全解锁、急停、断流重解锁和三档限速的机身速度。
   输入：/joy（sensor_msgs/msg/Joy）。
-  输出：/cmd_vel_joy（Twist）、/teleop/active（Bool）、/teleop/emergency_stop（Bool）。
+  输出：/cmd_vel_joy（Twist）、/teleop/active（Bool）、/teleop/emergency_stop（Bool）、
+  /teleop/speed_mode（String）。
   注意：默认不直接发布 /cmd_vel；真机使用 twist_mux 仲裁后再进入 Collision Monitor。
   启动：xbox_teleop.launch.py 同时拉起外部 /joy 驱动和本节点，但不加入 slam.launch.py。
 
@@ -187,8 +188,13 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
   类型均为 geometry_msgs/msg/Twist。分别表示 Nav2 原始、平滑后、地形门后、碰撞监控后。
 
 /cmd_vel_joy，geometry_msgs/msg/Twist
-  Xbox 手柄独立速度候选；LB 松开、B 急停或 /joy 断流时为零。当前没有自动接入 /cmd_vel，
-  未来由 twist_mux 与 Nav2 仲裁，仲裁结果再送入 Collision Monitor。
+  Xbox 手柄独立速度候选；LB 未安全解锁/松开、B 急停或 /joy 断流时为零；断流恢复后
+  必须松开并重新按下 LB。当前没有自动接入 /cmd_vel，未来由 twist_mux 与 Nav2 仲裁，
+  仲裁结果再送入 Collision Monitor。
+
+/teleop/active、/teleop/emergency_stop、/teleop/speed_mode
+  类型依次为 Bool、Bool、String，均采用 reliable + transient local，供后来启动的监控或
+  仲裁节点立即取得当前使能、急停和 slow/normal/fast 档位状态。
 
 /navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
   健康监控检查 LaserScan 厂商量程、NaN/±Inf、里程计有限性/协方差/四元数、采样时间戳、
