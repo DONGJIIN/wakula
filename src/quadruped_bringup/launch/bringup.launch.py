@@ -114,7 +114,7 @@ def generate_launch_description():
                 package="quadruped_perception",
                 executable="perception_fusion",
                 output="screen",
-                parameters=[common_time],
+                parameters=[vision_params_file, common_time],
                 condition=IfCondition(vision),
             ),
             Node(

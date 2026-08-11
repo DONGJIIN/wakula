@@ -344,6 +344,23 @@ def apply_image_quality(
     )
 
 
+def temporal_history_requires_reset(
+    previous_receive_seconds: float,
+    current_receive_seconds: float,
+    maximum_gap: float,
+) -> bool:
+    """判断两帧接收间隔是否已破坏多帧投票的连续性。
+
+    时序确认的前提是若干帧来自同一段连续视频。相机掉线后若保留旧票数，恢复时只需
+    一帧相似画面就可能立即确认障碍；ROS 时钟回拨（rosbag 重播/重置）也必须清空历史。
+    """
+    values = (previous_receive_seconds, current_receive_seconds, maximum_gap)
+    if not all(np.isfinite(float(value)) for value in values):
+        return True
+    gap = float(current_receive_seconds) - float(previous_receive_seconds)
+    return maximum_gap <= 0.0 or gap < 0.0 or gap > maximum_gap
+
+
 def evidence_iou(first: ObstacleEvidence, second: ObstacleEvidence) -> float:
     """计算两个归一化目标框的交并比，约束多帧证据属于同一目标。"""
     first_left = first.center_x - first.width / 2
@@ -580,6 +597,7 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("max_temporal_size_jitter", 0.25)
         self.declare_parameter("temporal_match_ratio", 0.60)
         self.declare_parameter("min_temporal_iou", 0.20)
+        self.declare_parameter("history_reset_timeout", 0.75)
         self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("orange_hsv_lower", [5, 80, 70])
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
@@ -664,6 +682,9 @@ class VisionObstacleDetector(Node):
         self.min_temporal_iou = float(
             np.clip(self.get_parameter("min_temporal_iou").value, 0.0, 1.0)
         )
+        self.history_reset_timeout = max(
+            0.1, float(self.get_parameter("history_reset_timeout").value)
+        )
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
         )
@@ -731,6 +752,7 @@ class VisionObstacleDetector(Node):
     def image_callback(self, msg: Image, source: str) -> None:
         """只保存最新图像，避免相机帧率高于处理能力时形成积压。"""
         now = self.get_clock().now()
+        now_seconds = now.nanoseconds * 1e-9
         active_age = (
             float("inf")
             if self.last_active_image_time is None
@@ -749,6 +771,18 @@ class VisionObstacleDetector(Node):
             self.last_processed_stamp = None
             self.active_topic = source
             self.get_logger().info(f"Using camera topic {source}")
+        elif (
+            self.last_active_image_time is not None
+            and temporal_history_requires_reset(
+                self.last_active_image_time.nanoseconds * 1e-9,
+                now_seconds,
+                self.history_reset_timeout,
+            )
+        ):
+            # 同一相机恢复也不能沿用断流前的障碍票数；必须重新积累 confirmation_frames。
+            self.evidence_history.clear()
+            self.last_processed_stamp = None
+            self.get_logger().warning("Camera stream gap; reset visual history")
         self.last_active_image_time = now
         self.latest_frame = (msg, source)
 

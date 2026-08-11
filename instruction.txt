@@ -24,7 +24,8 @@ Twist 适配和离线评估。
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
    自适应 Canny、形态学、ROI 过滤和轮廓几何。曝光质量必须在原图上计算；原图/CLAHE
    双 HSV 掩膜补偿阴影，高光掩膜抑制灯光和金属反射边缘；随后通过同类投票率、位置/
-   尺寸抖动和目标框 IoU 去除瞬时误检。
+   尺寸抖动和目标框 IoU 去除瞬时误检。相机断流或 ROS 时钟回拨会清空历史，恢复后
+   必须重新积累确认帧，不能复用旧画面的票数。
    它输出归一化图像框和置信度，不把像素尺寸伪装成真实米制高度。
 
    terrain_analyzer.py：把 PointCloud2 按采样时间变换到 base_link，截取前方 ROI，估计
@@ -41,7 +42,8 @@ Twist 适配和离线评估。
    能容忍回调乱序；零时间戳、重复旧帧或超过 sync_slop 的观测拒绝融合。输出把点数、
    粗糙度、坡度及确认位放入同一个原子消息。融合前再次校验类别、有限数值、归一化框和
    物理量范围，非法字段不会穿透接口。几何仍是主证据；视觉细分横杆/立柱还必须
-   分别满足点云净空/窄宽度，冲突时不覆盖几何类别。
+   分别满足点云净空/窄宽度，冲突时不覆盖几何类别。相机断流时等待 0.25 s 后发布纯
+   点云结果，保持几何安全链连续，且明确 vision_confirmed=false。
 
 3. quadruped_planning
    terrain_safety_assessor.py：vision=true 时优先使用同步后的 FusedObstacle，vision=false

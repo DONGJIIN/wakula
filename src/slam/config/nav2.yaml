@@ -235,6 +235,8 @@ navigation_health_monitor:
     minimum_scan_valid_ratio: 0.60
     max_xy_covariance: 1.0
     max_odom_jump: 0.75
+    # 单次跳变锁存，连续 3 个稳定里程计样本后才恢复导航健康。
+    odom_jump_recovery_samples: 3
     future_stamp_tolerance: 0.10
 
 # ---------- 满足 scan/odom/定位 TF 后才激活 Nav2 ----------

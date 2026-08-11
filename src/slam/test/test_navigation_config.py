@@ -48,6 +48,7 @@ def test_navigation_health_parameters_are_versioned_with_nav2():
     assert health["minimum_scan_valid_ratio"] >= 0.5
     assert health["sensor_timeout"] > 0.0
     assert 0.0 <= health["future_stamp_tolerance"] <= 0.2
+    assert health["odom_jump_recovery_samples"] >= 2
 
 
 def test_navigation_launch_description_is_constructible():

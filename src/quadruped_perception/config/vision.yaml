@@ -49,6 +49,8 @@ vision_obstacle_detector:
     max_temporal_size_jitter: 0.25
     temporal_match_ratio: 0.60
     min_temporal_iou: 0.20
+    # 超过此帧间隔即清空旧投票；相机恢复后必须重新积累 confirmation_frames。
+    history_reset_timeout: 0.75
     # 当前来源失联达到此时间后才允许其他候选话题接管。
     source_switch_timeout: 2.0
     # ---------- 场地颜色标定 ----------
@@ -57,3 +59,12 @@ vision_obstacle_detector:
     orange_hsv_upper: [25, 255, 255]
     blue_hsv_lower: [90, 70, 50]
     blue_hsv_upper: [135, 255, 255]
+
+perception_fusion:
+  ros__parameters:
+    # 相机与点云采样时间的最大允许差；只按 Header 时间戳配对。
+    sync_slop: 0.10
+    queue_size: 10
+    vision_min_confidence: 0.55
+    # 相机断流时等待短窗口后发布纯点云结果，避免视觉辅助阻断几何安全链。
+    terrain_only_timeout: 0.25

@@ -110,7 +110,12 @@ def _largest_connected_region(
     candidate_indices = np.flatnonzero(candidate_mask)
     if not len(candidate_indices):
         return candidate_indices
-    coordinates = np.rint(cells[candidate_indices, :2] / cell_size).astype(np.int32)
+    # ``_grid_samples`` 最初用 floor(x / cell_size) 建格。这里必须使用同一规则恢复
+    # 栅格坐标：若用四舍五入，位于相邻格两侧的 0.099 m 和 0.101 m 可能都变成索引 2，
+    # 字典随后覆盖其中一格，使细台阶、横杆或立柱的连通区域被错误缩小。
+    coordinates = np.floor(
+        cells[candidate_indices, :2] / cell_size
+    ).astype(np.int32)
     by_coordinate = {
         (int(coordinate[0]), int(coordinate[1])): int(index)
         for coordinate, index in zip(coordinates, candidate_indices)

@@ -126,8 +126,9 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
   ros2 node info /节点名
   ros2 topic info /话题名 --verbose
 
-正常现象：vision=true 时没有同步的相机—点云消息会保持 speed_limit=0；识别 CLEAR 且
-数据持续新鲜后为 1；STEP/CLIMB/PIT/WALL/BAR 为 0；相机证据只能在 WALK 时减速，
+正常现象：vision=true 时相机短暂缺帧会先等待同步，超过 0.25 s 后自动使用纯点云结果；
+点云也缺失或无效才保持 speed_limit=0。识别 CLEAR 且数据持续新鲜后为 1；
+STEP/CLIMB/PIT/WALL/BAR 为 0；相机证据只能在 WALK 时减速，
 不能触发腿部动作。`/navigation/healthy` 为 false 或断流时速度门也保持零。只有点云时
 使用 vision:=false，决策会自动采用兼容路径。
 

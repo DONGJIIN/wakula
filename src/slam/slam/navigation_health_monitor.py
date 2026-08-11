@@ -29,7 +29,9 @@ def scan_is_valid(
     """
     if not ranges:
         return False
-    lower = max(0.0, float(range_min)) if math.isfinite(range_min) else 0.0
+    # 绝大多数驱动用 0 表示无效近距离回波；即使厂商错误填写 range_min=0，也不能
+    # 让一整帧零值通过有效率检查。正 Inf 仍按 REP-117 语义视为“量程内无障碍”。
+    lower = max(1e-6, float(range_min)) if math.isfinite(range_min) else 1e-6
     upper = float(range_max)
     if not math.isfinite(upper) or upper <= lower:
         upper = math.inf
@@ -108,6 +110,43 @@ def navigation_failures(
     return checks, tuple(name for name, passed in checks.items() if not passed)
 
 
+class OdometryJumpFilter:
+    """锁存不连续里程计，并在若干连续稳定样本后自动恢复。
+
+    单帧跳变可能发生在定位重置、编码器异常或 TF 树切换时。如果下一帧立刻清除标志，
+    10 Hz 健康定时器可能完全看不到该故障；锁存可保证速度门至少经历明确的停止阶段。
+    """
+
+    def __init__(self, maximum_jump: float, recovery_samples: int = 3):
+        self.maximum_jump = max(0.01, float(maximum_jump))
+        self.recovery_samples = max(1, int(recovery_samples))
+        self.previous_xy = None
+        self.latched = False
+        self.stable_samples = 0
+
+    def update(self, x: float, y: float, sample_valid: bool) -> bool:
+        """输入一个已校验样本，返回当前锁存状态；非法样本不污染参考位置。"""
+        if not sample_valid or not all(math.isfinite(value) for value in (x, y)):
+            return self.latched
+        current = (float(x), float(y))
+        if self.previous_xy is None:
+            self.previous_xy = current
+            return self.latched
+        jumped = math.hypot(
+            current[0] - self.previous_xy[0], current[1] - self.previous_xy[1]
+        ) > self.maximum_jump
+        self.previous_xy = current
+        if jumped:
+            self.latched = True
+            self.stable_samples = 0
+        elif self.latched:
+            self.stable_samples += 1
+            if self.stable_samples >= self.recovery_samples:
+                self.latched = False
+                self.stable_samples = 0
+        return self.latched
+
+
 class NavigationHealthMonitor(Node):
     """持续发布可锁存的导航健康状态；任何必需输入断流都变为 false。"""
 
@@ -124,6 +163,7 @@ class NavigationHealthMonitor(Node):
         self.declare_parameter("minimum_scan_valid_ratio", 0.60)
         self.declare_parameter("max_xy_covariance", 1.0)
         self.declare_parameter("max_odom_jump", 0.75)
+        self.declare_parameter("odom_jump_recovery_samples", 3)
         self.declare_parameter("future_stamp_tolerance", 0.10)
         self.global_frame = str(self.get_parameter("global_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
@@ -142,7 +182,10 @@ class NavigationHealthMonitor(Node):
         self.last_odom_time = None
         self.scan_valid = False
         self.odom_valid = False
-        self.previous_xy = None
+        self.odom_jump_filter = OdometryJumpFilter(
+            self.max_odom_jump,
+            int(self.get_parameter("odom_jump_recovery_samples").value),
+        )
         self.odom_jump = False
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -179,10 +222,6 @@ class NavigationHealthMonitor(Node):
         """缓存里程计有限性、协方差、跳变判定和接收时间。"""
         now = self.get_clock().now()
         xy = (float(msg.pose.pose.position.x), float(msg.pose.pose.position.y))
-        self.odom_jump = self.previous_xy is not None and math.hypot(
-            xy[0] - self.previous_xy[0], xy[1] - self.previous_xy[1]
-        ) > self.max_odom_jump
-        self.previous_xy = xy
         stamp_valid = source_stamp_is_current(
             msg.header.stamp.sec,
             msg.header.stamp.nanosec,
@@ -190,8 +229,12 @@ class NavigationHealthMonitor(Node):
             self.timeout,
             self.future_stamp_tolerance,
         )
-        self.odom_valid = stamp_valid and odometry_is_valid(
-            msg, self.max_xy_covariance
+        numeric_valid = odometry_is_valid(msg, self.max_xy_covariance)
+        self.odom_valid = stamp_valid and numeric_valid
+        # 只有数值、协方差和源时间均有效的样本才能更新跳变参考，避免 NaN 将后续比较
+        # 永久污染。跳变锁存独立于当前帧 odom_valid，恢复需连续稳定样本。
+        self.odom_jump = self.odom_jump_filter.update(
+            xy[0], xy[1], self.odom_valid
         )
         self.last_odom_time = now
 

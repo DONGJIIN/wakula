@@ -26,13 +26,13 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   作用：用 OpenCV 提取颜色、轮廓和多帧稳定证据，辅助判断比赛障碍。
   输入：Image，默认优先 /camera/image_raw。
   输出：/vision/obstacle_stamped、/vision/debug_mask（可选）及调试信息。
-  注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离。
+  注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
 
 /perception_fusion（quadruped_perception / perception_fusion）
   作用：按时间戳同步点云几何与视觉结果，输出统一障碍信息。
   输入：/terrain/features_stamped、/vision/obstacle_stamped。
   输出：/perception/fused_obstacle、/diagnostics。
-  注意：点云负责尺寸和安全判断，视觉只增强类别置信度。
+  注意：点云负责尺寸和安全判断，视觉只增强类别置信度；相机断流 0.25 s 后退化为纯点云输出。
 
 2.2 安全决策节点
 
@@ -65,7 +65,7 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   作用：持续检查雷达、里程计、时间戳和 TF 是否可靠。
   输入：/scan、/odom、map -> base_link TF。
   输出：/navigation/healthy、/diagnostics。
-  注意：任何关键输入断流或异常都会将健康状态置为 false。
+  注意：任何关键输入断流或异常都会将健康状态置为 false；里程计跳变需连续稳定样本后恢复。
 
 2.4 Nav2 节点组
 

@@ -9,6 +9,7 @@ from quadruped_perception.terrain_analyzer import (
     transform_xyz,
 )
 from quadruped_perception.terrain_geometry import (
+    _largest_connected_region,
     BAR,
     CLEAR,
     PIT,
@@ -29,6 +30,7 @@ from quadruped_perception.vision_obstacle_detector import (
     largest_color_feature,
     stabilize_evidence,
     suppress_specular_edges,
+    temporal_history_requires_reset,
 )
 
 
@@ -105,6 +107,14 @@ def test_temporal_confirmation_requires_majority_and_box_overlap():
         ).hint
         == "none"
     )
+
+
+def test_visual_history_resets_after_dropout_or_clock_rewind():
+    """相机长间隔和 rosbag 时钟回拨都不能沿用旧的多帧票数。"""
+    assert not temporal_history_requires_reset(10.0, 10.1, 0.75)
+    assert temporal_history_requires_reset(10.0, 10.8, 0.75)
+    assert temporal_history_requires_reset(10.0, 9.0, 0.75)
+    assert temporal_history_requires_reset(float("nan"), 10.0, 0.75)
 
 
 def test_illumination_roi_and_adaptive_edge_helpers():
@@ -368,6 +378,24 @@ def test_connected_but_weak_depth_speckles_do_not_form_an_obstacle():
     result = analyze_terrain_geometry(np.vstack((floor, weak_cluster)))
     assert result.valid
     assert result.obstacle_type == CLEAR
+
+
+def test_connected_region_preserves_cells_across_rounding_boundary():
+    """接近栅格右边界的中值坐标不能与下一格四舍五入到同一索引。"""
+    # x=0.099 属于 floor 索引 1，x=0.101 属于索引 2；旧 rint 实现会把二者都变成 2，
+    # 字典覆盖后只剩两个格，从而漏掉窄而连续的障碍。
+    cells = np.asarray(
+        [
+            (0.099, 0.0, 0.2, 0.2, 0.2, 4),
+            (0.101, 0.0, 0.2, 0.2, 0.2, 4),
+            (0.151, 0.0, 0.2, 0.2, 0.2, 4),
+        ],
+        dtype=np.float64,
+    )
+    region = _largest_connected_region(
+        cells, np.ones(3, dtype=bool), cell_size=0.05
+    )
+    assert len(region) == 3
 
 
 def test_robust_ground_fit_preserves_long_slope_with_high_outliers():

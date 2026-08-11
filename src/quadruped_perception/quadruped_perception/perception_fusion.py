@@ -59,6 +59,23 @@ def find_synchronized_pair(terrain_queue, vision_queue, sync_slop: float):
     return terrain, vision, float(skew)
 
 
+def terrain_fallback_ready(
+    receive_seconds: float,
+    now_seconds: float,
+    maximum_wait: float,
+) -> bool:
+    """判断一帧点云是否已等待视觉足够久，可以按纯几何结果发布。
+
+    相机是辅助证据，不应成为点云地形链的单点故障。等待窗口应略大于同步容差；非法
+    时间或 ROS 时钟回拨时不贸然发布，由后续有效帧重新建立顺序。
+    """
+    values = (receive_seconds, now_seconds, maximum_wait)
+    if not all(math.isfinite(float(value)) for value in values):
+        return False
+    age = float(now_seconds) - float(receive_seconds)
+    return maximum_wait > 0.0 and age >= maximum_wait
+
+
 def terrain_observation_valid(terrain) -> bool:
     """独立复核点云生产者的有效位、类别、范围和全部连续字段。"""
     metrics = (
@@ -207,13 +224,20 @@ class PerceptionFusion(Node):
         self.declare_parameter("sync_slop", 0.10)
         self.declare_parameter("queue_size", 10)
         self.declare_parameter("vision_min_confidence", 0.55)
+        self.declare_parameter("terrain_only_timeout", 0.25)
         self.sync_slop = max(0.001, float(self.get_parameter("sync_slop").value))
         queue_size = max(2, int(self.get_parameter("queue_size").value))
         self.vision_min_confidence = min(
             1.0, max(0.0, float(self.get_parameter("vision_min_confidence").value))
         )
+        # 必须至少给近似同步一个完整窗口；相机断流后仍能在安全评估超时前发布点云结果。
+        self.terrain_only_timeout = max(
+            self.sync_slop,
+            float(self.get_parameter("terrain_only_timeout").value),
+        )
         self.terrain_queue = deque(maxlen=queue_size)
         self.vision_queue = deque(maxlen=queue_size)
+        self.terrain_receive_times = {}
         self.output_pub = self.create_publisher(
             FusedObstacle, "/perception/fused_obstacle", 10
         )
@@ -224,10 +248,13 @@ class PerceptionFusion(Node):
         self.create_subscription(
             VisionObstacle, "/vision/obstacle_stamped", self.vision_callback, 10
         )
+        self.create_timer(0.05, self._publish_terrain_fallback)
 
     def terrain_callback(self, msg: TerrainFeatures) -> None:
         """缓存一条带采样时间的点云几何摘要并尝试配对。"""
         self.terrain_queue.append(msg)
+        self.terrain_receive_times[id(msg)] = self.get_clock().now().nanoseconds * 1e-9
+        self._prune_receive_times()
         self._try_pair()
 
     def vision_callback(self, msg: VisionObstacle) -> None:
@@ -255,9 +282,41 @@ class PerceptionFusion(Node):
             terrain, vision, skew, self.vision_min_confidence
         )
         self.output_pub.publish(fused)
+        self._consume_through(terrain, vision)
+        self._diagnostic(DiagnosticStatus.OK, "camera/cloud synchronized", skew)
+
+    def _publish_terrain_fallback(self) -> None:
+        """相机缺帧时延迟发布纯点云结果，保证视觉辅助不会阻断安全几何链。"""
+        if not self.terrain_queue:
+            return
+        # 定时器与任一传感器回调可能交错；先再尝试一次配对，避免刚到达的图像被漏用。
+        pair = find_synchronized_pair(
+            self.terrain_queue, self.vision_queue, self.sync_slop
+        )
+        if pair is not None:
+            self._try_pair()
+            return
+        terrain = self.terrain_queue[0]
+        received = self.terrain_receive_times.get(id(terrain), float("nan"))
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if not terrain_fallback_ready(received, now, self.terrain_only_timeout):
+            return
+        # vision=None 会保留点云几何和置信度，同时明确 vision_confirmed=false。
+        self.output_pub.publish(
+            fuse_observations(
+                terrain, None, 0.0, self.vision_min_confidence
+            )
+        )
+        self._consume_through(terrain, None)
+        self._diagnostic(
+            DiagnosticStatus.WARN,
+            "camera unavailable; geometry-only fallback",
+            0.0,
+        )
+
+    def _consume_through(self, terrain, vision) -> None:
+        """消费已发布观测及更旧数据，保证同一帧不会重复贡献风险确认次数。"""
         terrain_time = stamp_seconds(terrain.header)
-        vision_time = stamp_seconds(vision.header)
-        # 一对消息只能使用一次；同时丢弃更早观测，防止旧图重复增强后续点云。
         self.terrain_queue = deque(
             (
                 item
@@ -266,15 +325,29 @@ class PerceptionFusion(Node):
             ),
             maxlen=self.terrain_queue.maxlen,
         )
+        if vision is not None:
+            vision_cutoff = stamp_seconds(vision.header)
+        else:
+            # 已无可配图像；只保留未来仍可能与下一帧点云配对的较新视觉消息。
+            vision_cutoff = terrain_time + self.sync_slop
         self.vision_queue = deque(
             (
                 item
                 for item in self.vision_queue
-                if stamp_seconds(item.header) > vision_time
+                if stamp_seconds(item.header) > vision_cutoff
             ),
             maxlen=self.vision_queue.maxlen,
         )
-        self._diagnostic(DiagnosticStatus.OK, "camera/cloud synchronized", skew)
+        self._prune_receive_times()
+
+    def _prune_receive_times(self) -> None:
+        """删除 deque 自动淘汰消息的接收时间，保持辅助字典有界。"""
+        active_ids = {id(item) for item in self.terrain_queue}
+        self.terrain_receive_times = {
+            key: value
+            for key, value in self.terrain_receive_times.items()
+            if key in active_ids
+        }
 
     def _diagnostic(self, level: int, message: str, skew: float) -> None:
         """通过标准 diagnostics 报告同步状态和当前时间差。"""

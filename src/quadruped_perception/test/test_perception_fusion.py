@@ -1,9 +1,14 @@
 """Tests for timestamped conservative camera/cloud fusion."""
 
+from pathlib import Path
+
+import yaml
+
 from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObstacle
 from quadruped_perception.perception_fusion import (
     find_synchronized_pair,
     fuse_observations,
+    terrain_fallback_ready,
     terrain_observation_valid,
     vision_observation_valid,
 )
@@ -130,3 +135,26 @@ def test_fusion_rejects_nan_visual_confidence():
     assert not vision_observation_valid(camera, 0.55)
     result = fuse_observations(terrain(), camera, 0.01, 0.55)
     assert not result.vision_confirmed
+
+
+def test_camera_dropout_falls_back_to_geometry_without_visual_confirmation():
+    """相机断流不能冻结点云安全链，超时后应保留几何并明确无视觉确认。"""
+    assert not terrain_fallback_ready(10.0, 10.20, 0.25)
+    assert terrain_fallback_ready(10.0, 10.25, 0.25)
+    assert not terrain_fallback_ready(10.0, 9.0, 0.25)
+    cloud = terrain(TerrainFeatures.WALL)
+    result = fuse_observations(cloud, None, 0.0, 0.55)
+    assert result.geometry_confirmed
+    assert not result.vision_confirmed
+    assert result.obstacle_type == FusedObstacle.WALL
+    assert result.confidence == cloud.confidence
+
+
+def test_fusion_dropout_policy_is_versioned_in_vision_config():
+    """同步容差与纯点云降级等待必须随项目配置提交，不能只依赖源码默认值。"""
+    config_path = Path(__file__).parents[1] / "config" / "vision.yaml"
+    with config_path.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    parameters = config["perception_fusion"]["ros__parameters"]
+    assert parameters["sync_slop"] > 0.0
+    assert parameters["terrain_only_timeout"] >= parameters["sync_slop"]
