@@ -45,7 +45,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、强类型真机对接合同和 rosbag 离线评估：8 个 ROS 2
-包可编译，65 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+包可编译，66 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -199,7 +199,7 @@ Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
 4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据；
    当前 STEP/CLIMB 只分类并停车。
 5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
-6. **Xbox 手柄节点** 默认独立发布 `/cmd_vel_joy`，当前不加入一键 launch，也不绕过
+6. **Xbox 手柄节点** 默认独立发布 `/cmd_vel_joy`，不加入主导航 launch，也不绕过
    Collision Monitor；真机阶段通过 `twist_mux` 与 Nav2 速度仲裁。
 
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
@@ -457,16 +457,17 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 
 ```bash
 ros2 run joy joy_enumerate_devices
-ros2 run joy joy_node
 ```
 
-另开终端启动 Wakula 手柄适配器：
+使用独立 launch 同时启动手柄驱动与 Wakula 适配器：
 
 ```bash
 source ~/wakula/install/setup.bash
-ros2 run quadruped_teleop xbox_teleop --ros-args \
-  --params-file ~/wakula/install/quadruped_teleop/share/quadruped_teleop/config/xbox.yaml
+ros2 launch quadruped_teleop xbox_teleop.launch.py
 ```
+
+多手柄时可以指定 `device_id:=1`；用 `--show-args` 查看设备编号、话题和参数文件覆盖项。
+该 launch 只启动 `joy_node` 与 `xbox_teleop`，不会启动 SLAM、Nav2 或真实运动控制器。
 
 | 控件 | 当前作用 |
 |---|---|

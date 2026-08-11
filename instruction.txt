@@ -60,6 +60,8 @@ Twist 适配和离线评估。
    A/X/Y 切换三档速度，B 锁存软件急停，Start 仅在 LB 松开且摇杆回中时清除急停。
    默认发布 /cmd_vel_joy，不加入 slam.launch.py；真机阶段必须经 twist_mux 与 Nav2 仲裁，
    再进入 Collision Monitor。手柄断流超过 0.5 s 会持续发布零速度。
+   xbox_teleop.launch.py：独立同时启动 joy_node 和 xbox_teleop；不包含 SLAM/Nav2，方便
+   单独调试手柄，也满足主导航 launch 不自动启动手柄的边界。
 
 5. quadruped_tools
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类

@@ -97,11 +97,9 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
   ros2 launch quadruped_bringup bringup.launch.py
 
-Xbox 手柄（刻意不写入一键 launch，两个终端分别运行）：
+Xbox 手柄（使用独立 launch，刻意不加入 slam.launch.py）：
 
-  ros2 run joy joy_node
-  ros2 run quadruped_teleop xbox_teleop --ros-args \
-    --params-file ~/wakula/install/quadruped_teleop/share/quadruped_teleop/config/xbox.yaml
+  ros2 launch quadruped_teleop xbox_teleop.launch.py
 
 先用 `ros2 topic echo /joy` 核对实际轴/按键下标，再查看 `/cmd_vel_joy`。默认不会接管
 `/cmd_vel`；真机阶段增加 twist_mux，将手柄和 Nav2 仲裁结果送入 Collision Monitor。
