@@ -3,7 +3,8 @@ Wakula 算法说明
 
 一、范围
 ------
-当前只实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策和离线评估。
+当前只实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策、Xbox 手柄
+Twist 适配和离线评估。
 没有实现硬件驱动、状态估计、运动学/动力学、站立步态、全身控制、真实越障 Action、
 比赛逻辑或 Gazebo。识别到需要抬腿/降低姿态的障碍时会停车，不会生成关节命令。
 
@@ -54,11 +55,17 @@ Wakula 算法说明
    Twist。它是导航软件保护，不
    替代未来驱动器急停和硬件看门狗。
 
-4. quadruped_tools
+4. quadruped_teleop
+   xbox_teleop.py：订阅标准 /joy，左摇杆控制前后/横移、右摇杆控制偏航，LB 按住使能，
+   A/X/Y 切换三档速度，B 锁存软件急停，Start 仅在 LB 松开且摇杆回中时清除急停。
+   默认发布 /cmd_vel_joy，不加入 slam.launch.py；真机阶段必须经 twist_mux 与 Nav2 仲裁，
+   再进入 Collision Monitor。手柄断流超过 0.5 s 会持续发布零速度。
+
+5. quadruped_tools
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类
    TP/FP/FN、precision、recall、F1、混淆矩阵以及连续量误差，帮助客观调整阈值。
 
-5. quadruped_description
+6. quadruped_description
    quadruped.urdf.xacro 只是 RViz 外形与 lidar_link、camera_link、camera_optical_frame、
    imu_link 的 TF 占位。真实安装完成后必须替换尺寸和固定变换。
 

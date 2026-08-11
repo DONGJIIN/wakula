@@ -1,0 +1,40 @@
+# Xbox 手柄默认映射（Linux joy_node 常见顺序）。不同驱动映射可能不同，首次使用必须运行
+# `ros2 topic echo /joy` 核对 axes/buttons 下标，再只修改本文件。
+xbox_teleop:
+  ros__parameters:
+    input_topic: /joy
+    # 独立话题避免与 Nav2 的最终 /cmd_vel 同时发布；接入真机时交给 twist_mux 仲裁。
+    output_topic: /cmd_vel_joy
+    active_topic: /teleop/active
+    emergency_stop_topic: /teleop/emergency_stop
+    publish_rate: 20.0
+    joy_timeout: 0.5
+    deadzone: 0.12
+
+    # 摇杆轴：左摇杆上下/左右控制平移，右摇杆左右控制偏航。
+    axis_linear_x: 1
+    axis_linear_y: 0
+    axis_angular_z: 3
+
+    # 按键索引及用途：
+    # A(0)：低速档；B(1)：锁存软件急停；X(2)：正常档；Y(3)：快速档。
+    # LB(4)：使能键，必须一直按住才允许输出非零速度。
+    # RB(5)：预留，当前无动作；Back(6)：预留，当前无动作。
+    # Start(7)：清除软件急停，仅在松开 LB 且三个控制摇杆居中时有效。
+    # Guide/Xbox(8)：系统可能截获，当前不使用。
+    # 左摇杆按下(9)、右摇杆按下(10)：预留，当前不使用。
+    # LT/RT 和十字键在 joy_node 中通常属于 axes；当前均不参与运动，防止误触发。
+    button_slow: 0
+    button_stop: 1
+    button_normal: 2
+    button_fast: 3
+    button_deadman: 4
+    button_clear_stop: 7
+
+    # 三档最大速度：[前后/横移 m/s，偏航 rad/s]。真机完成能力测试前保持保守值。
+    slow_linear_speed: 0.12
+    slow_angular_speed: 0.35
+    normal_linear_speed: 0.25
+    normal_angular_speed: 0.60
+    fast_linear_speed: 0.40
+    fast_angular_speed: 0.90

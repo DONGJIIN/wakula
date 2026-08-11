@@ -44,8 +44,9 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门、强类型真机对接合同和 rosbag 离线评估：7 个 ROS 2 包可编译，58 项
-测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与传感器 TF 占位，
+决策、速度超时门、Xbox 手柄适配、强类型真机对接合同和 rosbag 离线评估：8 个 ROS 2
+包可编译，65 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
 
@@ -121,6 +122,7 @@ wakula/
 │   ├── quadruped_interfaces/   # 带时间戳的感知与融合消息
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
 │   ├── quadruped_planning/     # 保守地形决策与 Nav2 速度门
+│   ├── quadruped_teleop/       # Xbox /joy 到独立 /cmd_vel_joy 的安全适配
 │   ├── quadruped_tools/        # rosbag 离线标注与准确率报告
 │   └── slam/                   # SLAM Toolbox、Nav2 参数与自主启动
 ├── scripts/
@@ -145,6 +147,7 @@ wakula/
 | `quadruped_interfaces` | 带时间戳的感知与导航交接合同 | 四个 `msg/` 接口 |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
 | `quadruped_planning` | 地形风险分类、Nav2 速度上限和失效安全门 | 两个导航辅助节点 |
+| `quadruped_teleop` | Xbox 按键安全状态机和独立 Twist 候选 | `xbox_teleop` |
 | `quadruped_tools` | rosbag 标注匹配与准确率报告 | `perception_bag_evaluator` |
 | `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
 
@@ -160,6 +163,7 @@ wakula/
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳。
 - `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
 - `navigation_speed_gate`：检查 Nav2 命令、地形评估和导航健康心跳，任一失效立即输出零速。
+- `xbox_teleop`：将 `/joy` 转换为带 LB 使能、B 急停和断流归零的 `/cmd_vel_joy`。
 - `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
@@ -181,6 +185,9 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
      ─> collision_monitor ─> /cmd_vel ─> 未来真机底盘接口
 
+Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
+                                                               └─> collision_monitor
+
 /scan + /odom + TF ─> navigation health + Nav2 readiness
 ```
 
@@ -192,6 +199,8 @@ Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
 4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据；
    当前 STEP/CLIMB 只分类并停车。
 5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
+6. **Xbox 手柄节点** 默认独立发布 `/cmd_vel_joy`，当前不加入一键 launch，也不绕过
+   Collision Monitor；真机阶段通过 `twist_mux` 与 Nav2 速度仲裁。
 
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
 点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
@@ -331,6 +340,7 @@ source install/setup.bash
 
 视觉仅依赖 `python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
 默认 8 Hz、最大 640 像素宽；点云默认 10 Hz 且限制采样数量，适合 RK3588 起步调试。
+Xbox 输入使用标准 `ros-jazzy-joy`，不依赖厂家手柄 SDK。
 
 运行单元测试：
 
@@ -440,6 +450,38 @@ Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`
 ```bash
 ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 ```
+
+### 6.1 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
+
+先连接手柄并确认系统识别：
+
+```bash
+ros2 run joy joy_enumerate_devices
+ros2 run joy joy_node
+```
+
+另开终端启动 Wakula 手柄适配器：
+
+```bash
+source ~/wakula/install/setup.bash
+ros2 run quadruped_teleop xbox_teleop --ros-args \
+  --params-file ~/wakula/install/quadruped_teleop/share/quadruped_teleop/config/xbox.yaml
+```
+
+| 控件 | 当前作用 |
+|---|---|
+| 左摇杆上下/左右 | 前后移动/横移 |
+| 右摇杆左右 | 左右偏航转向 |
+| LB | 按住使能；松开立即归零 |
+| A / X / Y | 低速档 / 正常档 / 快速档 |
+| B | 锁存软件急停 |
+| Start | 松开 LB 且摇杆回中时解除软件急停 |
+| RB、Back、Guide、左右摇杆按下 | 预留，当前不产生动作 |
+| LT、RT、十字键、右摇杆上下 | 预留，当前不产生动作 |
+
+调试时查看 `/cmd_vel_joy`、`/teleop/active` 和 `/teleop/emergency_stop`。默认不直接发布
+`/cmd_vel`，防止与 Nav2 同时控制；真机应增加 `twist_mux`，在手柄和 Nav2 间仲裁后再进入
+Collision Monitor。该节点只输出机身速度，仍需运动控制团队把 Twist 转换为四足步态。
 
 ## 7. OpenCV 障碍识别
 

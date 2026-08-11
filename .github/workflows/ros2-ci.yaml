@@ -18,5 +18,6 @@ jobs:
           target-ros2-distro: jazzy
           package-name: >-
             quadruped_interfaces quadruped_description quadruped_perception
-            quadruped_planning quadruped_bringup quadruped_tools slam
+            quadruped_planning quadruped_bringup quadruped_tools
+            quadruped_teleop slam
           coverage-result: false
