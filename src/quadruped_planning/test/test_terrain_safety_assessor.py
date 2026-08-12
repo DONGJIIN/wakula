@@ -92,11 +92,45 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
     assert front_obstacle_name_zh(safety) == "限高杆"
     safety.obstacle_type = NavigationSafety.OBSTACLE_POLE
+    safety.obstacle_height = 0.55
+    safety.width = 0.12
     assert "直角绕杆" in front_obstacle_name_zh(safety)
     safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.obstacle_height = 0.15
+    safety.width = 0.42
+    safety.roughness = 0.047
     assert front_obstacle_name_zh(safety) == "砂砾与碎木坑"
+    # 木桥 B 的桥板间隙同样是 PIT 几何，但同时存在规则中的 0.20 m 宽平桥板。
+    safety.obstacle_height = 0.20
+    safety.pit_depth = 0.20
+    safety.width = 0.75
+    safety.roughness = 0.07
+    assert front_obstacle_name_zh(safety) == "木桥 B（桥板间隙）"
     safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
     assert front_obstacle_name_zh(safety) == "高墙"
+
+
+def test_front_name_disambiguates_bar_support_and_pit_guardrail():
+    """接近阶段只看见支柱/护栏时，也不能把比赛专名说反。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_POLE
+    safety.obstacle_height = 0.34
+    safety.width = 0.15
+    assert front_obstacle_name_zh(safety) == "限高杆（支柱结构）"
+
+    safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
+    safety.obstacle_height = 0.25
+    safety.width = 0.88
+    safety.clearance_height = 0.25
+    assert front_obstacle_name_zh(safety) == "坑区护栏（后方地形待确认）"
+
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.25
+    safety.roughness = 0.057
+    safety.width = 0.59
+    safety.clearance_height = 0.0
+    assert front_obstacle_name_zh(safety) == "砂砾与碎木坑（入口/填料区）"
 
 
 def test_visual_confirmation_does_not_replace_confirmed_geometry_name():

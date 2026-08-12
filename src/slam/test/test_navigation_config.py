@@ -114,6 +114,17 @@ def test_slam_scan_queue_absorbs_short_tf_jitter_without_large_backlog():
     assert 2 <= queue_size <= 7
 
 
+def test_mapping_and_rviz_follow_live_robot_without_long_visual_lag():
+    """地图发布应快于明显运动滞后，RViz 视图则只跟随而不改变 map 固定坐标。"""
+    with (PACKAGE_ROOT / "config" / "slam.yaml").open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    params = config["slam_toolbox"]["ros__parameters"]
+    assert 0.1 <= params["map_update_interval"] <= 0.5
+    rviz = (PACKAGE_ROOT / "rviz" / "slam.rviz").read_text(encoding="utf-8")
+    assert "Fixed Frame: map" in rviz
+    assert "Target Frame: base_link" in rviz
+
+
 def test_depth_costmap_accepts_low_steps_after_ground_filtering():
     """上游按相对地面滤波后，Nav2 不能再用正 z 下限漏掉机身下方台阶。"""
     nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"

@@ -67,21 +67,42 @@ def generate_launch_description():
                     "-Y", LaunchConfiguration("robot_yaw"),
                 ],
             ),
-            # 单一桥节点提供 SLAM/Nav2 所需的时钟、激光、里程计、速度和深度点云。
+            # /clock 独立桥接。仿真时间是所有 use_sim_time 节点的共同心跳，不能让高带宽
+            # 点云或某个辅助传感器的转换阻塞它。
+            Node(
+                package="ros_gz_bridge",
+                executable="parameter_bridge",
+                name="robocon_clock_bridge",
+                output="screen",
+                arguments=[
+                    "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+                ],
+                parameters=[use_sim_time],
+            ),
+            # SLAM/Nav2 的四条关键链路放在轻量桥中。这里刻意不桥接未被算法使用的
+            # /scan/points，避免重复激光点云占用 DDS 和同一转换线程。
             # 桥接方向符号：[ 为 Gazebo->ROS，] 为 ROS->Gazebo，@ 为双向。
             Node(
                 package="ros_gz_bridge",
                 executable="parameter_bridge",
-                name="robocon_sensor_bridge",
+                name="robocon_navigation_bridge",
                 output="screen",
                 arguments=[
-                    "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
                     "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
-                    "/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
                     "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
-                    "/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU",
                     "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
                     "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
+                ],
+                parameters=[use_sim_time],
+            ),
+            # IMU 与 CameraInfo 属于辅助数据；独立桥确保其频率或格式异常不会拖住导航。
+            Node(
+                package="ros_gz_bridge",
+                executable="parameter_bridge",
+                name="robocon_aux_sensor_bridge",
+                output="screen",
+                arguments=[
+                    "/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU",
                     "/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
                 ],
                 parameters=[use_sim_time],

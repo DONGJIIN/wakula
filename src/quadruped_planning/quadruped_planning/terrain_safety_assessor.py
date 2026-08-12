@@ -163,14 +163,45 @@ def front_obstacle_name_zh(
 
     obstacle_type = int(safety.obstacle_type)
     if obstacle_type == NavigationSafety.OBSTACLE_POLE:
+        # 限高杆的横梁很细，单帧深度云常先只看到一侧 0.32 m 支柱而归入 POLE；规则
+        # 绕杆立柱高度不低于 0.50 m。用量测高度给出接近阶段名称，比直接误报绕杆可靠。
+        if (
+            0.25 <= float(safety.obstacle_height) <= 0.42
+            and float(safety.width) <= 0.22
+        ):
+            return "限高杆（支柱结构）"
         return "直角绕杆区（立柱）"
     if obstacle_type == NavigationSafety.OBSTACLE_PIT:
+        # 木桥 B 的 0.40 m 周期性板间隙也会形成真实负高度回波。若同时看到较宽、
+        # 约 0.20 m 高且表面较平整的桥板，就不能把它叫作砂砾坑。阈值来自规则尺寸，
+        # 并已用 Gazebo 点云联调；真机仍需用 rosbag 校准，而不是读取场地坐标。
+        if (
+            float(safety.obstacle_height) >= 0.17
+            and float(safety.pit_depth) >= 0.15
+            and float(safety.width) >= 0.75
+        ):
+            return "木桥 B（桥板间隙）"
         return "砂砾与碎木坑"
     if obstacle_type == NavigationSafety.OBSTACLE_BAR:
+        # 坑区 0.15 m 护栏在斜视点云中可能产生悬空外观；高度明显低于 0.30 m
+        # 限高横杆时只标为坑区入口线索，等待后续负高度回波确认。
+        if (
+            float(safety.obstacle_height) < 0.28
+            and float(safety.clearance_height) >= 0.15
+        ):
+            return "坑区护栏（后方地形待确认）"
         return "限高杆"
     if obstacle_type == NavigationSafety.OBSTACLE_WALL:
         return "高墙"
     if obstacle_type == NavigationSafety.OBSTACLE_STEP:
+        # 进入砂砾/碎木区后，护栏与低洼填料会在单帧栅格中表现成约 0.15～0.25 m
+        # 的低台阶，同时粗糙度显著升高。该组合接续上面的“坑区护栏”接近提示。
+        if (
+            0.12 <= float(safety.obstacle_height) <= 0.28
+            and float(safety.roughness) >= 0.05
+            and float(safety.width) >= 0.40
+        ):
+            return "砂砾与碎木坑（入口/填料区）"
         # 高墙已有独立 WALL 分支；宽且接近 0.40 m 的阶梯结构与规则 T 台顶部相符。
         if float(safety.obstacle_height) >= 0.32 and float(safety.width) >= 0.60:
             return "T 字形台阶"

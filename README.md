@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，108 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，111 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -545,7 +545,9 @@ ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 通用机械狗测试替身已直接对齐算法默认接口：720 点 360° `/scan`（15 Hz、12 m）、`/odom` 和
 `odom -> base_link`（30 Hz）、424×240 RGB-D（15 Hz）、`/imu/data`（100 Hz）。424×240 是
 独立仿真的轻量联调档，算法仍按归一化 ROI 工作，替换真机常见 640×480/640×360 输入无需改源码。
-参考 world 的物理时钟为 250 Hz，足够支撑 100 Hz IMU，又减少全栈仿真时的无效时钟唤醒。
+参考 world 的物理时钟为 100 Hz，足够支撑测试 IMU，并避免 Gazebo GUI、RViz、OpenCV 与
+点云同机运行时因高频 `/clock` 挤压 `/scan`、`/odom` 和地图更新。时钟、导航关键数据与
+辅助传感器分别桥接，未被算法使用的 `/scan/points` 不再重复进入 ROS。
 360° 雷达位于机身中心且保持水平，并通过 Gazebo 可见掩码忽略测试狗自身外观，避免自遮挡写入地图。RGB 图像
 使用 `camera_optical_frame`；Gazebo 当前生成的 PointCloudPacked 数值轴实际采用
 `camera_link` 约定，因此仿真专用 bridge 会覆写点云 frame，避免算法把点云重复旋转。
@@ -555,7 +557,8 @@ LaserScan、机器人 TF、Nav2 代价地图，以及 `Camera Detection` 面板�
 LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色是未知区。开放场地初始地图
 会从出生点向可见障碍展开，白色射线边缘是探索范围而不是墙；应低速覆盖通道、在转角
 旋转观测并完成回环，再用黑色墙线是否重合评价地图质量。实测闭环已消除旧模型的黑色
-放射假墙；地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
+放射假墙；地图以 0.5 s 周期发布，RViz 顶视图跟随 `base_link`，但全局固定坐标仍是
+`map`。地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
 
 从 Snap 版 VS Code 集成终端启动时，本项目的 Gazebo/RViz launch 会清理其注入的
 `GTK_PATH=/snap/code/...`，避免加载 core20 `libpthread` 后出现 `GLIBC_PRIVATE` 错误；终端中
@@ -662,7 +665,8 @@ RViz 的 `Camera Detection` 面板默认订阅 `/vision/annotated_image`：青�
 比赛专名采用可移植的传感器证据，不读取 Gazebo 模型名或坐标：约 10° 的低横滚坡面显示
 “主斜坡”，约 14° 显示“木桥引坡”；宽且约 0.40 m 高的阶梯显示“T 字形台阶”。仅凭
 局部单帧无法可靠区分木桥 A/B 或普通踏板时，会如实显示“A/B 待结构确认”或“台阶或木桥
-踏板（待结构确认）”，后续可用连续结构跟踪细分而不改变现有话题接口。
+踏板（待结构确认）”。木桥 B 的宽平桥板与 0.40 m 间隙组合、砂砾坑的低护栏/粗糙填料、
+限高杆的约 0.32 m 支柱会给出对应的接近阶段名称；证据不足时保留“待确认”，不猜测坐标。
 
 ```bash
 ros2 topic echo /perception/front_obstacle_name
@@ -698,7 +702,8 @@ ros2 topic echo /perception/front_obstacle_name
 
 高分辨率 RGB-D 原始云会先用 `transform_max_points` 做覆盖全幅的确定性等间隔采样，再
 执行 TF 和前向 ROI 分析；这不会改变话题合同，可显著降低 Gazebo 全栈或 RK3588 上的
-内存与矩阵运算压力。设为 `0` 可在离线标定时关闭该上限做精度对照。
+内存与矩阵运算压力。在线默认以 6 Hz 处理最新帧、前视 2.5 m；设采样上限为 `0` 可在
+离线标定时关闭限制做精度对照。
 
 `/terrain/features` 字段：
 

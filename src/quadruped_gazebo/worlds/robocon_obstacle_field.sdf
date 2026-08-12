@@ -19,9 +19,10 @@
   -->
   <world name="robocon_obstacle_field">
     <physics name="robocon_physics" type="ignored">
-      <!-- 该世界只做上层算法联调，测试狗没有腿部接触动力学。250 Hz 已高于 100 Hz IMU，
-           同时避免 1 kHz /clock 让所有 use_sim_time 节点承担无意义的 DDS 唤醒。 -->
-      <max_step_size>0.004</max_step_size>
+      <!-- 该世界只做上层算法联调，测试狗没有腿部接触动力学。100 Hz 足以支撑仿真 IMU；
+           更高的 /clock 会让十多个 use_sim_time 节点频繁唤醒，在 Gazebo GUI、RViz、
+           OpenCV 和点云同机运行时反而挤压 /scan、/odom 与地图更新。 -->
+      <max_step_size>0.01</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
     <gravity>0 0 -9.80665</gravity>

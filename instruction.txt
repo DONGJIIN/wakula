@@ -109,8 +109,11 @@ Twist 适配和离线评估。
    SLAM/Nav2/OpenCV，不能评价步态、接触或真实越障；直接 /cmd_vel 测试可能穿过障碍。
    顶置 360° 二维雷达用可见掩码忽略测试狗自身外观，避免自遮挡和机身倾斜形成假墙。
    RGB-D 使用 424×240@15 Hz 的仿真轻量档并关闭 Gazebo 传感器可视化，降低同机运行
-   Gazebo、SLAM、Nav2 和 OpenCV 时的渲染/桥接压力；world 物理更新率为 250 Hz，仍高于
-   100 Hz IMU。这些优化不改变任何标准话题或算法接口。
+   Gazebo、SLAM、Nav2 和 OpenCV 时的渲染/桥接压力；world 物理更新率为 100 Hz，足以
+   支撑测试 IMU。/clock 独立桥接，/scan、/odom、/tf、/cmd_vel 使用轻量导航桥，IMU 与
+   CameraInfo 使用辅助桥；不再桥接算法未使用的 /scan/points，避免高带宽数据拖住导航。
+   地图每 0.5 s 发布，RViz 视图跟随 base_link，但 Fixed Frame 仍保持 map。
+   点云在线以 6 Hz 处理最新帧并前视 2.5 m。这些优化不改变任何标准真机接口。
    robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
    slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
    2D SLAM 的必要链路是 /scan、/odom、odom->base_link 和 base_link->lidar_link；RGB-D

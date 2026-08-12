@@ -10,7 +10,7 @@ vision_obstacle_detector:
     # 该输出不参与决策；无显示器部署可关闭以减少一次图像复制和编码。
     annotated_image_topic: /vision/annotated_image
     publish_annotated_image: true
-    processing_hz: 8.0
+    processing_hz: 6.0
     resize_width: 640
 
     # ---------- 轮廓面积与形态学去噪 ----------

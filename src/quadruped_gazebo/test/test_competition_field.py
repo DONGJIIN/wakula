@@ -52,8 +52,8 @@ def test_all_eight_rule_obstacles_exist():
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
     """纯算法联调无需 1 kHz 物理时钟，避免每个仿真时钟节点被过度唤醒。"""
     step_size = float(WORLD.findtext("physics/max_step_size"))
-    # 既足以支撑 100 Hz IMU，又将物理更新率限制在不超过 500 Hz。
-    assert 0.002 <= step_size <= 0.01
+    # 100 Hz 足以支撑测试 IMU，并防止 GUI/RViz 同机时关键导航数据饥饿。
+    assert 0.01 <= step_size <= 0.02
 
 
 def test_rule_dimensions_are_locked():
@@ -241,3 +241,12 @@ def test_rgbd_point_cloud_bridge_corrects_gazebo_numeric_frame():
     assert 'name="robocon_point_cloud_bridge"' in launch_source
     assert '{"override_frame_id": "camera_link"}' in launch_source
     assert '("/camera/points", "/camera/depth/points")' in launch_source
+
+
+def test_navigation_bridge_is_not_blocked_by_unused_high_bandwidth_cloud():
+    """时钟和导航关键桥要与辅助传感器隔离，且不得重复桥接激光点云。"""
+    source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text()
+    assert 'name="robocon_clock_bridge"' in source
+    assert 'name="robocon_navigation_bridge"' in source
+    assert 'name="robocon_aux_sensor_bridge"' in source
+    assert '"/scan/points@' not in source
