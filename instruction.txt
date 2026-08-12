@@ -16,14 +16,15 @@ Twist 适配和离线评估。
    slam.yaml：SLAM Toolbox 的地图分辨率、扫描匹配和回环参数。
    nav2.yaml：全局/局部代价地图、规划器、控制器、平滑器、行为与碰撞监控参数。
    navigate_to_pose_wakula.xml：规划失败、控制失败时清图、等待、后退、旋转再规划。
-   nav2_readiness_monitor.py：只有 scan、odom 和 map->base_link 可用且新鲜才激活 Nav2。
-   navigation_health_monitor.py：检查激光量程/有效率、采样时间戳、里程计四元数/协方差/
-   跳变、TF 与断流，发布诊断并参与速度门联锁。
+   nav2_readiness_monitor.py：复用运行期数据合同，只有 scan、odom 和 map->base_link
+   均有效且新鲜才激活 Nav2。
+   navigation_health_monitor.py：检查激光 frame/样本数/角度/量程/有效率、采样时间戳、
+   里程计 frame/四元数/协方差/跳变、TF 与断流，发布诊断并参与速度门联锁。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
-   自适应 Canny、形态学、ROI 过滤和轮廓几何。曝光质量必须在原图上计算；原图/CLAHE
+   自适应 Canny、形态学、ROI 过滤和轮廓几何。HSV 支持 Hue 0/179 环绕范围；曝光质量必须在原图上计算；原图/CLAHE
    双 HSV 掩膜补偿阴影，高光掩膜抑制灯光和金属反射边缘；随后通过同类投票率、位置/
    尺寸抖动和目标框 IoU 去除瞬时误检。相机断流或 ROS 时钟回拨会清空历史，恢复后
    必须重新积累确认帧，不能复用旧画面的票数。
@@ -31,7 +32,9 @@ Twist 适配和离线评估。
 
    terrain_analyzer.py：把 PointCloud2 按采样时间变换到 base_link，截取前方 ROI，估计
    地面基准、俯仰/横滚坡度、粗糙度、障碍高度、距离、宽度、坑深和横杆净空；结果同时
-   提供给规划层和 Nav2 local costmap。只缓存最新帧并限制点数，避免 RK3588 积压。
+   提供给规划层和 Nav2 local costmap。进入 Nav2 的不是原始 ROI：算法按每帧拟合地面
+   计算相对高度，只保留凸起，避免合法坡面封路，同时保留 base_link 下方的低台阶。
+   几何无效时发布空障碍云并由安全层 STOP。只缓存最新帧并限制点数，避免 RK3588 积压。
 
    terrain_geometry.py：独立的 NumPy 几何算法，便于脱离 ROS 做单元测试。地面使用网格
    高度统计、迭代 MAD 离群剔除和稳健拟合；高低异常格必须同时达到八邻域格数和原始
@@ -44,7 +47,9 @@ Twist 适配和离线评估。
    粗糙度、坡度及确认位放入同一个原子消息。融合前再次校验类别、有限数值、归一化框和
    物理量范围，非法字段不会穿透接口。几何仍是主证据；视觉细分横杆/立柱还必须
    分别满足点云净空/窄宽度，冲突时不覆盖几何类别。相机断流时等待 0.25 s 后发布纯
-   点云结果，保持几何安全链连续，且明确 vision_confirmed=false。
+   点云结果，保持几何安全链连续，且明确 vision_confirmed=false。时间同步只能证明
+   同一时刻，视觉框还必须与归一化前向通道相交，避免画面边缘物体与正前点云误关联；
+   真机具备 CameraInfo/准确外参后可升级成三维投影关联而不改变消息接口。
 
 3. quadruped_planning
    terrain_safety_assessor.py：vision=true 时优先使用同步后的 FusedObstacle，vision=false

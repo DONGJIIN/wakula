@@ -136,6 +136,22 @@ def vision_observation_valid(vision, minimum_confidence: float) -> bool:
     )
 
 
+def vision_overlaps_forward_corridor(vision, center_margin: float) -> bool:
+    """检查视觉框是否与机器人前向通行走廊相交。
+
+    点云分析只覆盖 ``base_link`` 前方窄 ROI，而相机通常具有更宽视场。若画面最左侧的
+    立柱与正前方台阶恰好同帧出现，仅凭时间同步就融合会把两个不同物体当作一个。
+    在尚未获得相机内参/像素到点云投影前，采用归一化中心走廊是低成本保守约束：目标
+    框只要与 ``[margin, 1-margin]`` 相交即可，不会苛刻要求中心完全位于走廊内。
+    """
+    if vision is None:
+        return False
+    margin = max(0.0, min(0.49, float(center_margin)))
+    left = float(vision.center_x) - float(vision.width) / 2.0
+    right = float(vision.center_x) + float(vision.width) / 2.0
+    return right >= margin and left <= 1.0 - margin
+
+
 def _finite_or_zero(value: float) -> float:
     """保持融合消息数值有限；有效性另由严格校验结果表达。"""
     numeric = float(value)
@@ -148,8 +164,19 @@ def _nonnegative_finite_or_zero(value: float) -> float:
     return max(0.0, numeric)
 
 
-def fuse_observations(terrain, vision, skew: float, vision_min_confidence: float):
-    """融合一对同步消息并返回强类型结果，保持点云几何的安全优先级。"""
+def fuse_observations(
+    terrain,
+    vision,
+    skew: float,
+    vision_min_confidence: float,
+    vision_center_margin: float = 0.15,
+):
+    """融合一对同步消息并返回强类型结果，保持点云几何的安全优先级。
+
+    “时间接近”只证明两传感器看的是同一时刻，不证明看的是同一物体。因此视觉还要
+    通过前向走廊约束；未来获得相机内外参后，可在此处替换为三维投影关联而不改变消息
+    合同和下游规划接口。
+    """
     result = FusedObstacle()
     result.header = terrain.header
     terrain_valid = terrain_observation_valid(terrain)
@@ -175,7 +202,9 @@ def fuse_observations(terrain, vision, skew: float, vision_min_confidence: float
     )
     result.time_skew = _nonnegative_finite_or_zero(abs(skew))
     result.valid_points = max(0, int(terrain.valid_points))
-    if not vision_observation_valid(vision, vision_min_confidence):
+    if not vision_observation_valid(
+        vision, vision_min_confidence
+    ) or not vision_overlaps_forward_corridor(vision, vision_center_margin):
         return result
     visual_type = VISION_TO_GEOMETRY.get(int(vision.obstacle_type))
     result.vision_confirmed = True
@@ -224,11 +253,16 @@ class PerceptionFusion(Node):
         self.declare_parameter("sync_slop", 0.10)
         self.declare_parameter("queue_size", 10)
         self.declare_parameter("vision_min_confidence", 0.55)
+        self.declare_parameter("vision_center_margin", 0.15)
         self.declare_parameter("terrain_only_timeout", 0.25)
         self.sync_slop = max(0.001, float(self.get_parameter("sync_slop").value))
         queue_size = max(2, int(self.get_parameter("queue_size").value))
         self.vision_min_confidence = min(
             1.0, max(0.0, float(self.get_parameter("vision_min_confidence").value))
+        )
+        self.vision_center_margin = min(
+            0.49,
+            max(0.0, float(self.get_parameter("vision_center_margin").value)),
         )
         # 必须至少给近似同步一个完整窗口；相机断流后仍能在安全评估超时前发布点云结果。
         self.terrain_only_timeout = max(
@@ -279,7 +313,11 @@ class PerceptionFusion(Node):
             return
         terrain, vision, skew = pair
         fused = fuse_observations(
-            terrain, vision, skew, self.vision_min_confidence
+            terrain,
+            vision,
+            skew,
+            self.vision_min_confidence,
+            self.vision_center_margin,
         )
         self.output_pub.publish(fused)
         self._consume_through(terrain, vision)

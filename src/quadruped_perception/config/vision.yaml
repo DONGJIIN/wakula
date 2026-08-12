@@ -66,5 +66,7 @@ perception_fusion:
     sync_slop: 0.10
     queue_size: 10
     vision_min_confidence: 0.55
+    # 视觉框必须与归一化前向走廊相交，避免把画面边缘物体与正前方点云错误融合。
+    vision_center_margin: 0.15
     # 相机断流时等待短窗口后发布纯点云结果，避免视觉辅助阻断几何安全链。
     terrain_only_timeout: 0.25

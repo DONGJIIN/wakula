@@ -288,13 +288,38 @@ def combined_hsv_mask(
     要经过面积、填充率、多帧和点云复核，因此不会单凭扩大的颜色区域批准越障。
     """
     original_hsv = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2HSV)
-    original_mask = cv2.inRange(original_hsv, lower, upper)
+    original_mask = hsv_range_mask(original_hsv, lower, upper)
     if enhanced_bgr is original_bgr:
         return original_mask
     enhanced_hsv = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2HSV)
-    return cv2.bitwise_or(
-        original_mask, cv2.inRange(enhanced_hsv, lower, upper)
+    return cv2.bitwise_or(original_mask, hsv_range_mask(enhanced_hsv, lower, upper))
+
+
+def hsv_range_mask(
+    hsv: np.ndarray, lower: np.ndarray, upper: np.ndarray
+) -> np.ndarray:
+    """生成支持 Hue 0/179 环绕的 HSV 掩膜。
+
+    OpenCV 把 Hue 压缩到 0～179。红橙色在真实相机白平衡变化时可能跨过边界，例如
+    标定范围希望表达 ``H=175..179 或 0..12``。普通 ``cv2.inRange`` 要求下界不大于
+    上界，会让这种配置静默输出全黑。这里约定：当 lower.H > upper.H 时仅 Hue 分成
+    两段，S/V 仍共用同一上下界。正常范围保持一次 inRange 的低开销路径。
+    """
+    lower = np.asarray(lower, dtype=np.uint8).reshape(3)
+    upper = np.asarray(upper, dtype=np.uint8).reshape(3)
+    if int(lower[0]) <= int(upper[0]):
+        return cv2.inRange(hsv, lower, upper)
+    high_segment = cv2.inRange(
+        hsv,
+        lower,
+        np.asarray((179, upper[1], upper[2]), dtype=np.uint8),
     )
+    low_segment = cv2.inRange(
+        hsv,
+        np.asarray((0, lower[1], lower[2]), dtype=np.uint8),
+        upper,
+    )
+    return cv2.bitwise_or(high_segment, low_segment)
 
 
 def suppress_specular_edges(

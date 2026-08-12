@@ -11,6 +11,7 @@ from quadruped_perception.perception_fusion import (
     terrain_fallback_ready,
     terrain_observation_valid,
     vision_observation_valid,
+    vision_overlaps_forward_corridor,
 )
 
 
@@ -134,6 +135,20 @@ def test_fusion_rejects_nan_visual_confidence():
     camera = vision(confidence=float("nan"))
     assert not vision_observation_valid(camera, 0.55)
     result = fuse_observations(terrain(), camera, 0.01, 0.55)
+    assert not result.vision_confirmed
+
+
+def test_fusion_rejects_visual_object_outside_forward_cloud_corridor():
+    """同一时刻的画面边缘目标不能细分正前方的点云障碍。"""
+    camera = vision(VisionObstacle.HEIGHT_BAR, 0.9)
+    camera.center_x = 0.08
+    camera.width = 0.10
+    assert vision_observation_valid(camera, 0.55)
+    assert not vision_overlaps_forward_corridor(camera, 0.15)
+    cloud = terrain()
+    cloud.clearance_height = 0.15
+    result = fuse_observations(cloud, camera, 0.02, 0.55, 0.15)
+    assert result.obstacle_type == FusedObstacle.STEP
     assert not result.vision_confirmed
 
 

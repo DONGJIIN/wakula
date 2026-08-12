@@ -156,11 +156,14 @@ local_costmap:
         terrain_points:
           topic: /perception/obstacle_points
           data_type: "PointCloud2"
+          # 上游已按局部地面平面删除地面/坡面，只保留相对地面凸起。这里的 z 是
+          # base_link 坐标而非离地高度；四足机身高于地面，低台阶的 z 常为负数，
+          # 因此不能沿用正的 min_obstacle_height，否则会静默漏检低矮障碍。
           # 点云只标障不清障，避免稀疏深度帧把 2D 激光确认的障碍错误清除。
           clearing: false
           marking: true
-          min_obstacle_height: 0.05
-          max_obstacle_height: 0.60
+          min_obstacle_height: -0.50
+          max_obstacle_height: 0.80
           obstacle_max_range: 1.50
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -233,6 +236,10 @@ navigation_health_monitor:
     base_frame: base_link
     sensor_timeout: 1.0
     minimum_scan_valid_ratio: 0.60
+    # 拒绝空 frame、零角增量、视场过窄或采样数量异常的“有数据但不可建图”扫描。
+    minimum_scan_samples: 90
+    minimum_scan_field_of_view: 3.14
+    expected_odom_frame: odom
     max_xy_covariance: 1.0
     max_odom_jump: 0.75
     # 单次跳变锁存，连续 3 个稳定里程计样本后才恢复导航健康。
@@ -247,3 +254,9 @@ nav2_readiness_monitor:
     scan_topic: /scan
     odom_topic: /odom
     sensor_timeout: 1.0
+    future_stamp_tolerance: 0.10
+    minimum_scan_valid_ratio: 0.60
+    minimum_scan_samples: 90
+    minimum_scan_field_of_view: 3.14
+    max_xy_covariance: 1.0
+    expected_odom_frame: odom

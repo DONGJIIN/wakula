@@ -46,9 +46,35 @@ def test_navigation_health_parameters_are_versioned_with_nav2():
         config = yaml.safe_load(stream)
     health = config["navigation_health_monitor"]["ros__parameters"]
     assert health["minimum_scan_valid_ratio"] >= 0.5
+    assert health["minimum_scan_samples"] >= 90
+    assert health["minimum_scan_field_of_view"] >= 3.0
+    assert health["expected_odom_frame"] == "odom"
     assert health["sensor_timeout"] > 0.0
     assert 0.0 <= health["future_stamp_tolerance"] <= 0.2
     assert health["odom_jump_recovery_samples"] >= 2
+    readiness = config["nav2_readiness_monitor"]["ros__parameters"]
+    # 启动门与运行期健康门必须使用相同传感器合同，避免“能启动但立即不健康”。
+    for key in (
+        "future_stamp_tolerance",
+        "minimum_scan_valid_ratio",
+        "minimum_scan_samples",
+        "minimum_scan_field_of_view",
+        "max_xy_covariance",
+        "expected_odom_frame",
+    ):
+        assert readiness[key] == health[key]
+
+
+def test_depth_costmap_accepts_low_steps_after_ground_filtering():
+    """上游按相对地面滤波后，Nav2 不能再用正 z 下限漏掉机身下方台阶。"""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    source = config["local_costmap"]["local_costmap"]["ros__parameters"][
+        "obstacle_layer"
+    ]["terrain_points"]
+    assert source["min_obstacle_height"] < 0.0
+    assert source["max_obstacle_height"] > 0.5
 
 
 def test_navigation_launch_description_is_constructible():
@@ -138,7 +164,7 @@ def test_slam_launch_is_the_complete_one_command_entry():
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():
-    """Sensor messages alone must not activate Nav2 without localization."""
+    """无效消息与缺失定位 TF 都不能激活 Nav2。"""
     rclpy.init()
     node = Nav2ReadinessMonitor()
     try:
@@ -147,6 +173,8 @@ def test_readiness_monitor_does_not_start_without_localization_tf():
         node._check_readiness()
         assert node.scan_received
         assert node.odom_received
+        assert not node.scan_valid
+        assert not node.odom_valid
         assert not node.startup_requested
         assert node._sensor_is_fresh(node.last_scan_time)
         assert node._sensor_is_fresh(node.last_odom_time)

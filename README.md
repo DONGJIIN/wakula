@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，83 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，88 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -159,16 +159,16 @@ wakula/
 主要节点：
 
 - `vision_obstacle_detector`：OpenCV 双光照 HSV + Canny 轮廓识别，并用原始曝光、清晰度、
-  高光抑制、投票率和目标框 IoU 做多帧确认。
+  高光抑制、Hue 0/179 环绕、投票率和目标框 IoU 做多帧确认。
 - `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格、连通域和原始回波支撑量
-  估计台阶、坡度、坑洞、墙、悬空横杆和立柱。
+  估计台阶、坡度、坑洞、墙、悬空横杆和立柱；送入 Nav2 前按拟合地面移除平地/坡面。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；相机断流时在
-  0.25 s 后退化为纯点云结果，点云始终掌握尺度权限。
+  0.25 s 后退化为纯点云结果；视觉框还必须与前向通道相交，点云始终掌握尺度权限。
 - `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，原子发布地形模式、Nav2
   速度上限、有效性与几何摘要，供未来运动团队只读接入。
-- `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、协方差和里程计突跳；
-  跳变会锁存到连续稳定样本确认恢复，避免健康定时器漏检。
-- `nav2_readiness_monitor`：等待 `/scan`、`/odom` 和定位 TF 可用后再激活 Nav2。
+- `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、协方差
+  和里程计突跳；跳变会锁存到连续稳定样本确认恢复。
+- `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2。
 - `navigation_speed_gate`：检查 Nav2 命令、地形评估和导航健康心跳，任一失效立即输出零速。
 - `xbox_teleop`：将 `/joy` 转换为带 LB 使能、B 急停和断流归零的 `/cmd_vel_joy`。
 - `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
@@ -201,7 +201,8 @@ Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
 职责边界如下：
 
 1. **SLAM** 用 `/scan` 在陌生环境生成地图和定位，不负责跨越动作。
-2. **Nav2** 根据地图规划路线；激光和深度点云共同写入局部代价地图用于绕障。
+2. **Nav2** 根据地图规划路线；激光和“高于局部拟合地面的深度点”共同写入局部代价地图，
+   避免把 10°/14° 合法坡面误当成墙，同时不漏掉位于 `base_link` 下方的低台阶。
 3. **OpenCV** 识别杆、限高横杆、墙面和大面积有色障碍，用于提前减速和提示。
 4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据；
    当前 STEP/CLIMB 只分类并停车。
@@ -451,8 +452,8 @@ ros2 launch slam slam.launch.py \
 ros2 launch quadruped_bringup bringup.launch.py
 ```
 
-Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`，并确认
-`map -> base_link` TF 可用后才会自动激活整套导航生命周期；因此没有连接传感器时可
+Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`，确认时间戳、frame、
+扫描角度/样本数及里程计数值有效，再确认 `map -> base_link` TF 可用后才会自动激活；因此没有连接传感器时可
 安全打开和关闭调试环境，不会在等待 TF 的生命周期切换中崩溃。地形节点仍会等待相机
 外参，这是正常安全行为。若只检查参数、不希望自动激活，可使用：
 
@@ -645,7 +646,7 @@ obstacle_type, confidence, width, clearance_height]
 同时携带几何/视觉确认位、点数、粗糙度、坡度和时间差，避免不同帧字段被拼成一次决策。
 同步器会在有界小队列内寻找全局时间差最小的一对消息，能处理常见的回调乱序；零时间戳、
 重复旧帧和时间差超过 `0.10 s` 的观测不会融合。融合层还会二次校验类别、NaN/Inf、
-归一化视觉框和连续量范围；决策层拒绝超龄/未来时间戳。几何未确认、置信度不足或点数
+归一化视觉框、前向通道相交关系和连续量范围；决策层拒绝超龄/未来时间戳。几何未确认、置信度不足或点数
 不足时保持停车。若相机断流，融合器等待 `0.25 s` 同步窗口后继续发布
 `vision_confirmed=false` 的纯点云几何，避免辅助相机成为安全链单点故障。关闭
 OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达的真机继续使用。
@@ -664,8 +665,10 @@ OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达
 `frontal_obstacle_height`
 只统计中央通道，`lookahead` 是最近成片障碍的实际 x 距离，不再是固定 ROI 长度。
 
-同一 ROI 被降采样后发布为 `/perception/obstacle_points`，Nav2 的 local costmap 以
-`PointCloud2` 障碍源进行 marking，2D 雷达继续负责 marking + clearing。点云层不主动
+算法先用拟合平面计算 ROI 中每点的相对地面高度，只将凸起降采样发布为
+`/perception/obstacle_points`，因此 10°/14° 坡面不会随前向距离增加而被误标成墙；
+低台阶即便位于机身 `base_link` 下方、绝对 z 为负，也不会被 Nav2 的高度过滤漏掉。
+Nav2 local costmap 以该 `PointCloud2` 进行 marking，2D 雷达继续负责 marking + clearing。点云层不主动
 clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗口会移除离开视野的旧区域。
 
 ### rosbag 离线标定与准确率报告

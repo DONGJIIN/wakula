@@ -123,6 +123,9 @@ Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 这会由算法入口启动 RViz、SLAM Toolbox、Nav2、OpenCV 和点云分析。小车已经发布默认
 /scan、/odom、odom->base_link、/imu/data、/camera/image_raw、/camera/depth/points，并
 提供 lidar_link、camera_link、camera_optical_frame、imu_link 的 TF，不需要额外 remap。
+Nav2 只会在雷达角度/样本/frame、里程计时间/frame/协方差和定位 TF 全部有效后激活。
+点云进入局部代价地图前会自动剔除拟合地面和坡面；真机只需保证点云 TF 正确，并用
+rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动侧重复裁成绝对 z>0。
 键盘移动测试：
 
   ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=/cmd_vel

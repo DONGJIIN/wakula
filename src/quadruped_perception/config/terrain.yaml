@@ -11,6 +11,8 @@ terrain_analyzer:
     max_points: 30000
     # 发布给 Nav2 局部代价地图的 base_link 降采样障碍点数上限。
     nav2_cloud_max_points: 5000
+    # 先按拟合地面平面计算相对高度，只把高于地面 5 cm 的点送入 Nav2；避免坡面误标障。
+    nav2_obstacle_min_height_above_ground: 0.05
 
     # ---------- 机器人前方检测区域（单位 m） ----------
     front_x_min: 0.10

@@ -11,6 +11,13 @@ from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformListener
 
+from slam.navigation_health_monitor import (
+    odometry_is_valid,
+    scan_contract_is_valid,
+    scan_is_valid,
+    source_stamp_is_current,
+)
+
 
 class Nav2ReadinessMonitor(Node):
     """把 Nav2 激活条件集中到一个节点，避免各服务器在输入缺失时反复报错。"""
@@ -23,6 +30,12 @@ class Nav2ReadinessMonitor(Node):
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("sensor_timeout", 1.0)
+        self.declare_parameter("future_stamp_tolerance", 0.10)
+        self.declare_parameter("minimum_scan_valid_ratio", 0.60)
+        self.declare_parameter("minimum_scan_samples", 90)
+        self.declare_parameter("minimum_scan_field_of_view", 3.14)
+        self.declare_parameter("max_xy_covariance", 1.0)
+        self.declare_parameter("expected_odom_frame", "odom")
         self.declare_parameter(
             "lifecycle_service",
             "/lifecycle_manager_navigation/manage_nodes",
@@ -35,9 +48,30 @@ class Nav2ReadinessMonitor(Node):
         self.sensor_timeout = max(
             0.1, float(self.get_parameter("sensor_timeout").value)
         )
+        self.future_stamp_tolerance = max(
+            0.0, float(self.get_parameter("future_stamp_tolerance").value)
+        )
+        self.minimum_scan_valid_ratio = min(
+            1.0,
+            max(0.0, float(self.get_parameter("minimum_scan_valid_ratio").value)),
+        )
+        self.minimum_scan_samples = max(
+            2, int(self.get_parameter("minimum_scan_samples").value)
+        )
+        self.minimum_scan_fov = max(
+            0.0, float(self.get_parameter("minimum_scan_field_of_view").value)
+        )
+        self.max_xy_covariance = max(
+            0.0, float(self.get_parameter("max_xy_covariance").value)
+        )
+        self.expected_odom_frame = str(
+            self.get_parameter("expected_odom_frame").value
+        )
 
         self.scan_received = False
         self.odom_received = False
+        self.scan_valid = False
+        self.odom_valid = False
         self.last_scan_time = None
         self.last_odom_time = None
         self.startup_requested = False
@@ -65,15 +99,52 @@ class Nav2ReadinessMonitor(Node):
             "are ready"
         )
 
-    def _scan_callback(self, _msg: LaserScan) -> None:
-        """记录最新激光接收时间，不在此节点重复解析量测。"""
-        self.scan_received = True
-        self.last_scan_time = self.get_clock().now()
+    def _scan_callback(self, msg: LaserScan) -> None:
+        """记录激光心跳，并用健康监控的同一合同校验该帧是否足以建图。
 
-    def _odom_callback(self, _msg: Odometry) -> None:
-        """记录最新里程计接收时间，质量由健康监控另行检查。"""
+        “收到 DDS 消息”与“可以激活 Nav2”不是同一件事。空 frame、过期 Header、零角
+        增量或绝大多数无效回波都会保持 ``scan_valid=False``，避免生命周期节点在坏
+        驱动上启动后持续刷错。
+        """
+        now = self.get_clock().now()
+        self.scan_received = True
+        self.last_scan_time = now
+        self.scan_valid = (
+            source_stamp_is_current(
+                msg.header.stamp.sec,
+                msg.header.stamp.nanosec,
+                now.nanoseconds * 1e-9,
+                self.sensor_timeout,
+                self.future_stamp_tolerance,
+            )
+            and scan_contract_is_valid(
+                msg, self.minimum_scan_samples, self.minimum_scan_fov
+            )
+            and scan_is_valid(
+                msg.ranges,
+                self.minimum_scan_valid_ratio,
+                msg.range_min,
+                msg.range_max,
+            )
+        )
+
+    def _odom_callback(self, msg: Odometry) -> None:
+        """记录里程计心跳，同时校验时间、frame、四元数和协方差。"""
+        now = self.get_clock().now()
         self.odom_received = True
-        self.last_odom_time = self.get_clock().now()
+        self.last_odom_time = now
+        self.odom_valid = source_stamp_is_current(
+            msg.header.stamp.sec,
+            msg.header.stamp.nanosec,
+            now.nanoseconds * 1e-9,
+            self.sensor_timeout,
+            self.future_stamp_tolerance,
+        ) and odometry_is_valid(
+            msg,
+            self.max_xy_covariance,
+            self.expected_odom_frame,
+            self.base_frame,
+        )
 
     def _sensor_is_fresh(self, stamp) -> bool:
         """按节点 ROS 时钟判断输入是否仍在启动允许窗口内。"""
@@ -87,8 +158,8 @@ class Nav2ReadinessMonitor(Node):
         if self.startup_requested:
             return
         # 不只检查“曾经收到”，还检查传感器正在持续更新。
-        scan_ready = self._sensor_is_fresh(self.last_scan_time)
-        odom_ready = self._sensor_is_fresh(self.last_odom_time)
+        scan_ready = self.scan_valid and self._sensor_is_fresh(self.last_scan_time)
+        odom_ready = self.odom_valid and self._sensor_is_fresh(self.last_odom_time)
         tf_ready = self.tf_buffer.can_transform(
             self.global_frame,
             self.base_frame,

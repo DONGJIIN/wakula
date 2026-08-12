@@ -3,11 +3,13 @@
 import math
 
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
 from slam.navigation_health_monitor import (
     navigation_failures,
     odometry_is_valid,
     OdometryJumpFilter,
+    scan_contract_is_valid,
     scan_is_valid,
     source_stamp_is_current,
 )
@@ -22,6 +24,28 @@ def test_scan_health_accepts_inf_but_rejects_nan_stream():
     assert not scan_is_valid([0.0, 0.0, math.nan], 0.60, 0.0, 10.0)
 
 
+def test_scan_contract_rejects_bad_angles_sparse_samples_and_empty_frame():
+    """持续发布距离数组不代表该 LaserScan 足以供 SLAM 使用。"""
+    scan = LaserScan()
+    scan.header.frame_id = "lidar_link"
+    scan.angle_min = -math.pi
+    scan.angle_max = math.pi
+    scan.ranges = [2.0] * 720
+    scan.angle_increment = (scan.angle_max - scan.angle_min) / (len(scan.ranges) - 1)
+    scan.range_min = 0.08
+    scan.range_max = 20.0
+    assert scan_contract_is_valid(scan, 90, math.pi)
+
+    scan.angle_increment = 0.0
+    assert not scan_contract_is_valid(scan, 90, math.pi)
+    scan.angle_increment = (scan.angle_max - scan.angle_min) / (len(scan.ranges) - 1)
+    scan.header.frame_id = ""
+    assert not scan_contract_is_valid(scan, 90, math.pi)
+    scan.header.frame_id = "lidar_link"
+    scan.ranges = [2.0] * 20
+    assert not scan_contract_is_valid(scan, 90, math.pi)
+
+
 def test_odometry_health_checks_covariance_and_finite_pose():
     """里程计必须具有有限位姿和有界协方差。"""
     msg = Odometry()
@@ -29,6 +53,12 @@ def test_odometry_health_checks_covariance_and_finite_pose():
     msg.pose.covariance[0] = 0.1
     msg.pose.covariance[7] = 0.1
     assert odometry_is_valid(msg, 1.0)
+    msg.header.frame_id = "odom"
+    msg.child_frame_id = "base_link"
+    assert odometry_is_valid(msg, 1.0, "odom", "base_link")
+    msg.child_frame_id = "camera_link"
+    assert not odometry_is_valid(msg, 1.0, "odom", "base_link")
+    msg.child_frame_id = "base_link"
     msg.pose.covariance[0] = 5.0
     assert not odometry_is_valid(msg, 1.0)
     msg.pose.covariance[0] = 0.1

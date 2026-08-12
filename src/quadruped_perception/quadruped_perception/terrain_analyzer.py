@@ -27,7 +27,10 @@ from std_msgs.msg import Float32MultiArray, Header
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from quadruped_interfaces.msg import TerrainFeatures
-from quadruped_perception.terrain_geometry import analyze_terrain_geometry
+from quadruped_perception.terrain_geometry import (
+    analyze_terrain_geometry,
+    navigation_obstacle_points,
+)
 
 from quadruped_perception.topic_selection import should_accept_source
 
@@ -273,6 +276,7 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("transform_timeout", 0.05)
         self.declare_parameter("max_points", 30000)
         self.declare_parameter("nav2_cloud_max_points", 5000)
+        self.declare_parameter("nav2_obstacle_min_height_above_ground", 0.05)
         self.declare_parameter("front_x_min", 0.10)
         self.declare_parameter("front_x_max", 1.50)
         self.declare_parameter("lateral_half_width", 0.45)
@@ -305,6 +309,14 @@ class TerrainAnalyzer(Node):
         self.max_points = max(1, int(self.get_parameter("max_points").value))
         self.nav2_cloud_max_points = max(
             1, int(self.get_parameter("nav2_cloud_max_points").value)
+        )
+        self.nav2_obstacle_min_height = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "nav2_obstacle_min_height_above_ground"
+                ).value
+            ),
         )
         self.x_min = float(self.get_parameter("front_x_min").value)
         self.x_max = float(self.get_parameter("front_x_max").value)
@@ -424,16 +436,14 @@ class TerrainAnalyzer(Node):
         if transformed is None:
             return
         header, xyz = transformed
-        # 同一份已转换点云同时供 Nav2 标障和越障几何计算，避免重复 TF。
-        nav2_points = filter_roi_points(
+        # 先保留较完整的分析 ROI。这里使用 max_points 而不是 Nav2 的发布上限，避免为了
+        # 节省 costmap 带宽而同时降低地面拟合、细横杆和窄立柱的分类支撑点数。
+        analysis_points = filter_roi_points(
             xyz,
             self.x_min,
             self.x_max,
             self.y_half,
-            self.nav2_cloud_max_points,
-        )
-        self.obstacle_cloud_pub.publish(
-            point_cloud2.create_cloud_xyz32(header, nav2_points.tolist())
+            self.max_points,
         )
         result = compute_terrain_features(
             xyz,
@@ -451,13 +461,13 @@ class TerrainAnalyzer(Node):
             self._publish_diagnostic(
                 DiagnosticStatus.WARN,
                 "Insufficient terrain points",
-                len(nav2_points),
+                len(analysis_points),
                 {},
             )
             return
         features, valid_points = result
         geometry = analyze_terrain_geometry(
-            nav2_points,
+            analysis_points,
             cell_size=self.grid_cell_size,
             ground_bin_size=self.ground_height_bin,
             step_height=self.warning_height,
@@ -467,6 +477,17 @@ class TerrainAnalyzer(Node):
             min_cells=max(8, self.min_points // 3),
             min_region_cells=self.min_connected_region_cells,
             min_region_points=self.min_connected_region_points,
+        )
+        # 代价地图只接收相对局部地面凸起的点。平地和可通行坡面不会再因为 base_link
+        # 高度或坡度而被标成障碍；几何无效时输出空云，同时安全评估保持 STOP。
+        nav2_points = navigation_obstacle_points(
+            analysis_points,
+            geometry,
+            minimum_height_above_ground=self.nav2_obstacle_min_height,
+            maximum_points=self.nav2_cloud_max_points,
+        )
+        self.obstacle_cloud_pub.publish(
+            point_cloud2.create_cloud_xyz32(header, nav2_points.tolist())
         )
         if geometry.valid:
             # 旧九字段继续由原算法提供，扩展字段和强类型话题承载新几何合同。
@@ -483,12 +504,20 @@ class TerrainAnalyzer(Node):
         typed.obstacle_type = int(geometry.obstacle_type)
         typed.confidence = float(geometry.confidence)
         typed.ground_height = float(geometry.ground_height)
-        typed.obstacle_height = float(features[FEATURE_FRONTAL_HEIGHT])
+        # 强类型接口必须保持同一几何估计内部自洽：类别、尺寸和距离均来自稳健栅格
+        # 分割。旧数组继续保留历史算法字段，供已有 rosbag/工具兼容使用。
+        typed.obstacle_height = float(
+            geometry.obstacle_height
+            if geometry.valid
+            else features[FEATURE_FRONTAL_HEIGHT]
+        )
         typed.pit_depth = float(geometry.pit_depth)
         typed.slope_pitch = float(geometry.slope_pitch)
         typed.slope_roll = float(geometry.slope_roll)
         typed.roughness = float(max(features[FEATURE_ROUGHNESS], geometry.roughness))
-        typed.distance = float(features[FEATURE_LOOKAHEAD])
+        typed.distance = float(
+            geometry.distance if geometry.valid else features[FEATURE_LOOKAHEAD]
+        )
         typed.width = float(geometry.width)
         typed.clearance_height = float(geometry.clearance_height)
         typed.valid_points = int(valid_points)

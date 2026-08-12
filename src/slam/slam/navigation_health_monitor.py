@@ -16,6 +16,49 @@ from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformListener
 
 
+def scan_contract_is_valid(
+    msg: LaserScan,
+    minimum_samples: int = 90,
+    minimum_field_of_view: float = math.pi,
+) -> bool:
+    """验证 LaserScan 的结构合同，而不仅是 ``ranges`` 中有多少有限值。
+
+    SLAM 需要有意义的角度序列和传感器坐标系。驱动配置错误时仍可能持续发布一串
+    看似正常的距离值，例如 ``angle_increment=0``、只有十几个采样点、空 frame，或
+    声称 360° 但数组长度只覆盖很小角度。只统计有效回波会让这些坏帧通过健康门，
+    随后表现为地图重影、旋转漂移或 Nav2 无法清障。
+
+    ``LaserScan`` 的最后一个采样对应 ``angle_min + (N-1)*angle_increment``；允许两个
+    角分辨率的误差，以兼容驱动对端点“包含/不包含”的不同实现。
+    """
+    sample_count = len(msg.ranges)
+    numeric = (
+        msg.angle_min,
+        msg.angle_max,
+        msg.angle_increment,
+        msg.time_increment,
+        msg.scan_time,
+        msg.range_min,
+        msg.range_max,
+    )
+    if (
+        sample_count < max(2, int(minimum_samples))
+        or not str(msg.header.frame_id).strip()
+        or not all(math.isfinite(float(value)) for value in numeric)
+        or float(msg.range_min) < 0.0
+        or float(msg.range_max) <= float(msg.range_min)
+        or float(msg.time_increment) < 0.0
+        or float(msg.scan_time) < 0.0
+    ):
+        return False
+    increment = abs(float(msg.angle_increment))
+    declared_span = abs(float(msg.angle_max) - float(msg.angle_min))
+    sampled_span = increment * (sample_count - 1)
+    if increment <= 1e-9 or sampled_span < max(0.0, float(minimum_field_of_view)):
+        return False
+    return abs(declared_span - sampled_span) <= max(0.05, 2.0 * increment)
+
+
 def scan_is_valid(
     ranges,
     minimum_valid_ratio: float,
@@ -68,8 +111,18 @@ def source_stamp_is_current(
     )
 
 
-def odometry_is_valid(msg: Odometry, max_xy_covariance: float) -> bool:
-    """拒绝非有限位姿/速度以及过大的平面协方差。"""
+def odometry_is_valid(
+    msg: Odometry,
+    max_xy_covariance: float,
+    expected_frame: str = "",
+    expected_child_frame: str = "",
+) -> bool:
+    """拒绝非有限位姿/速度、错误 frame 以及过大的平面协方差。
+
+    里程计数值即使有限，若 Header 写成 ``map`` 或 child 写成传感器 frame，也会与
+    ``odom -> base_link`` TF 形成相互矛盾的运动来源。期望 frame 为空时跳过名称检查，
+    便于纯函数单测；在线节点默认严格执行标准 ``odom``/``base_link`` 合同。
+    """
     values = (
         msg.pose.pose.position.x,
         msg.pose.pose.position.y,
@@ -85,8 +138,16 @@ def odometry_is_valid(msg: Odometry, max_xy_covariance: float) -> bool:
     quaternion_norm = math.sqrt(
         sum(float(value) ** 2 for value in values[2:6])
     )
+    frames_valid = (
+        (not expected_frame or msg.header.frame_id == expected_frame)
+        and (
+            not expected_child_frame
+            or msg.child_frame_id == expected_child_frame
+        )
+    )
     return (
-        all(math.isfinite(float(value)) for value in values + covariance)
+        frames_valid
+        and all(math.isfinite(float(value)) for value in values + covariance)
         and 0.90 <= quaternion_norm <= 1.10
         and all(
             0.0 <= float(value) <= max_xy_covariance for value in covariance
@@ -161,6 +222,9 @@ class NavigationHealthMonitor(Node):
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("sensor_timeout", 1.0)
         self.declare_parameter("minimum_scan_valid_ratio", 0.60)
+        self.declare_parameter("minimum_scan_samples", 90)
+        self.declare_parameter("minimum_scan_field_of_view", 3.14)
+        self.declare_parameter("expected_odom_frame", "odom")
         self.declare_parameter("max_xy_covariance", 1.0)
         self.declare_parameter("max_odom_jump", 0.75)
         self.declare_parameter("odom_jump_recovery_samples", 3)
@@ -170,6 +234,16 @@ class NavigationHealthMonitor(Node):
         self.timeout = max(0.1, float(self.get_parameter("sensor_timeout").value))
         self.minimum_scan_valid_ratio = min(
             1.0, max(0.0, float(self.get_parameter("minimum_scan_valid_ratio").value))
+        )
+        self.minimum_scan_samples = max(
+            2, int(self.get_parameter("minimum_scan_samples").value)
+        )
+        self.minimum_scan_fov = max(
+            0.0,
+            float(self.get_parameter("minimum_scan_field_of_view").value),
+        )
+        self.expected_odom_frame = str(
+            self.get_parameter("expected_odom_frame").value
         )
         self.max_xy_covariance = max(
             0.0, float(self.get_parameter("max_xy_covariance").value)
@@ -210,11 +284,19 @@ class NavigationHealthMonitor(Node):
             self.timeout,
             self.future_stamp_tolerance,
         )
-        self.scan_valid = stamp_valid and scan_is_valid(
-            msg.ranges,
-            self.minimum_scan_valid_ratio,
-            msg.range_min,
-            msg.range_max,
+        self.scan_valid = (
+            stamp_valid
+            and scan_contract_is_valid(
+                msg,
+                self.minimum_scan_samples,
+                self.minimum_scan_fov,
+            )
+            and scan_is_valid(
+                msg.ranges,
+                self.minimum_scan_valid_ratio,
+                msg.range_min,
+                msg.range_max,
+            )
         )
         self.last_scan_time = now
 
@@ -229,7 +311,12 @@ class NavigationHealthMonitor(Node):
             self.timeout,
             self.future_stamp_tolerance,
         )
-        numeric_valid = odometry_is_valid(msg, self.max_xy_covariance)
+        numeric_valid = odometry_is_valid(
+            msg,
+            self.max_xy_covariance,
+            self.expected_odom_frame,
+            self.base_frame,
+        )
         self.odom_valid = stamp_valid and numeric_valid
         # 只有数值、协方差和源时间均有效的样本才能更新跳变参考，避免 NaN 将后续比较
         # 永久污染。跳变锁存独立于当前帧 odom_valid，恢复需连续稳定样本。

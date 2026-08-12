@@ -15,6 +15,7 @@ from quadruped_perception.terrain_geometry import (
     PIT,
     WALL,
     analyze_terrain_geometry,
+    navigation_obstacle_points,
 )
 from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
@@ -27,6 +28,7 @@ from quadruped_perception.vision_obstacle_detector import (
     enhance_illumination,
     evidence_iou,
     image_quality_score,
+    hsv_range_mask,
     largest_color_feature,
     stabilize_evidence,
     suppress_specular_edges,
@@ -177,6 +179,17 @@ def test_dual_illumination_mask_recovers_shadow_color_without_losing_original():
     mask = combined_hsv_mask(original, enhanced, lower, upper)
     assert mask[40, 30] == 255
     assert mask[40, 85] == 255
+
+
+def test_hsv_mask_supports_hue_wrap_at_opencv_boundary():
+    """红橙色标定跨越 H=179/0 时，两端色相都必须保留。"""
+    hsv = np.asarray([[[178, 180, 180], [4, 180, 180], [80, 180, 180]]], dtype=np.uint8)
+    mask = hsv_range_mask(
+        hsv,
+        np.asarray((170, 80, 70), dtype=np.uint8),
+        np.asarray((12, 255, 255), dtype=np.uint8),
+    )
+    assert mask.tolist() == [[255, 255, 0]]
 
 
 def test_specular_glare_edges_are_removed_but_colored_edges_remain():
@@ -424,3 +437,26 @@ def test_competition_fourteen_degree_ramp_remains_ground_not_wall():
     assert result.valid
     assert result.obstacle_type == CLEAR
     assert abs(result.slope_pitch - np.deg2rad(14.0)) < 0.03
+    # 合法坡面不能直接进入 Nav2 标障点云，否则局部代价地图会在坡顶封路。
+    obstacle_points = navigation_obstacle_points(floor, result)
+    assert len(obstacle_points) == 0
+
+
+def test_nav2_cloud_keeps_low_step_relative_to_ground_plane():
+    """base_link 下方的低台阶仍应按相对地面高度进入代价地图。"""
+    floor = _dense_floor(z=-0.44)
+    step = np.asarray(
+        [
+            (x, y, -0.32 + noise)
+            for x in np.arange(0.60, 0.81, 0.04)
+            for y in np.arange(-0.16, 0.17, 0.04)
+            for noise in (-0.002, 0.002)
+        ]
+    )
+    points = np.vstack((floor, step))
+    result = analyze_terrain_geometry(points)
+    assert result.valid
+    selected = navigation_obstacle_points(points, result, minimum_height_above_ground=0.05)
+    assert len(selected) > 0
+    # 点在 base_link 下方仍合法；Nav2 YAML 的绝对 z 下限不能把它们漏掉。
+    assert np.max(selected[:, 2]) < 0.0

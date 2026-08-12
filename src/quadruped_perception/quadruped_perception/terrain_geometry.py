@@ -17,7 +17,12 @@ UNKNOWN, CLEAR, STEP, PIT, WALL, BAR, POLE = range(7)
 
 @dataclass(frozen=True)
 class GeometryEstimate:
-    """一帧点云的有界几何摘要。"""
+    """一帧点云的有界几何摘要。
+
+    ``ground_height``、``slope_pitch`` 和 ``slope_roll`` 共同描述目标坐标系中的
+    地面平面。下游必须用这三个量计算“点相对地面的高度”，不能直接用 ``z`` 判断
+    障碍；四足的 ``base_link`` 通常远高于地面，低矮台阶在该坐标系里的 z 可能为负。
+    """
 
     valid: bool = False
     obstacle_type: int = UNKNOWN
@@ -32,6 +37,42 @@ class GeometryEstimate:
     width: float = 0.0
     clearance_height: float = 0.0
     valid_points: int = 0
+
+
+def navigation_obstacle_points(
+    xyz: np.ndarray,
+    estimate: GeometryEstimate,
+    *,
+    minimum_height_above_ground: float = 0.05,
+    maximum_points: int = 5000,
+) -> np.ndarray:
+    """从前向点云中只保留真正高于局部地面的 Nav2 标障点。
+
+    Nav2 的 PointCloud2 obstacle layer 按消息坐标系中的绝对 z 过滤点；它并不知道
+    当前地面是平地还是坡面。如果直接发布原始 ROI，10°/14° 合法坡面会随着 x 增大而
+    高于固定 z 阈值，最终被代价地图错误封死。本函数用本帧稳健地面平面
+    ``z = tan(pitch)*x + tan(roll)*y + ground_height`` 计算残差，只发布比地面高出
+    指定阈值的点。几何估计无效时返回空集，让上层安全评估负责停车，而不是用未经
+    解释的点云污染代价地图。
+
+    降采样采用等间隔索引而非随机抽样，使 rosbag 回放、测试和 CI 结果可重复。
+    """
+    points = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+    points = points[np.isfinite(points).all(axis=1)]
+    if not estimate.valid or not len(points):
+        return np.empty((0, 3), dtype=np.float32)
+    plane = (
+        math.tan(float(estimate.slope_pitch)) * points[:, 0]
+        + math.tan(float(estimate.slope_roll)) * points[:, 1]
+        + float(estimate.ground_height)
+    )
+    threshold = max(0.0, float(minimum_height_above_ground))
+    selected = points[(points[:, 2] - plane) >= threshold]
+    limit = max(1, int(maximum_points))
+    if len(selected) > limit:
+        indices = np.linspace(0, len(selected) - 1, limit, dtype=np.int64)
+        selected = selected[indices]
+    return selected.astype(np.float32, copy=False)
 
 
 def _grid_samples(points: np.ndarray, cell_size: float):
