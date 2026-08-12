@@ -5,8 +5,9 @@ Wakula 算法说明
 ------
 当前只实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策、Xbox 手柄
 Twist 适配和离线评估。
-没有实现硬件驱动、状态估计、运动学/动力学、站立步态、全身控制、真实越障 Action、
-比赛逻辑或 Gazebo。识别到需要抬腿/降低姿态的障碍时会停车，不会生成关节命令。
+没有实现硬件驱动、状态估计、运动学/动力学、站立步态、全身控制、真实越障 Action
+或比赛逻辑。Gazebo 仅实现独立的规则障碍参考场地和传感器测试载体，不属于算法启动，
+也不是机器狗动力学仿真。识别到需要抬腿/降低姿态的障碍时会停车，不会生成关节命令。
 
 二、各部分作用
 ------------
@@ -76,6 +77,15 @@ Twist 适配和离线评估。
    quadruped.urdf.xacro 只是 RViz 外形与 lidar_link、camera_link、camera_optical_frame、
    imu_link 的 TF 占位。真实安装完成后必须替换尺寸和固定变换。
 
+7. quadruped_gazebo（独立仿真工具，不属于核心算法）
+   robocon_obstacle_field.sdf：按规则 V1.0 复现 14m×6m 场地和八类障碍已公布的尺寸、
+   高度、间距与颜色；world 开头的 REFERENCE LAYOUT 集中定义全部参考 pose。规则尚未
+   公布障碍正式坐标，所以当前布局只用于联调，正式坐标到手后只改八个 layout_* frame。
+   sensor_test_base/model.sdf：仅提供可移动传感器载体以及 /scan、/odom、RGB、深度点云；
+   它不是四足模型，不用于评价越障运动。
+   robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
+   slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
+
 三、决策原则
 ----------
 1. 点云几何决定是否可通行；OpenCV 只辅助提醒和减速。
@@ -137,3 +147,4 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 3. 然后看 quadruped_planning，理解感知如何变成模式、限速和失效安全速度。
 4. 最后结合 config/*.yaml 注释、行为树 XML 和 quadruped_interfaces/msg 核对参数与接口。
 5. 注释解释“为什么这样做”和安全边界；实际运行合同仍以代码、消息定义和 connect.txt 为准。
+6. 需要场地联调时再看 quadruped_gazebo/worlds 下的 REFERENCE LAYOUT；仿真不得反向成为算法依赖。

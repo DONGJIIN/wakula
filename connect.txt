@@ -117,6 +117,20 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 perception_bag_evaluator（离线工具，不随一键启动运行）
   作用：读取 rosbag 和人工标签，统计识别准确率、召回率及连续量误差。
 
+2.7 独立 Gazebo 节点（只随 robocon_field.launch.py 启动）
+
+/robocon_sensor_bridge（ros_gz_bridge / parameter_bridge）
+  作用：把仿真 /scan、/odom、点云、TF 和时钟送入 ROS，并把 ROS /cmd_vel 送回测试载体。
+  关键接口：/clock、/scan、/scan/points、/odom、/tf、/cmd_vel、/camera/depth/points。
+
+/robocon_image_bridge（ros_gz_image / image_bridge）
+  作用：把 Gazebo RGB 图像转换为标准 /camera/image_raw，供 OpenCV 直接使用。
+
+/lidar_static_tf、/camera_static_tf（tf2_ros / static_transform_publisher）
+  作用：只为仿真测试载体补齐 base_link 到雷达/相机的固定外参。
+
+以上节点不是核心算法节点，slam.launch.py 不会启动它们；真机运行时也不应启动。
+
 三、标准输入接口
 ------------
 /scan
@@ -126,7 +140,7 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
 /odom
   类型：nav_msgs/msg/Odometry
   配套 TF：odom -> base_link
-  用途：Nav2 控制与健康监控。当前仓库不生成真实 odom。
+  用途：Nav2 控制与健康监控。当前仓库不生成真实 odom；独立 Gazebo 测试载体只生成仿真 odom。
 
 /joy
   类型：sensor_msgs/msg/Joy

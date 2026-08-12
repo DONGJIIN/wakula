@@ -1,0 +1,103 @@
+<?xml version="1.0"?>
+<sdf version="1.10">
+  <!--
+    这个模型不是四足动力学模型，只是独立仿真包内的传感器测试载体。它提供标准
+    /cmd_vel、/odom、/scan、RGB 图像和深度点云，便于在真机运动控制完成前测试
+    SLAM/Nav2/OpenCV 数据链。不得用其运动性能评价真实机器狗的越障能力。
+  -->
+  <model name="sensor_test_base">
+    <self_collide>false</self_collide>
+    <allow_auto_disable>false</allow_auto_disable>
+
+    <link name="base_link">
+      <pose>0 0 0.14 0 0 0</pose>
+      <inertial>
+        <mass>8.0</mass>
+        <inertia>
+          <ixx>0.085</ixx><iyy>0.140</iyy><izz>0.195</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <collision name="chassis_collision">
+        <geometry><box><size>0.46 0.32 0.10</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+      </collision>
+      <visual name="chassis_visual">
+        <geometry><box><size>0.46 0.32 0.10</size></box></geometry>
+        <material><ambient>0.08 0.08 0.09 1</ambient><diffuse>0.12 0.12 0.14 1</diffuse></material>
+      </visual>
+    </link>
+
+    <link name="left_wheel">
+      <pose>0 0.19 0.08 1.570796 0 0</pose>
+      <inertial><mass>0.4</mass><inertia><ixx>0.0013</ixx><iyy>0.0013</iyy><izz>0.0025</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry></collision>
+      <visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry><material><diffuse>0.03 0.03 0.03 1</diffuse></material></visual>
+    </link>
+    <link name="right_wheel">
+      <pose>0 -0.19 0.08 1.570796 0 0</pose>
+      <inertial><mass>0.4</mass><inertia><ixx>0.0013</ixx><iyy>0.0013</iyy><izz>0.0025</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry></collision>
+      <visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry><material><diffuse>0.03 0.03 0.03 1</diffuse></material></visual>
+    </link>
+    <joint name="left_wheel_joint" type="revolute">
+      <parent>base_link</parent><child>left_wheel</child>
+      <axis><xyz>0 1 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+    </joint>
+    <joint name="right_wheel_joint" type="revolute">
+      <parent>base_link</parent><child>right_wheel</child>
+      <axis><xyz>0 1 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+    </joint>
+
+    <link name="caster_link">
+      <pose>-0.17 0 0.045 0 0 0</pose>
+      <inertial><mass>0.15</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision"><geometry><sphere><radius>0.045</radius></sphere></geometry><surface><friction><ode><mu>0.05</mu><mu2>0.05</mu2></ode></friction></surface></collision>
+      <visual name="visual"><geometry><sphere><radius>0.045</radius></sphere></geometry><material><diffuse>0.2 0.2 0.2 1</diffuse></material></visual>
+    </link>
+    <joint name="caster_fixed" type="ball"><parent>base_link</parent><child>caster_link</child></joint>
+
+    <link name="lidar_link">
+      <pose>0 0 0.34 0 0 0</pose>
+      <inertial><mass>0.15</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <visual name="visual"><geometry><cylinder><radius>0.045</radius><length>0.055</length></cylinder></geometry><material><diffuse>0.05 0.05 0.05 1</diffuse></material></visual>
+      <sensor name="lidar" type="gpu_lidar">
+        <topic>/scan</topic><update_rate>12</update_rate><gz_frame_id>lidar_link</gz_frame_id>
+        <lidar>
+          <scan><horizontal><samples>720</samples><resolution>1</resolution><min_angle>-3.141593</min_angle><max_angle>3.141593</max_angle></horizontal></scan>
+          <range><min>0.08</min><max>20.0</max><resolution>0.01</resolution></range>
+          <noise><type>gaussian</type><mean>0</mean><stddev>0.005</stddev></noise>
+        </lidar>
+        <always_on>true</always_on><visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="lidar_fixed" type="fixed"><parent>base_link</parent><child>lidar_link</child></joint>
+
+    <link name="camera_link">
+      <!-- 向下俯约 11.5°，覆盖机器人前方地面、台阶和横杆。 -->
+      <pose>0.22 0 0.18 0 0.20 0</pose>
+      <inertial><mass>0.18</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <visual name="visual"><geometry><box><size>0.05 0.10 0.04</size></box></geometry><material><diffuse>0.04 0.04 0.05 1</diffuse></material></visual>
+      <sensor name="rgbd" type="rgbd_camera">
+        <topic>/camera</topic><update_rate>15</update_rate><gz_frame_id>camera_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.396263</horizontal_fov>
+          <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+          <clip><near>0.12</near><far>8.0</far></clip>
+          <depth_camera><clip><near>0.12</near><far>8.0</far></clip></depth_camera>
+        </camera>
+        <always_on>true</always_on><visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="camera_fixed" type="fixed"><parent>base_link</parent><child>camera_link</child></joint>
+
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint><right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.38</wheel_separation><wheel_radius>0.08</wheel_radius>
+      <topic>/cmd_vel</topic><odom_topic>/odom</odom_topic><tf_topic>/tf</tf_topic>
+      <frame_id>odom</frame_id><child_frame_id>base_link</child_frame_id>
+      <odom_publish_frequency>30</odom_publish_frequency>
+      <max_linear_acceleration>0.8</max_linear_acceleration><max_angular_acceleration>1.5</max_angular_acceleration>
+    </plugin>
+  </model>
+</sdf>

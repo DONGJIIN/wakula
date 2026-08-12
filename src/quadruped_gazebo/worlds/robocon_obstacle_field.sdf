@@ -1,0 +1,278 @@
+<?xml version="1.0"?>
+<sdf version="1.10">
+  <!--
+    2026 第二十四届全国大学生机器人大赛 Robocon 仿生足式机器人挑战赛
+    “障碍赛”参考场地，依据 V1.0 规则第 3.1 节、表 1 和附录配色建立。
+
+    重要边界：规则只公布 14 m × 6 m 外框、障碍结构尺寸，并明确“具体排列顺序与安装
+    位置在赛前公布”。因此下面八个顶层 model 的 pose 是按图 1 绘制的参考布局，不是正式
+    赛场坐标。正式坐标发布后，只修改标有 LAYOUT 的 pose；不要修改任何算法 launch。
+
+    八个障碍的全局位置只定义在下方“REFERENCE LAYOUT”框架区。障碍 model 自身 pose
+    均为相对框架的零位，因此正式坐标发布后只改这八个 frame，不改模型、更不改算法。
+    砂砾坑的真实凹槽还对应 competition_floor 内五块地板的切口；移动坑位时应在本 world
+    内同步平移该切口。此约束不涉及任何 ROS 2 算法或参数文件。
+
+    坐标：场地中心为 world 原点，+X 沿 14 m 长边向右，+Y 沿 6 m 短边向上，+Z 向上。
+    单位：米、弧度。规则色：地面 RGB(255,255,0)，障碍橘 RGB(223,117,0)，蓝色
+    RGB(31,65,159)。砂砾/碎木属于随机实物，本世界只近似其几何和外观，不能替代真机测试。
+  -->
+  <world name="robocon_obstacle_field">
+    <physics name="robocon_physics" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <gravity>0 0 -9.80665</gravity>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.55 0.55 0.55 1</ambient>
+      <background>0.82 0.86 0.92 1</background>
+      <shadows>true</shadows>
+      <grid>false</grid>
+    </scene>
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.95 0.95 0.95 1</diffuse>
+      <specular>0.20 0.20 0.20 1</specular>
+      <direction>-0.35 0.25 -0.90</direction>
+    </light>
+
+    <!--
+      ======================== REFERENCE LAYOUT ========================
+      唯一的障碍全局坐标表：x y z roll pitch yaw（m / rad）。当前值只依据规则图 1
+      排成便于调试的参考布局，不是官方最终坐标。正式坐标到手后只改下列八行。
+    -->
+    <frame name="layout_right_angle_poles"><pose>-5.20 -1.55 0 0 0 0</pose></frame>
+    <frame name="layout_gravel_wood_pit"><pose>-5.50 1.50 0 0 0 0</pose></frame>
+    <frame name="layout_height_bar"><pose>-2.75 1.75 0 0 0 0</pose></frame>
+    <frame name="layout_main_slope"><pose>0.20 1.50 0 0 0 0</pose></frame>
+    <frame name="layout_wooden_bridge_a"><pose>4.75 1.85 0 0 0 0</pose></frame>
+    <frame name="layout_wooden_bridge_b"><pose>3.20 0.00 0 0 0 0</pose></frame>
+    <frame name="layout_t_shaped_stairs"><pose>2.35 -1.00 0 0 0 0</pose></frame>
+    <frame name="layout_high_wall"><pose>-0.55 -1.35 0 0 0 0</pose></frame>
+    <!-- ====================== END REFERENCE LAYOUT ====================== -->
+
+    <!-- 场地地面被拆成五块，以便在左上角真的留出 100 mm 深 L 形凹坑。 -->
+    <model name="competition_floor">
+      <static>true</static>
+      <link name="underlay">
+        <pose>0 0 -0.125 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>15 7 0.05</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>15 7 0.05</size></box></geometry><material><diffuse>0.20 0.20 0.20 1</diffuse></material></visual>
+      </link>
+      <!-- 黄色表面顶面严格位于 z=0。坑外分块间没有空隙。 -->
+      <link name="floor_south"><pose>0 -1.25 -0.05 0 0 0</pose><collision name="c"><geometry><box><size>14 3.5 0.1</size></box></geometry></collision><visual name="v"><geometry><box><size>14 3.5 0.1</size></box></geometry><material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link>
+      <link name="floor_north"><pose>0 2.75 -0.05 0 0 0</pose><collision name="c"><geometry><box><size>14 0.5 0.1</size></box></geometry></collision><visual name="v"><geometry><box><size>14 0.5 0.1</size></box></geometry><material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link>
+      <link name="floor_pit_west"><pose>-6.75 1.5 -0.05 0 0 0</pose><collision name="c"><geometry><box><size>0.5 2 0.1</size></box></geometry></collision><visual name="v"><geometry><box><size>0.5 2 0.1</size></box></geometry><material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link>
+      <link name="floor_pit_east"><pose>1.25 1.5 -0.05 0 0 0</pose><collision name="c"><geometry><box><size>11.5 2 0.1</size></box></geometry></collision><visual name="v"><geometry><box><size>11.5 2 0.1</size></box></geometry><material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link>
+      <link name="floor_pit_inner"><pose>-5.0 1.0 -0.05 0 0 0</pose><collision name="c"><geometry><box><size>1 1 0.1</size></box></geometry></collision><visual name="v"><geometry><box><size>1 1 0.1</size></box></geometry><material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link>
+
+      <!-- 黑色外框只作视觉边界；高 20 mm，不冒充规则未规定的围墙。 -->
+      <link name="border_n"><pose>0 2.98 0.01 0 0 0</pose><collision name="c"><geometry><box><size>14 0.04 0.02</size></box></geometry></collision><visual name="v"><geometry><box><size>14 0.04 0.02</size></box></geometry><material><diffuse>0.02 0.02 0.02 1</diffuse></material></visual></link>
+      <link name="border_s"><pose>0 -2.98 0.01 0 0 0</pose><collision name="c"><geometry><box><size>14 0.04 0.02</size></box></geometry></collision><visual name="v"><geometry><box><size>14 0.04 0.02</size></box></geometry><material><diffuse>0.02 0.02 0.02 1</diffuse></material></visual></link>
+      <link name="border_e"><pose>6.98 0 0.01 0 0 0</pose><collision name="c"><geometry><box><size>0.04 6 0.02</size></box></geometry></collision><visual name="v"><geometry><box><size>0.04 6 0.02</size></box></geometry><material><diffuse>0.02 0.02 0.02 1</diffuse></material></visual></link>
+      <link name="border_w"><pose>-6.98 0 0.01 0 0 0</pose><collision name="c"><geometry><box><size>0.04 6 0.02</size></box></geometry></collision><visual name="v"><geometry><box><size>0.04 6 0.02</size></box></geometry><material><diffuse>0.02 0.02 0.02 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- LAYOUT 1/8：直角绕杆。三杆高 0.55 m（规则要求不低于 0.50 m），相邻杆 1.00 m。 -->
+    <model name="right_angle_poles">
+      <static>true</static>
+      <pose relative_to="layout_right_angle_poles">0 0 0 0 0 0</pose>
+      <link name="poles_and_zones">
+        <collision name="pole_1"><pose>0 0 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry></collision>
+        <collision name="pole_2"><pose>1 0 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry></collision>
+        <collision name="pole_3"><pose>1 1 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry></collision>
+        <visual name="visual_pole_1"><pose>0 0 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_pole_2"><pose>1 0 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_pole_3"><pose>1 1 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <!-- 三个直径约 350 mm 的必达区，中心与相应标志杆相距 400 mm；仅 visual。 -->
+        <visual name="zone_start"><pose>-0.40 0 0.003 0 0 0</pose><geometry><cylinder><radius>0.175</radius><length>0.006</length></cylinder></geometry><material><diffuse>0.80 0.18 0.04 1</diffuse></material></visual>
+        <visual name="zone_corner"><pose>1 -0.40 0.003 0 0 0</pose><geometry><cylinder><radius>0.175</radius><length>0.006</length></cylinder></geometry><material><diffuse>0.80 0.18 0.04 1</diffuse></material></visual>
+        <visual name="zone_finish"><pose>1 1.40 0.003 0 0 0</pose><geometry><cylinder><radius>0.175</radius><length>0.006</length></cylinder></geometry><material><diffuse>0.80 0.18 0.04 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 2/8：L 形砂砾碎木坑。外包络 2×2 m、两臂宽 1 m、深约 0.10 m、护栏 0.15 m。 -->
+    <model name="gravel_wood_pit">
+      <static>true</static>
+      <pose relative_to="layout_gravel_wood_pit">0 0 0 0 0 0</pose>
+      <link name="pit_surfaces">
+        <!-- 左臂砂砾与上臂碎木表面在 z=-0.10 m。 -->
+        <collision name="gravel_bed"><pose>-0.5 0 -0.105 0 0 0</pose><geometry><box><size>0.95 1.95 0.01</size></box></geometry></collision>
+        <visual name="visual_gravel_bed"><pose>-0.5 0 -0.105 0 0 0</pose><geometry><box><size>0.95 1.95 0.01</size></box></geometry><material><ambient>0.28 0.29 0.27 1</ambient><diffuse>0.38 0.39 0.36 1</diffuse></material></visual>
+        <collision name="wood_bed"><pose>0.5 0.5 -0.105 0 0 0</pose><geometry><box><size>0.95 0.95 0.01</size></box></geometry></collision>
+        <visual name="visual_wood_bed"><pose>0.5 0.5 -0.105 0 0 0</pose><geometry><box><size>0.95 0.95 0.01</size></box></geometry><material><ambient>0.34 0.16 0.05 1</ambient><diffuse>0.48 0.24 0.08 1</diffuse></material></visual>
+        <!-- 橘黄色护栏沿 L 形外边界及内拐角，高度 150 mm。 -->
+        <collision name="rail_w"><pose>-1 0 0.075 0 0 0</pose><geometry><box><size>0.05 2.05 0.15</size></box></geometry></collision>
+        <collision name="rail_n"><pose>0 1 0.075 0 0 0</pose><geometry><box><size>2.05 0.05 0.15</size></box></geometry></collision>
+        <collision name="rail_e"><pose>1 0.5 0.075 0 0 0</pose><geometry><box><size>0.05 1.05 0.15</size></box></geometry></collision>
+        <collision name="rail_s_left"><pose>-0.5 -1 0.075 0 0 0</pose><geometry><box><size>1.05 0.05 0.15</size></box></geometry></collision>
+        <collision name="rail_inner_v"><pose>0 -0.5 0.075 0 0 0</pose><geometry><box><size>0.05 1.05 0.15</size></box></geometry></collision>
+        <collision name="rail_inner_h"><pose>0.5 0 0.075 0 0 0</pose><geometry><box><size>1.05 0.05 0.15</size></box></geometry></collision>
+        <visual name="visual_rail_w"><pose>-1 0 0.075 0 0 0</pose><geometry><box><size>0.05 2.05 0.15</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_rail_n"><pose>0 1 0.075 0 0 0</pose><geometry><box><size>2.05 0.05 0.15</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_rail_e"><pose>1 0.5 0.075 0 0 0</pose><geometry><box><size>0.05 1.05 0.15</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_rail_s_left"><pose>-0.5 -1 0.075 0 0 0</pose><geometry><box><size>1.05 0.05 0.15</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_rail_inner_v"><pose>0 -0.5 0.075 0 0 0</pose><geometry><box><size>0.05 1.05 0.15</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_rail_inner_h"><pose>0.5 0 0.075 0 0 0</pose><geometry><box><size>1.05 0.05 0.15</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <!-- 规则中的随机砂砾/边角料以确定性样件近似，保证 CI 和 rosbag 可复现。 -->
+        <visual name="stone_1"><pose>-0.72 -0.65 -0.075 0.2 0.1 0.4</pose><geometry><sphere><radius>0.075</radius></sphere></geometry><material><diffuse>0.45 0.46 0.43 1</diffuse></material></visual>
+        <visual name="stone_2"><pose>-0.35 -0.35 -0.070 -0.1 0.3 0</pose><geometry><sphere><radius>0.080</radius></sphere></geometry><material><diffuse>0.32 0.33 0.31 1</diffuse></material></visual>
+        <visual name="stone_3"><pose>-0.70 0.10 -0.072 0.1 -0.2 0</pose><geometry><sphere><radius>0.070</radius></sphere></geometry><material><diffuse>0.55 0.53 0.47 1</diffuse></material></visual>
+        <visual name="stone_4"><pose>-0.32 0.55 -0.068 0.3 0.1 0</pose><geometry><sphere><radius>0.085</radius></sphere></geometry><material><diffuse>0.37 0.38 0.35 1</diffuse></material></visual>
+        <visual name="wood_1"><pose>0.25 0.25 -0.075 0.1 0.15 0.3</pose><geometry><box><size>0.35 0.10 0.07</size></box></geometry><material><diffuse>0.50 0.25 0.07 1</diffuse></material></visual>
+        <visual name="wood_2"><pose>0.68 0.35 -0.070 -0.2 0.1 -0.4</pose><geometry><box><size>0.30 0.12 0.08</size></box></geometry><material><diffuse>0.38 0.17 0.05 1</diffuse></material></visual>
+        <visual name="wood_3"><pose>0.38 0.72 -0.068 0.1 -0.2 0.8</pose><geometry><box><size>0.42 0.09 0.08</size></box></geometry><material><diffuse>0.58 0.31 0.10 1</diffuse></material></visual>
+        <visual name="wood_4"><pose>0.75 0.72 -0.072 -0.1 0.2 0.2</pose><geometry><box><size>0.25 0.12 0.07</size></box></geometry><material><diffuse>0.44 0.21 0.06 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 3/8：限高杆。横杆长 1.00 m，直径 40 mm，底部离地严格 0.30 m。 -->
+    <model name="height_bar">
+      <static>true</static>
+      <pose relative_to="layout_height_bar">0 0 0 0 0 0</pose>
+      <link name="bar">
+        <collision name="left_post"><pose>0 -0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry></collision>
+        <collision name="right_post"><pose>0 0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry></collision>
+        <collision name="crossbar"><pose>0 0 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.02</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="visual_left_post"><pose>0 -0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_right_post"><pose>0 0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <!-- 十段 100 mm 圆柱首尾相接，蓝白相间；整体碰撞仍由上面的 1 m 圆柱负责。 -->
+        <visual name="bar_01"><pose>0 -0.45 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>0.121569 0.254902 0.623529 1</diffuse></material></visual>
+        <visual name="bar_02"><pose>0 -0.35 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="bar_03"><pose>0 -0.25 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>0.121569 0.254902 0.623529 1</diffuse></material></visual>
+        <visual name="bar_04"><pose>0 -0.15 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="bar_05"><pose>0 -0.05 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>0.121569 0.254902 0.623529 1</diffuse></material></visual>
+        <visual name="bar_06"><pose>0 0.05 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="bar_07"><pose>0 0.15 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>0.121569 0.254902 0.623529 1</diffuse></material></visual>
+        <visual name="bar_08"><pose>0 0.25 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="bar_09"><pose>0 0.35 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>0.121569 0.254902 0.623529 1</diffuse></material></visual>
+        <visual name="bar_10"><pose>0 0.45 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>1 1 1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 4/8：大斜坡。规则尺寸为长 3.00 m、总宽 2.00 m、坡角 10°。 -->
+    <model name="main_slope">
+      <static>true</static>
+      <pose relative_to="layout_main_slope">0 0 0 0 0 0</pose>
+      <link name="slope">
+        <!-- 3 m 斜面高差约 0.521 m；薄板中心高度按几何计算。 -->
+        <collision name="ramp"><pose>0 0 0.265 0 -0.174533 0</pose><geometry><box><size>3.00 2.00 0.08</size></box></geometry></collision>
+        <visual name="visual_ramp"><pose>0 0 0.265 0 -0.174533 0</pose><geometry><box><size>3.00 2.00 0.08</size></box></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 5/8：木桥 A。规则图：跨段 1.50 m，三条并行桥条各宽 0.10 m；平台高 0.20 m。 -->
+    <model name="wooden_bridge_a">
+      <static>true</static>
+      <pose relative_to="layout_wooden_bridge_a">0 0 0 0 0 0</pose>
+      <link name="bridge_a">
+        <collision name="start_platform"><pose>-1.25 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry></collision>
+        <collision name="finish_platform"><pose>1.25 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry></collision>
+        <collision name="beam_1"><pose>0 -0.20 0.15 0 0 0</pose><geometry><box><size>1.50 0.10 0.10</size></box></geometry></collision>
+        <collision name="beam_2"><pose>0 0 0.15 0 0 0</pose><geometry><box><size>1.50 0.10 0.10</size></box></geometry></collision>
+        <collision name="beam_3"><pose>0 0.20 0.15 0 0 0</pose><geometry><box><size>1.50 0.10 0.10</size></box></geometry></collision>
+        <!-- 两座木桥共两条上下平台小坡：A 使用入口坡，14°、平台高 0.20 m。 -->
+        <collision name="approach_ramp"><pose>-2.151 0 0.10 0 -0.244346 0</pose><geometry><box><size>0.827 1.00 0.05</size></box></geometry></collision>
+        <visual name="visual_start_platform"><pose>-1.25 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_finish_platform"><pose>1.25 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_beam_1"><pose>0 -0.20 0.15 0 0 0</pose><geometry><box><size>1.50 0.10 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_beam_2"><pose>0 0 0.15 0 0 0</pose><geometry><box><size>1.50 0.10 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_beam_3"><pose>0 0.20 0.15 0 0 0</pose><geometry><box><size>1.50 0.10 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_approach_ramp"><pose>-2.151 0 0.10 0 -0.244346 0</pose><geometry><box><size>0.827 1.00 0.05</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 6/8：木桥 B。规则图：跨段 2.90 m，六块 0.15 m 桥板，净间隔 0.40 m。 -->
+    <model name="wooden_bridge_b">
+      <static>true</static>
+      <pose relative_to="layout_wooden_bridge_b">0 0 0 0 0 0</pose>
+      <link name="bridge_b">
+        <collision name="start"><pose>-1.95 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry></collision>
+        <collision name="finish"><pose>1.95 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry></collision>
+        <visual name="visual_start"><pose>-1.95 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_finish"><pose>1.95 0 0.10 0 0 0</pose><geometry><box><size>1.00 1.00 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <collision name="plank_1"><pose>-1.375 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry></collision>
+        <collision name="plank_2"><pose>-0.825 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry></collision>
+        <collision name="plank_3"><pose>-0.275 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry></collision>
+        <collision name="plank_4"><pose>0.275 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry></collision>
+        <collision name="plank_5"><pose>0.825 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry></collision>
+        <collision name="plank_6"><pose>1.375 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry></collision>
+        <!-- B 使用出口坡；水平投影约 0.802 m，斜面长度约 0.827 m，倾角严格为 14°。 -->
+        <collision name="approach_ramp"><pose>2.851 0 0.10 0 0.244346 0</pose><geometry><box><size>0.827 1.00 0.05</size></box></geometry></collision>
+        <visual name="visual_plank_1"><pose>-1.375 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_plank_2"><pose>-0.825 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_plank_3"><pose>-0.275 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_plank_4"><pose>0.275 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_plank_5"><pose>0.825 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_plank_6"><pose>1.375 0 0.15 0 0 0</pose><geometry><box><size>0.15 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_approach_ramp"><pose>2.851 0 0.10 0 0.244346 0</pose><geometry><box><size>0.827 1.00 0.05</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 7/8：T 字形台阶。总长 2.80 m、总宽 1.90 m、平台高 0.40 m。 -->
+    <model name="t_shaped_stairs">
+      <static>true</static>
+      <pose relative_to="layout_t_shaped_stairs">0 0 0 0 0 0</pose>
+      <link name="stairs">
+        <collision name="platform"><pose>0 0 0.20 0 0 0</pose><geometry><box><size>1.00 1.00 0.40</size></box></geometry></collision>
+        <visual name="visual_platform"><pose>0 0 0.20 0 0 0</pose><geometry><box><size>1.00 1.00 0.40</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <!-- 左右各 0.90 m，三级台阶：踏面 0.30 m、级高 0.10 m。 -->
+        <collision name="left_3"><pose>-0.65 0 0.15 0 0 0</pose><geometry><box><size>0.30 1.00 0.30</size></box></geometry></collision>
+        <collision name="left_2"><pose>-0.95 0 0.10 0 0 0</pose><geometry><box><size>0.30 1.00 0.20</size></box></geometry></collision>
+        <collision name="left_1"><pose>-1.25 0 0.05 0 0 0</pose><geometry><box><size>0.30 1.00 0.10</size></box></geometry></collision>
+        <collision name="right_3"><pose>0.65 0 0.15 0 0 0</pose><geometry><box><size>0.30 1.00 0.30</size></box></geometry></collision>
+        <collision name="right_2"><pose>0.95 0 0.10 0 0 0</pose><geometry><box><size>0.30 1.00 0.20</size></box></geometry></collision>
+        <collision name="right_1"><pose>1.25 0 0.05 0 0 0</pose><geometry><box><size>0.30 1.00 0.10</size></box></geometry></collision>
+        <!-- T 字纵向一臂再延伸 0.90 m，使总宽为 1.90 m。 -->
+        <collision name="stem_3"><pose>0 -0.65 0.15 0 0 0</pose><geometry><box><size>1.00 0.30 0.30</size></box></geometry></collision>
+        <collision name="stem_2"><pose>0 -0.95 0.10 0 0 0</pose><geometry><box><size>1.00 0.30 0.20</size></box></geometry></collision>
+        <collision name="stem_1"><pose>0 -1.25 0.05 0 0 0</pose><geometry><box><size>1.00 0.30 0.10</size></box></geometry></collision>
+        <visual name="visual_left_3"><pose>-0.65 0 0.15 0 0 0</pose><geometry><box><size>0.30 1.00 0.30</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_left_2"><pose>-0.95 0 0.10 0 0 0</pose><geometry><box><size>0.30 1.00 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_left_1"><pose>-1.25 0 0.05 0 0 0</pose><geometry><box><size>0.30 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_right_3"><pose>0.65 0 0.15 0 0 0</pose><geometry><box><size>0.30 1.00 0.30</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_right_2"><pose>0.95 0 0.10 0 0 0</pose><geometry><box><size>0.30 1.00 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_right_1"><pose>1.25 0 0.05 0 0 0</pose><geometry><box><size>0.30 1.00 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_stem_3"><pose>0 -0.65 0.15 0 0 0</pose><geometry><box><size>1.00 0.30 0.30</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_stem_2"><pose>0 -0.95 0.10 0 0 0</pose><geometry><box><size>1.00 0.30 0.20</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_stem_1"><pose>0 -1.25 0.05 0 0 0</pose><geometry><box><size>1.00 0.30 0.10</size></box></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <!-- 顶部 1×1 m 可选启动区：红色虚线用四条细线近似，只有 visual。 -->
+        <visual name="start_n"><pose>0 0.47 0.405 0 0 0</pose><geometry><box><size>0.92 0.025 0.01</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+        <visual name="start_s"><pose>0 -0.47 0.405 0 0 0</pose><geometry><box><size>0.92 0.025 0.01</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+        <visual name="start_e"><pose>0.47 0 0.405 0 0 0</pose><geometry><box><size>0.025 0.92 0.01</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+        <visual name="start_w"><pose>-0.47 0 0.405 0 0 0</pose><geometry><box><size>0.025 0.92 0.01</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- LAYOUT 8/8：高墙。长 1.00 m、高 0.30 m、厚 0.05 m，橘色墙体、顶部钢色。 -->
+    <model name="high_wall">
+      <static>true</static>
+      <pose relative_to="layout_high_wall">0 0 0 0 0 0</pose>
+      <link name="wall">
+        <collision name="wall"><pose>0 0 0.15 0 0 0</pose><geometry><box><size>0.05 1.00 0.30</size></box></geometry></collision>
+        <visual name="visual_wall"><pose>0 0 0.135 0 0 0</pose><geometry><box><size>0.05 1.00 0.27</size></box></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="steel_cap"><pose>0 0 0.285 0 0 0</pose><geometry><box><size>0.055 1.01 0.03</size></box></geometry><material><ambient>0.42 0.44 0.46 1</ambient><diffuse>0.60 0.62 0.65 1</diffuse><specular>0.85 0.85 0.85 1</specular></material></visual>
+      </link>
+    </model>
+
+    <!-- 地面可选启动区：规则只给图示未给尺寸；按图 2 标注采用 1×1 m 参考值。 -->
+    <model name="ground_start_zone_reference">
+      <static>true</static><pose>-2.20 0.20 0 0 0 0</pose>
+      <link name="outline">
+        <visual name="n"><pose>0 0.49 0.004 0 0 0</pose><geometry><box><size>1 0.025 0.008</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+        <visual name="s"><pose>0 -0.49 0.004 0 0 0</pose><geometry><box><size>1 0.025 0.008</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+        <visual name="e"><pose>0.49 0 0.004 0 0 0</pose><geometry><box><size>0.025 1 0.008</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+        <visual name="w"><pose>-0.49 0 0.004 0 0 0</pose><geometry><box><size>0.025 1 0.008</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>

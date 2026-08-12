@@ -4,9 +4,10 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示**
 构成轻量融合链路，不包含 YOLO、深度学习推理、硬件驱动或腿部运动控制。
 
-现阶段只开发硬件无关的环境感知与自主导航底座。仓库没有实现 Gazebo、厂家 SDK、
-`ros2_control`、状态估计、FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
-结构、执行器和传感器选型确定后再开发。
+现阶段只开发硬件无关的环境感知与自主导航底座，并提供一个与算法完全解耦的 Gazebo
+比赛障碍参考场地。仓库没有实现机器狗动力学仿真、厂家 SDK、`ros2_control`、状态估计、
+FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机结构、执行器和传感器选型
+确定后再开发。
 
 ## 文档导航（先看这里）
 
@@ -39,12 +40,12 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 | SLAM 与自主导航 | 🟡 软件雏形完成 | 使用真实 `/scan`、`/odom` 和 TF 调参，验证重定位、动态避障、狭窄通道及失效恢复 |
 | 任务与比赛逻辑 | ⬜ 暂未实现 | 测量正式场地坐标，联动真实越障反馈，完成失败重试、计时、计分和任务恢复 |
 | 整机安全 | ⬜ 仅有导航速度超时门 | 实现并验证硬件急停、驱动失能、过流/过温/欠压及真实姿态/关节保护 |
-| 仿真与测试 | ⬜ 按要求暂不开发仿真 | 真机方案确定后再决定是否建立 Gazebo/Isaac、SIL/HIL 和动力学回归环境 |
+| 仿真与测试 | 🟡 已有独立 Gazebo 参考场地 | 已复现规则 V1.0 已公布尺寸/颜色并提供传感器测试载体；正式坐标、真机动力学、Isaac、SIL/HIL 仍待后续完成 |
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门、Xbox 手柄适配、强类型真机对接合同和 rosbag 离线评估：8 个 ROS 2
-包可编译，74 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
+9 个 ROS 2 包可编译，81 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -120,6 +121,7 @@ Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试�
 wakula/
 ├── src/
 │   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
+│   ├── quadruped_gazebo/       # 独立规则场地、传感器测试载体与 Gazebo launch
 │   ├── quadruped_bringup/      # 感知、决策、速度门和占位 TF 统一入口
 │   ├── quadruped_interfaces/   # 带时间戳的感知与融合消息
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
@@ -145,6 +147,7 @@ wakula/
 | 包 | 主要职责 | 关键入口 |
 |---|---|---|
 | `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
+| `quadruped_gazebo` | 比赛障碍参考 world 与仿真传感器桥；不属于核心算法 | `robocon_field.launch.py` |
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
 | `quadruped_interfaces` | 带时间戳的感知与导航交接合同 | 四个 `msg/` 接口 |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
@@ -345,6 +348,8 @@ source install/setup.bash
 视觉仅依赖 `python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
 默认 8 Hz、最大 640 像素宽；点云默认 10 Hz 且限制采样数量，适合 RK3588 起步调试。
 Xbox 输入使用标准 `ros-jazzy-joy`，不依赖厂家手柄 SDK。
+独立仿真还需 Gazebo Harmonic / Gazebo Sim 8 对应的 `ros-jazzy-ros-gz`；`rosdep` 会按
+`quadruped_gazebo/package.xml` 自动补齐桥接组件。
 
 运行单元测试：
 
@@ -455,7 +460,52 @@ Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`
 ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 ```
 
-### 6.1 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
+### 6.1 比赛障碍参考场地（独立启动，不属于 slam.launch.py）
+
+规则 V1.0 已公布的 14 m × 6 m 场地、8 类障碍尺寸和规定颜色位于
+`src/quadruped_gazebo/worlds/robocon_obstacle_field.sdf`。规则明确说明障碍排列和安装位置
+赛前另行公布，因此当前全局坐标只是图 1 的易修改参考布局；八个坐标集中在 world 顶部的
+`REFERENCE LAYOUT` 框架区，取得正式坐标后只改这八个 `layout_*` frame，不修改 SLAM、
+Nav2 或 OpenCV。
+
+| 障碍 | world 中锁定的规则数据 |
+|---|---|
+| 直角绕杆 | 相邻杆 1.00 m；杆高 0.55 m，满足“不低于 0.50 m”；必达区距杆 0.40 m、直径约 0.35 m；橘色 |
+| 砂砾碎木坑 | L 形外包络 2.00 m × 2.00 m、臂宽 1.00 m、深约 0.10 m、护栏/木槛高 0.15 m；护栏橘色 |
+| 限高杆 | 蓝白 PVC 横杆长 1.00 m，横杆底部离地 0.30 m |
+| 斜坡 | 长 3.00 m、总宽 2.00 m、坡角 10°；橘色 |
+| 木桥 A | 桥段长 1.50 m、三条桥条各宽 0.10 m、平台高 0.20 m；橘色 |
+| 木桥 B | 跨段 2.90 m、六块踏板各宽 0.15 m、净间隔 0.40 m、平台高 0.20 m；橘色 |
+| T 字形台阶 | 总长 2.80 m、总宽 1.90 m、高 0.40 m、中心平台 1.00 m × 1.00 m；橘色 |
+| 高墙 | 长 1.00 m、高 0.30 m、厚 0.05 m；橘色基体、顶部钢色 |
+
+木桥 A、B 共保留两条规则规定的 14° 上下平台小坡。橘色严格使用 RGB(223,117,0)，
+蓝色使用 RGB(31,65,159)，场地黄色使用 RGB(255,255,0)。
+
+只启动 Gazebo 场地、仿真传感器载体和 ROS 桥：
+
+```bash
+ros2 launch quadruped_gazebo robocon_field.launch.py
+```
+
+无显示器运行，或只看场地而不生成测试载体：
+
+```bash
+ros2 launch quadruped_gazebo robocon_field.launch.py gui:=false
+ros2 launch quadruped_gazebo robocon_field.launch.py spawn_test_robot:=false
+```
+
+该 launch 不 include 任何算法。需要联合测试时另开终端显式启动算法，并关闭算法侧占位 TF：
+
+```bash
+ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+```
+
+仿真载体只用于验证 `/scan`、`/odom`、`/cmd_vel`、RGB 图像和深度点云链路，不是四足
+动力学模型，不能用来评价站立、步态或真实越障能力。规则没有给出的杆径、材料随机形态和
+地面启动区尺寸仅作可复现近似；正式坐标未发布前不得把当前 pose 当作官方坐标。
+
+### 6.2 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
 
 先连接手柄并确认系统识别：
 
@@ -679,6 +729,8 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 |---|---|
 | `quadruped_interfaces/msg/` | 地形、视觉和相机/点云融合强类型消息 |
 | `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
+| `quadruped_gazebo/worlds/robocon_obstacle_field.sdf` | 规则障碍尺寸、颜色和集中式参考布局 |
+| `quadruped_gazebo/launch/robocon_field.launch.py` | 独立 Gazebo/传感器桥入口，不加载算法 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
 | `quadruped_planning/config/terrain_navigation.yaml` | 地形分类阈值、视觉辅助和速度门超时 |
@@ -689,10 +741,11 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 | `slam/behavior_trees/navigate_to_pose_wakula.xml` | 清图、等待、小退和小角度旋转恢复树 |
 | `slam/config/sensor_profiles.yaml` | 常见雷达/相机话题 profile，可直接扩展 |
 
-公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
+核心算法公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
 `slam/launch/slam.launch.py` 在其上增加 SLAM、Nav2 与 RViz，避免重复维护节点。
 `slam/launch/sensor_compat.launch.py` 仅作为旧命令兼容别名，新的启动命令统一使用
-`slam.launch.py`；已删除重复的 `all_in_one.launch.py`。
+`slam.launch.py`；已删除重复的 `all_in_one.launch.py`。Gazebo 和 Xbox 分别保留独立 launch，
+且不会被核心算法入口隐式启动。
 
 ## 13. 实机接入清单
 
