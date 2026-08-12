@@ -132,6 +132,8 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
 
 以上节点不是核心算法节点，slam.launch.py 不会启动它们；真机运行时也不应启动。
 同一 ROS 域不得重复启动 robocon_field.launch.py；必须保证 /clock 只有一个发布者。
+TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输出，避免诊断管道关闭被
+误认为 ros2 节点崩溃。
 
 三、标准输入接口
 ------------

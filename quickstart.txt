@@ -130,6 +130,8 @@ Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 若日志持续出现 Detected jump back in time，先运行 `ros2 topic info /clock --verbose`；通常
 是重复启动了两个 Gazebo。每次只能保留一个 robocon_field.launch.py，停止旧实例后重启
 Gazebo 和算法。VS Code Snap 终端若出现 libpthread/GLIBC_PRIVATE，应改用 Ubuntu 系统终端。
+检查 TF 优先运行 `./scripts/diagnose.sh`。不要使用 `tf2_echo ... | head`：tf2_echo 会持续
+输出，head 提前关闭管道时 ROS 2 Jazzy 可能弹出 BrokenPipeError；这不是 SLAM/Nav2 崩溃。
 
 规则只公布障碍结构尺寸与颜色，尚未公布正式排列坐标。参考 pose 全部集中在
 src/quadruped_gazebo/worlds/robocon_obstacle_field.sdf 开头的 REFERENCE LAYOUT；正式坐标

@@ -520,6 +520,8 @@ ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 `odom -> base_link`（30 Hz）、640×480 RGB-D（15 Hz）、`/imu/data`（100 Hz）。图像和
 点云使用 `camera_optical_frame`，并提供到 `base_link` 的标准光学 TF；无需添加 profile
 或 remap。RViz 中应看到 `/map`、LaserScan、点云、机器人 TF 和 Nav2 代价地图。
+诊断 TF 请运行 `./scripts/diagnose.sh`；不要将持续输出的 `tf2_echo` 直接连接到 `head`，
+否则读取端提前关闭可能让 ROS 2 Jazzy 报 `BrokenPipeError`，但这不代表算法节点崩溃。
 
 ### 6.2 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
 
