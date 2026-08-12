@@ -11,6 +11,7 @@ from sensor_msgs.msg import LaserScan
 
 from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
 from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
+from slam.collision_monitor_supervisor import DEFAULT_DRAIN_SECONDS, _drain_seconds
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -87,6 +88,25 @@ def test_navigation_launch_description_is_constructible():
     assert len(description.entities) >= 2
     source = path.read_text(encoding="utf-8")
     assert '"use_sim_time": use_sim_time' in source
+
+
+def test_collision_monitor_uses_ordered_shutdown_supervisor():
+    """全栈退出必须经过排空监督层，同时继续沿用标准 collision_monitor 节点名。"""
+    path = PACKAGE_ROOT / "launch" / "navigation.launch.py"
+    source = path.read_text(encoding="utf-8")
+    assert '"collision_monitor_supervisor"' in source
+    assert 'name="collision_monitor"' in source
+    assert '"nav2_collision_monitor",\n            "collision_monitor"' not in source
+
+
+def test_collision_monitor_drain_setting_is_bounded(monkeypatch):
+    """内部覆盖值即使误配也不能拖过 launch 的正常终止窗口。"""
+    monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "invalid")
+    assert _drain_seconds() == DEFAULT_DRAIN_SECONDS
+    monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "99")
+    assert _drain_seconds() == 2.0
+    monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "-1")
+    assert _drain_seconds() == 0.0
 
 
 def test_sensor_profiles_cover_common_devices_and_allow_overrides():

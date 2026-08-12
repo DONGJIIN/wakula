@@ -20,6 +20,9 @@ Twist 适配和离线评估。
    均有效且新鲜才激活 Nav2。
    navigation_health_monitor.py：检查激光 frame/样本数/角度/量程/有效率、采样时间戳、
    里程计 frame/四元数/协方差/跳变、TF 与断流，发布诊断并参与速度门联锁。
+   collision_monitor_supervisor.py：运行时仅转发参数给官方 Nav2 Collision Monitor；全栈
+   退出时先排空上游，再通过标准 lifecycle 服务顺序 deactivate、cleanup，最后发 SIGINT，
+   避免 Jazzy 1.3.12 在 Publisher 清理与末帧回调并发时崩溃。节点名和话题完全不变。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
 
 2. quadruped_perception

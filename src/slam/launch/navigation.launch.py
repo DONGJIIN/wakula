@@ -101,12 +101,16 @@ def generate_launch_description():
             log_level,
             smoother_remaps,
         ),
+        # 监督层只负责退出排序：运行的仍是官方 Nav2 collision_monitor，ROS 节点名、
+        # 参数、生命周期与全部话题保持不变。避免全栈 Ctrl-C 时最后一帧 Twist 与
+        # Publisher 析构并发，触发 Jazzy 1.3.12 的 get_subscription_count SIGSEGV。
         nav2_node(
-            "nav2_collision_monitor",
-            "collision_monitor",
+            "slam",
+            "collision_monitor_supervisor",
             configured_params,
             log_level,
             tf_remaps,
+            name="collision_monitor",
         ),
         nav2_node(
             "nav2_bt_navigator",
