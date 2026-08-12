@@ -8,7 +8,7 @@
 是 0～1 的无量纲比例。证据不足、字段非法或消息超时均按 STOP 处理。
 """
 
-from math import atan, isfinite
+from math import atan, degrees, isfinite
 from typing import Sequence, Tuple
 
 import rclpy
@@ -42,7 +42,7 @@ VISION_NAMES_ZH = {
     1: "立柱",
     2: "横杆",
     3: "墙面",
-    4: "彩色障碍",
+    4: "有色比赛障碍",
 }
 
 # ``/terrain/features`` 是旧 rosbag 兼容接口。下标集中在这里，避免回调中出现难以审查
@@ -147,18 +147,72 @@ def visual_obstacle_name_zh(data: Sequence[float], target_valid: bool) -> str:
     return VISION_NAMES_ZH.get(code, "")
 
 
+def front_obstacle_name_zh(
+    safety: NavigationSafety, visual_hint_name: str = ""
+) -> str:
+    """生成比赛现场使用的正前方名称，同时保持结论诚实可追溯。
+
+    ``obstacle_type`` 是通用几何类别，不能完整表达规则中的八个专名。这里仅做不影响
+    控制的显示细分：杆、坑、限高杆和高墙可由几何直接对应；坡面利用点云实测坡角
+    区分规则中的 10° 主斜坡和 14° 木桥引坡。木桥 A/B 的桥面结构与普通台阶若只看到
+    一小块局部点云无法可靠区分，因此明确显示“待结构确认”，绝不读取 Gazebo pose
+    或把单帧橙色误当成确定类别。
+    """
+    if not safety.perception_valid:
+        return "感知数据无效"
+
+    obstacle_type = int(safety.obstacle_type)
+    if obstacle_type == NavigationSafety.OBSTACLE_POLE:
+        return "直角绕杆区（立柱）"
+    if obstacle_type == NavigationSafety.OBSTACLE_PIT:
+        return "砂砾与碎木坑"
+    if obstacle_type == NavigationSafety.OBSTACLE_BAR:
+        return "限高杆"
+    if obstacle_type == NavigationSafety.OBSTACLE_WALL:
+        return "高墙"
+    if obstacle_type == NavigationSafety.OBSTACLE_STEP:
+        # 高墙已有独立 WALL 分支；宽且接近 0.40 m 的阶梯结构与规则 T 台顶部相符。
+        if float(safety.obstacle_height) >= 0.32 and float(safety.width) >= 0.60:
+            return "T 字形台阶"
+        return "台阶或木桥踏板（待结构确认）"
+
+    if obstacle_type == NavigationSafety.OBSTACLE_CLEAR:
+        pitch_degrees = abs(degrees(float(safety.slope_pitch)))
+        roll_degrees = abs(degrees(float(safety.slope_roll)))
+        # 只在横滚较小时把前后坡度解释成赛道坡面；侧向倾斜仍保留通用地形名称。
+        if roll_degrees <= 6.0 and 7.0 <= pitch_degrees <= 12.0:
+            return "主斜坡（10°坡面）"
+        if roll_degrees <= 6.0 and 12.0 < pitch_degrees <= 17.0:
+            return "木桥引坡（14°，A/B 待结构确认）"
+        # 有色视觉候选没有尺度，不能改变速度或声称具体障碍；但 UI 也不能把它吞掉后
+        # 错报“无障碍”。名称明确表达点云尚未完成结构分类。
+        if visual_hint_name:
+            return f"视觉检测到{visual_hint_name}（点云待分类）"
+        return "无障碍"
+    return obstacle_name_zh(obstacle_type, True)
+
+
 def format_front_obstacle_status(
     safety: NavigationSafety, visual_hint_name: str = ""
 ) -> str:
     """生成一行可读状态，明确这是前向 ROI 的融合判断而非全场物体列表。"""
-    name = obstacle_name_zh(safety.obstacle_type, safety.perception_valid)
+    name = front_obstacle_name_zh(safety, visual_hint_name)
     mode = MODE_NAMES.get(int(safety.mode), "UNKNOWN")
-    if safety.visual_assist_active and visual_hint_name:
+    geometry_is_clear = (
+        int(safety.obstacle_type) == NavigationSafety.OBSTACLE_CLEAR
+    )
+    if safety.visual_assist_active and visual_hint_name and geometry_is_clear:
         # 主名称直接回答“正前方是什么”；括号明确它尚不是点云尺度结论。
         name = f"视觉疑似{visual_hint_name}（点云未确认）"
         vision = "已介入限速"
+    elif safety.visual_assist_active and visual_hint_name:
+        # 点云已有几何类别时不得再把主名称降级为“视觉疑似”。
+        vision = f"已参与确认={visual_hint_name}"
     elif safety.visual_assist_active:
         vision = "有疑似障碍（点云未确认，已限速）"
+    elif visual_hint_name:
+        # 例如通用有色区域：保留给人看的线索，但不伪装成已影响安全链的证据。
+        vision = f"仅提示：{visual_hint_name}（未参与限速）"
     else:
         vision = "未介入"
     return (
@@ -750,13 +804,15 @@ class TerrainSafetyAssessor(Node):
                 observation.valid_points
             )
         self.navigation_safety_pub.publish(safety)
-        obstacle_name = obstacle_name_zh(
-            safety.obstacle_type, safety.perception_valid
-        )
         visual_hint_name = self._fresh_visual_hint_name()
+        obstacle_name = front_obstacle_name_zh(safety, visual_hint_name)
         # 该文本话题面向终端/UI；明确区分“点云几何确认”和“视觉疑似”，避免把
         # OpenCV 单目分类误当成已量测高度的安全结论。
-        if safety.visual_assist_active and visual_hint_name:
+        if (
+            safety.visual_assist_active
+            and visual_hint_name
+            and int(safety.obstacle_type) == NavigationSafety.OBSTACLE_CLEAR
+        ):
             obstacle_name = f"视觉疑似{visual_hint_name}（点云未确认）"
         self.front_obstacle_name_pub.publish(String(data=obstacle_name))
 

@@ -10,6 +10,7 @@ from quadruped_planning.terrain_safety_assessor import (
     apply_visual_assist,
     finite_or_zero,
     format_front_obstacle_status,
+    front_obstacle_name_zh,
     fused_observation_valid,
     navigation_mode_code,
     nonnegative_finite_or_zero,
@@ -37,7 +38,7 @@ def test_front_obstacle_names_and_status_are_human_readable():
     safety.distance = 0.6
     safety.obstacle_height = 0.3
     text = format_front_obstacle_status(safety)
-    assert "横杆" in text
+    assert "限高杆" in text
     assert "模式=STOP" in text
     assert "距离=0.60 m" in text
 
@@ -56,6 +57,59 @@ def test_visual_obstacle_name_requires_valid_integer_code_and_target():
     assert visual_obstacle_name_zh([2.4, 0.8], True) == ""
     assert visual_obstacle_name_zh([99.0, 0.8], True) == ""
     assert visual_obstacle_name_zh([], True) == ""
+
+
+def test_front_name_keeps_visual_hint_without_promoting_it_to_geometry():
+    """通用有色视觉候选应显示出来，但不能伪装成已确认几何类别。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_CLEAR
+    safety.mode = NavigationSafety.MODE_WALK
+    assert front_obstacle_name_zh(safety) == "无障碍"
+    name = front_obstacle_name_zh(safety, "有色比赛障碍")
+    assert name == "视觉检测到有色比赛障碍（点云待分类）"
+    text = format_front_obstacle_status(safety, "有色比赛障碍")
+    assert "点云待分类" in text
+    assert "未参与限速" in text
+
+
+def test_front_name_uses_measured_geometry_for_rule_obstacles():
+    """规则专名只能由足以区分它们的米制几何产生。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_CLEAR
+    safety.slope_pitch = 0.174533  # 规则主斜坡 10°
+    assert front_obstacle_name_zh(safety) == "主斜坡（10°坡面）"
+    safety.slope_pitch = 0.244346  # 两座木桥的 14° 引坡
+    assert "木桥引坡" in front_obstacle_name_zh(safety)
+    assert "A/B 待结构确认" in front_obstacle_name_zh(safety)
+
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.slope_pitch = 0.0
+    safety.obstacle_height = 0.40
+    safety.width = 1.0
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
+    safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
+    assert front_obstacle_name_zh(safety) == "限高杆"
+    safety.obstacle_type = NavigationSafety.OBSTACLE_POLE
+    assert "直角绕杆" in front_obstacle_name_zh(safety)
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    assert front_obstacle_name_zh(safety) == "砂砾与碎木坑"
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    assert front_obstacle_name_zh(safety) == "高墙"
+
+
+def test_visual_confirmation_does_not_replace_confirmed_geometry_name():
+    """立柱等几何已确认后，视觉只能补充说明，不能把主名称降级为“疑似”。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_POLE
+    safety.mode = NavigationSafety.MODE_WALK
+    safety.visual_assist_active = True
+    text = format_front_obstacle_status(safety, "立柱")
+    assert "直角绕杆区（立柱）" in text
+    assert "视觉疑似" not in text
+    assert "已参与确认=立柱" in text
 
 
 def assess(height=0.0, points=100.0, slope=0.0, roughness=0.0):
