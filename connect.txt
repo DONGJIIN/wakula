@@ -96,8 +96,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   作用：在速度链末端检查预测碰撞，必要时减速或停车。
   输入：/cmd_vel_terrain_safe、/scan 和机器人轮廓。
   输出：最终 /cmd_vel，未来真机运动模块只需订阅该话题。
-  退出：由内部 supervisor 先做 lifecycle deactivate/cleanup，避免 Jazzy 关闭竞态；
-        对外节点名、服务、参数和话题不变，其他队员无需适配 supervisor。
+  退出：由内部 supervisor 先排空上游，再终止隔离的无状态子进程，避开 Jazzy 的
+        SIGINT/SIGTERM 资源释放竞态；对外节点名、服务、参数和话题不变。
 
 /lifecycle_manager_navigation
   作用：统一配置、激活和关闭上述 Nav2 生命周期节点。

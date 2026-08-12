@@ -91,16 +91,21 @@ def test_navigation_launch_description_is_constructible():
 
 
 def test_collision_monitor_uses_ordered_shutdown_supervisor():
-    """全栈退出必须经过排空监督层，同时继续沿用标准 collision_monitor 节点名。"""
+    """退出必须隔离官方信号竞态，同时继续沿用标准 collision_monitor 节点名。"""
     path = PACKAGE_ROOT / "launch" / "navigation.launch.py"
     source = path.read_text(encoding="utf-8")
     assert '"collision_monitor_supervisor"' in source
     assert 'name="collision_monitor"' in source
     assert '"nav2_collision_monitor",\n            "collision_monitor"' not in source
+    supervisor = (PACKAGE_ROOT / "slam" / "collision_monitor_supervisor.py").read_text(
+        encoding="utf-8"
+    )
+    assert "child.kill()" in supervisor
+    assert "child.send_signal(signal.SIGINT)" not in supervisor
 
 
 def test_collision_monitor_drain_setting_is_bounded(monkeypatch):
-    """内部覆盖值即使误配也不能拖过 launch 的正常终止窗口。"""
+    """排空值即使误配也不能拖过 launch 的正常终止窗口。"""
     monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "invalid")
     assert _drain_seconds() == DEFAULT_DRAIN_SECONDS
     monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "99")

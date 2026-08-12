@@ -734,9 +734,9 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清理与最后一个回调
 并发，表现为 `get_subscription_count()` 处 SIGSEGV。项目的
 `collision_monitor_supervisor` 不修改官方算法或任何 ROS 接口：运行时仍是原版
-`/collision_monitor`；退出时先让上游停发，再经标准生命周期服务执行
-`deactivate -> cleanup`，最后终止已清理进程。Gazebo 与算法同时关闭的回归测试中该节点
-已正常退出。不要绕过 `slam.launch.py` 单独启动系统可执行文件，否则不会获得此退出保护。
+`/collision_monitor`；退出时先让上游停发，再结束独立会话里的无持久状态子进程，由
+操作系统回收 DDS 和文件描述符，不再让该 Jazzy 版本进入有缺陷的 SIGINT/SIGTERM 清理
+路径。不要绕过 `slam.launch.py` 单独启动系统可执行文件，否则不会获得此退出保护。
 
 规划命令或地形决策心跳任意一项超时，速度门都会发布零速度。这只是导航软件层的失效
 停车，不替代未来真机必须具备的硬件急停、驱动失能、姿态/关节保护和底层看门狗。

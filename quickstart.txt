@@ -141,8 +141,9 @@ Gazebo 和算法。VS Code Snap 终端若出现 libpthread/GLIBC_PRIVATE，应�
 检查 TF 优先运行 `./scripts/diagnose.sh`。不要使用 `tf2_echo ... | head`：tf2_echo 会持续
 输出，head 提前关闭管道时 ROS 2 Jazzy 可能弹出 BrokenPipeError；这不是 SLAM/Nav2 崩溃。
 若曾看到 collision_monitor 在 get_subscription_count() 处 SIGSEGV，请重新编译并通过
-slam.launch.py 启动。当前入口已在关闭时自动执行 lifecycle deactivate/cleanup；无需改变
-/collision_monitor、/scan、/cmd_vel_terrain_safe 或 /cmd_vel，正常 Ctrl-C 即可。
+slam.launch.py 启动。当前入口会隔离官方进程，关闭时先排空上游，再避开有竞态的
+SIGINT/SIGTERM 清理路径；无需改变 /collision_monitor、/scan、/cmd_vel_terrain_safe 或
+/cmd_vel，正常 Ctrl-C 即可。
 
 规则只公布障碍结构尺寸与颜色，尚未公布正式排列坐标。参考 pose 全部集中在
 src/quadruped_gazebo/worlds/robocon_obstacle_field.sdf 开头的 REFERENCE LAYOUT；正式坐标
