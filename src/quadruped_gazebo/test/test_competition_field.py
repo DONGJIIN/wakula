@@ -11,6 +11,8 @@ import xml.etree.ElementTree as ET
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 WORLD_PATH = PACKAGE_ROOT / "worlds" / "robocon_obstacle_field.sdf"
 WORLD = ET.parse(WORLD_PATH).getroot().find("world")
+ROBOT_PATH = PACKAGE_ROOT / "models" / "sensor_test_base" / "model.sdf"
+ROBOT = ET.parse(ROBOT_PATH).getroot().find("model")
 ORANGE = [223.0 / 255.0, 117.0 / 255.0, 0.0, 1.0]
 
 
@@ -92,6 +94,15 @@ def test_height_bar_and_pole_geometry():
     assert_close([poses[1][0] - poses[0][0], poses[2][1] - poses[1][1]], [1.0, 1.0])
 
 
+def test_pit_fill_has_physical_collision_samples():
+    """砂砾和碎木不能只有贴图，否则点云/车轮永远看到平滑坑底。"""
+    pit = model("gravel_wood_pit")
+    for prefix in ("stone", "wood"):
+        samples = pit.findall(f".//collision[@name='{prefix}_collision_1']/..")
+        assert samples
+        assert len(pit.findall(f".//collision[@name='{prefix}_collision_1']")) == 1
+
+
 def test_published_colors_are_present_exactly():
     floor = model("competition_floor").find(".//link[@name='floor_south']/visual/material/diffuse")
     pole = model("right_angle_poles").find(".//visual[@name='visual_pole_1']/material/diffuse")
@@ -131,4 +142,38 @@ def test_simulation_launch_stays_out_of_algorithm_launch():
     assert "slam.launch.py" not in simulation_launch.replace("``slam.launch.py``", "")
     assert "navigation.launch.py" not in simulation_launch
     assert "quadruped_gazebo" not in algorithm_launch
+    for interface in (
+        "/scan",
+        "/odom",
+        "/imu/data",
+        "/camera/image_raw",
+        "/camera/depth/points",
+        "camera_optical_frame",
+    ):
+        assert interface in simulation_launch
     compile(simulation_launch, "robocon_field.launch.py", "exec")
+
+
+def test_sensor_carrier_matches_slam_and_perception_contracts():
+    """仿真输出直接使用既有算法默认话题和可解析 TF frame。"""
+    assert ROBOT is not None
+    sensors = {
+        sensor.attrib["type"]: sensor
+        for sensor in ROBOT.findall(".//sensor")
+    }
+    assert sensors["gpu_lidar"].findtext("topic") == "/scan"
+    assert sensors["gpu_lidar"].findtext("gz_frame_id") == "lidar_link"
+    assert sensors["imu"].findtext("topic") == "/imu/data"
+    assert sensors["imu"].findtext("gz_frame_id") == "imu_link"
+    assert sensors["rgbd_camera"].findtext("topic") == "/camera"
+    assert sensors["rgbd_camera"].findtext("gz_frame_id") == "camera_optical_frame"
+    assert (
+        sensors["rgbd_camera"].findtext("camera/optical_frame_id")
+        == "camera_optical_frame"
+    )
+    drive = ROBOT.find("plugin[@name='gz::sim::systems::DiffDrive']")
+    assert drive is not None
+    assert drive.findtext("odom_topic") == "/odom"
+    assert drive.findtext("tf_topic") == "/tf"
+    assert drive.findtext("frame_id") == "odom"
+    assert drive.findtext("child_frame_id") == "base_link"

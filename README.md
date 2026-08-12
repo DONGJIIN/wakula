@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，81 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，83 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -501,9 +501,25 @@ ros2 launch quadruped_gazebo robocon_field.launch.py spawn_test_robot:=false
 ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 ```
 
-仿真载体只用于验证 `/scan`、`/odom`、`/cmd_vel`、RGB 图像和深度点云链路，不是四足
+仿真载体只用于验证 `/scan`、`/odom`、`/imu/data`、`/cmd_vel`、RGB 图像和深度点云链路，不是四足
 动力学模型，不能用来评价站立、步态或真实越障能力。规则没有给出的杆径、材料随机形态和
 地面启动区尺寸仅作可复现近似；正式坐标未发布前不得把当前 pose 当作官方坐标。
+
+完整 SLAM/RViz 测试需保持两个终端，不要重复启动 Gazebo，否则多个 `/clock` 会导致 TF
+时间回跳：
+
+```bash
+# 终端 1：场地和仿真传感器
+ros2 launch quadruped_gazebo robocon_field.launch.py
+
+# 终端 2：既有 SLAM + Nav2 + OpenCV + RViz
+ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+```
+
+小车已直接对齐算法默认接口：720 点 360° `/scan`（12 Hz）、`/odom` 和
+`odom -> base_link`（30 Hz）、640×480 RGB-D（15 Hz）、`/imu/data`（100 Hz）。图像和
+点云使用 `camera_optical_frame`，并提供到 `base_link` 的标准光学 TF；无需添加 profile
+或 remap。RViz 中应看到 `/map`、LaserScan、点云、机器人 TF 和 Nav2 代价地图。
 
 ### 6.2 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
 

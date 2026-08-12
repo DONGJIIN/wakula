@@ -81,10 +81,16 @@ Twist 适配和离线评估。
    robocon_obstacle_field.sdf：按规则 V1.0 复现 14m×6m 场地和八类障碍已公布的尺寸、
    高度、间距与颜色；world 开头的 REFERENCE LAYOUT 集中定义全部参考 pose。规则尚未
    公布障碍正式坐标，所以当前布局只用于联调，正式坐标到手后只改八个 layout_* frame。
-   sensor_test_base/model.sdf：仅提供可移动传感器载体以及 /scan、/odom、RGB、深度点云；
+   sensor_test_base/model.sdf：仅提供可移动传感器载体以及 /scan、/odom、/imu/data、RGB、深度点云；
    它不是四足模型，不用于评价越障运动。
    robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
    slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
+   2D SLAM 的必要链路是 /scan、/odom、odom->base_link 和 base_link->lidar_link；RGB-D
+   用于 OpenCV/点云感知，IMU 是为 RViz、时间同步和未来状态估计预留，不会被 SLAM
+   Toolbox 自动融合。相机消息使用 camera_optical_frame，避免把光学点云误当成机身坐标。
+   同一 ROS_DOMAIN_ID 内只能运行一个场地 launch；两个 /clock 会触发 TF 时间回跳并使
+   SLAM 丢弃扫描。算法联合命令为：
+     ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 
 三、决策原则
 ----------

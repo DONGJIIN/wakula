@@ -71,6 +71,7 @@ def generate_launch_description():
                     "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
                     "/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
                     "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
+                    "/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU",
                     "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
                     "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
                     "/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
@@ -108,9 +109,33 @@ def generate_launch_description():
                 executable="static_transform_publisher",
                 name="camera_static_tf",
                 arguments=[
-                    "--x", "0.22", "--y", "0.0", "--z", "0.18",
+                    "--x", "0.22", "--y", "0.0", "--z", "0.28",
                     "--roll", "0.0", "--pitch", "0.20", "--yaw", "0.0",
                     "--frame-id", "base_link", "--child-frame-id", "camera_link",
+                ],
+                parameters=[use_sim_time],
+            ),
+            # camera_link 使用机器人坐标约定（x 前、y 左、z 上）；图像和点云使用 ROS
+            # 光学坐标约定。显式发布两者关系，RViz 和 terrain_analyzer 才能正确解释点云。
+            Node(
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="camera_optical_static_tf",
+                arguments=[
+                    "--x", "0.0", "--y", "0.0", "--z", "0.0",
+                    "--roll", "-1.570796", "--pitch", "0.0", "--yaw", "-1.570796",
+                    "--frame-id", "camera_link", "--child-frame-id", "camera_optical_frame",
+                ],
+                parameters=[use_sim_time],
+            ),
+            Node(
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="imu_static_tf",
+                arguments=[
+                    "--x", "0.0", "--y", "0.0", "--z", "0.22",
+                    "--roll", "0.0", "--pitch", "0.0", "--yaw", "0.0",
+                    "--frame-id", "base_link", "--child-frame-id", "imu_link",
                 ],
                 parameters=[use_sim_time],
             ),

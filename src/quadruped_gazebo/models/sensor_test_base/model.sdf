@@ -2,8 +2,8 @@
 <sdf version="1.10">
   <!--
     这个模型不是四足动力学模型，只是独立仿真包内的传感器测试载体。它提供标准
-    /cmd_vel、/odom、/scan、RGB 图像和深度点云，便于在真机运动控制完成前测试
-    SLAM/Nav2/OpenCV 数据链。不得用其运动性能评价真实机器狗的越障能力。
+    /cmd_vel、/odom、/scan、/imu/data、RGB 图像和深度点云，便于在真机运动控制完成前
+    测试 SLAM/Nav2/OpenCV 数据链。不得用其运动性能评价真实机器狗的越障能力。
   -->
   <model name="sensor_test_base">
     <self_collide>false</self_collide>
@@ -73,18 +73,46 @@
     </link>
     <joint name="lidar_fixed" type="fixed"><parent>base_link</parent><child>lidar_link</child></joint>
 
+    <!--
+      IMU 不是当前 2D SLAM Toolbox 的强制输入，但保留标准 /imu/data 便于检查时间同步、
+      姿态显示，以及日后把真机状态估计接到同一接口。噪声量级只用于算法健壮性测试。
+    -->
+    <link name="imu_link">
+      <pose>0 0 0.22 0 0 0</pose>
+      <inertial><mass>0.05</mass><inertia><ixx>0.00005</ixx><iyy>0.00005</iyy><izz>0.00005</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <sensor name="imu" type="imu">
+        <topic>/imu/data</topic><update_rate>100</update_rate><gz_frame_id>imu_link</gz_frame_id>
+        <imu>
+          <angular_velocity>
+            <x><noise type="gaussian"><mean>0</mean><stddev>0.0002</stddev></noise></x>
+            <y><noise type="gaussian"><mean>0</mean><stddev>0.0002</stddev></noise></y>
+            <z><noise type="gaussian"><mean>0</mean><stddev>0.0002</stddev></noise></z>
+          </angular_velocity>
+          <linear_acceleration>
+            <x><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></x>
+            <y><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></y>
+            <z><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></z>
+          </linear_acceleration>
+        </imu>
+        <always_on>true</always_on>
+      </sensor>
+    </link>
+    <joint name="imu_fixed" type="fixed"><parent>base_link</parent><child>imu_link</child></joint>
+
     <link name="camera_link">
       <!-- 向下俯约 11.5°，覆盖机器人前方地面、台阶和横杆。 -->
-      <pose>0.22 0 0.18 0 0.20 0</pose>
+      <pose>0.22 0 0.28 0 0.20 0</pose>
       <inertial><mass>0.18</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
       <visual name="visual"><geometry><box><size>0.05 0.10 0.04</size></box></geometry><material><diffuse>0.04 0.04 0.05 1</diffuse></material></visual>
       <sensor name="rgbd" type="rgbd_camera">
-        <topic>/camera</topic><update_rate>15</update_rate><gz_frame_id>camera_link</gz_frame_id>
+        <topic>/camera</topic><update_rate>15</update_rate><gz_frame_id>camera_optical_frame</gz_frame_id>
         <camera>
           <horizontal_fov>1.396263</horizontal_fov>
           <image><width>640</width><height>480</height><format>R8G8B8</format></image>
           <clip><near>0.12</near><far>8.0</far></clip>
           <depth_camera><clip><near>0.12</near><far>8.0</far></clip></depth_camera>
+          <!-- ROS 光学约定：+Z 向前、+X 向右、+Y 向下。 -->
+          <optical_frame_id>camera_optical_frame</optical_frame_id>
         </camera>
         <always_on>true</always_on><visualize>true</visualize>
       </sensor>

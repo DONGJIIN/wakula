@@ -121,15 +121,17 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
 
 /robocon_sensor_bridge（ros_gz_bridge / parameter_bridge）
   作用：把仿真 /scan、/odom、点云、TF 和时钟送入 ROS，并把 ROS /cmd_vel 送回测试载体。
-  关键接口：/clock、/scan、/scan/points、/odom、/tf、/cmd_vel、/camera/depth/points。
+  关键接口：/clock、/scan、/scan/points、/odom、/imu/data、/tf、/cmd_vel、
+  /camera/camera_info、/camera/depth/points。
 
 /robocon_image_bridge（ros_gz_image / image_bridge）
   作用：把 Gazebo RGB 图像转换为标准 /camera/image_raw，供 OpenCV 直接使用。
 
-/lidar_static_tf、/camera_static_tf（tf2_ros / static_transform_publisher）
-  作用：只为仿真测试载体补齐 base_link 到雷达/相机的固定外参。
+/lidar_static_tf、/camera_static_tf、/camera_optical_static_tf、/imu_static_tf
+  作用：只为仿真测试载体补齐 base_link 到雷达、相机、光学帧和 IMU 的固定外参。
 
 以上节点不是核心算法节点，slam.launch.py 不会启动它们；真机运行时也不应启动。
+同一 ROS 域不得重复启动 robocon_field.launch.py；必须保证 /clock 只有一个发布者。
 
 三、标准输入接口
 ------------

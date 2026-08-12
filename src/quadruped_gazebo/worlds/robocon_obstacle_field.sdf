@@ -27,6 +27,7 @@
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
@@ -132,6 +133,18 @@
         <visual name="wood_2"><pose>0.68 0.35 -0.070 -0.2 0.1 -0.4</pose><geometry><box><size>0.30 0.12 0.08</size></box></geometry><material><diffuse>0.38 0.17 0.05 1</diffuse></material></visual>
         <visual name="wood_3"><pose>0.38 0.72 -0.068 0.1 -0.2 0.8</pose><geometry><box><size>0.42 0.09 0.08</size></box></geometry><material><diffuse>0.58 0.31 0.10 1</diffuse></material></visual>
         <visual name="wood_4"><pose>0.75 0.72 -0.072 -0.1 0.2 0.2</pose><geometry><box><size>0.25 0.12 0.07</size></box></geometry><material><diffuse>0.44 0.21 0.06 1</diffuse></material></visual>
+        <!--
+          样件同时具有 collision，深度点云与车轮才能真实感知表面起伏。规则规定填料随机，
+          因而这里只锁定 L 形、深度和护栏尺寸，采用确定性样本保证 rosbag/CI 可复现。
+        -->
+        <collision name="stone_collision_1"><pose>-0.72 -0.65 -0.075 0.2 0.1 0.4</pose><geometry><sphere><radius>0.075</radius></sphere></geometry></collision>
+        <collision name="stone_collision_2"><pose>-0.35 -0.35 -0.070 -0.1 0.3 0</pose><geometry><sphere><radius>0.080</radius></sphere></geometry></collision>
+        <collision name="stone_collision_3"><pose>-0.70 0.10 -0.072 0.1 -0.2 0</pose><geometry><sphere><radius>0.070</radius></sphere></geometry></collision>
+        <collision name="stone_collision_4"><pose>-0.32 0.55 -0.068 0.3 0.1 0</pose><geometry><sphere><radius>0.085</radius></sphere></geometry></collision>
+        <collision name="wood_collision_1"><pose>0.25 0.25 -0.075 0.1 0.15 0.3</pose><geometry><box><size>0.35 0.10 0.07</size></box></geometry></collision>
+        <collision name="wood_collision_2"><pose>0.68 0.35 -0.070 -0.2 0.1 -0.4</pose><geometry><box><size>0.30 0.12 0.08</size></box></geometry></collision>
+        <collision name="wood_collision_3"><pose>0.38 0.72 -0.068 0.1 -0.2 0.8</pose><geometry><box><size>0.42 0.09 0.08</size></box></geometry></collision>
+        <collision name="wood_collision_4"><pose>0.75 0.72 -0.072 -0.1 0.2 0.2</pose><geometry><box><size>0.25 0.12 0.07</size></box></geometry></collision>
       </link>
     </model>
 
