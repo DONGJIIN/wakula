@@ -36,6 +36,14 @@ OBSTACLE_NAMES_ZH = {
     NavigationSafety.OBSTACLE_BAR: "横杆",
     NavigationSafety.OBSTACLE_POLE: "立柱",
 }
+# OpenCV 轻量检测器的数组类别。视觉结果只能作为“疑似”提示和保守限速依据；真正的
+# 地形类别仍由带尺度信息的点云几何确认，避免单目颜色/轮廓误检直接触发越障决策。
+VISION_NAMES_ZH = {
+    1: "立柱",
+    2: "横杆",
+    3: "墙面",
+    4: "彩色障碍",
+}
 
 # ``/terrain/features`` 是旧 rosbag 兼容接口。下标集中在这里，避免回调中出现难以审查
 # 的魔法数字；新代码优先读取带 Header 的 FusedObstacle。
@@ -129,11 +137,30 @@ def obstacle_name_zh(obstacle_type: int, perception_valid: bool = True) -> str:
     return OBSTACLE_NAMES_ZH.get(int(obstacle_type), "未知障碍")
 
 
-def format_front_obstacle_status(safety: NavigationSafety) -> str:
+def visual_obstacle_name_zh(data: Sequence[float], target_valid: bool) -> str:
+    """从旧视觉数组安全读取类别；无效、非整数或未知编码均不生成误导性名称。"""
+    if not target_valid or not data or not isfinite(float(data[0])):
+        return ""
+    code = int(round(float(data[0])))
+    if abs(float(data[0]) - code) > 1e-3:
+        return ""
+    return VISION_NAMES_ZH.get(code, "")
+
+
+def format_front_obstacle_status(
+    safety: NavigationSafety, visual_hint_name: str = ""
+) -> str:
     """生成一行可读状态，明确这是前向 ROI 的融合判断而非全场物体列表。"""
     name = obstacle_name_zh(safety.obstacle_type, safety.perception_valid)
     mode = MODE_NAMES.get(int(safety.mode), "UNKNOWN")
-    vision = "已介入限速" if safety.visual_assist_active else "未介入限速"
+    if safety.visual_assist_active and visual_hint_name:
+        # 主名称直接回答“正前方是什么”；括号明确它尚不是点云尺度结论。
+        name = f"视觉疑似{visual_hint_name}（点云未确认）"
+        vision = "已介入限速"
+    elif safety.visual_assist_active:
+        vision = "有疑似障碍（点云未确认，已限速）"
+    else:
+        vision = "未介入"
     return (
         f"[正前方障碍] {name} | 模式={mode} | 限速={safety.speed_limit:.2f} | "
         f"置信度={safety.confidence:.2f} | 距离={safety.distance:.2f} m | "
@@ -467,6 +494,7 @@ class TerrainSafetyAssessor(Node):
         self.last_features_time = self.get_clock().now()
         self.last_vision_time = None
         self.visual_target = False
+        self.visual_hint_name = ""
         self.visual_assist_active = False
         self.perception_valid = False
         self.latest_observation = None
@@ -648,6 +676,9 @@ class TerrainSafetyAssessor(Node):
         self.visual_target = visual_evidence_in_path(
             msg.data, self.vision_min_confidence, self.vision_center_margin
         )
+        self.visual_hint_name = visual_obstacle_name_zh(
+            msg.data, self.visual_target
+        )
 
     def _fresh_visual_target(self) -> bool:
         """仅在视觉启用、证据有效且接收时间新鲜时返回真。"""
@@ -655,6 +686,10 @@ class TerrainSafetyAssessor(Node):
             return False
         age = (self.get_clock().now() - self.last_vision_time).nanoseconds / 1e9
         return age <= self.vision_timeout and self.visual_target
+
+    def _fresh_visual_hint_name(self) -> str:
+        """仅返回仍在超时窗口内的视觉名称，防止终端残留上一处障碍。"""
+        return self.visual_hint_name if self._fresh_visual_target() else ""
 
     def timeout_callback(self) -> None:
         """独立检查感知心跳；断流时持续发布零速度上限。"""
@@ -718,6 +753,11 @@ class TerrainSafetyAssessor(Node):
         obstacle_name = obstacle_name_zh(
             safety.obstacle_type, safety.perception_valid
         )
+        visual_hint_name = self._fresh_visual_hint_name()
+        # 该文本话题面向终端/UI；明确区分“点云几何确认”和“视觉疑似”，避免把
+        # OpenCV 单目分类误当成已量测高度的安全结论。
+        if safety.visual_assist_active and visual_hint_name:
+            obstacle_name = f"视觉疑似{visual_hint_name}（点云未确认）"
         self.front_obstacle_name_pub.publish(String(data=obstacle_name))
 
         # 类别/模式变化立即打印；稳定状态每秒刷新一次。这样终端始终能看到当前结果，
@@ -727,6 +767,7 @@ class TerrainSafetyAssessor(Node):
             int(safety.obstacle_type),
             int(safety.mode),
             bool(safety.visual_assist_active),
+            visual_hint_name,
         )
         now = self.get_clock().now()
         log_age = (
@@ -738,7 +779,9 @@ class TerrainSafetyAssessor(Node):
             status_signature != self.last_obstacle_status
             or log_age >= self.status_log_period
         ):
-            self.get_logger().info(format_front_obstacle_status(safety))
+            self.get_logger().info(
+                format_front_obstacle_status(safety, visual_hint_name)
+            )
             self.last_obstacle_status = status_signature
             self.last_status_log_time = now
         assessment = (safe_mode, safe_speed)

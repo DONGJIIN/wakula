@@ -2,7 +2,7 @@ Panels:
   - Class: rviz_common/Displays
     Name: Displays
     Property Tree Widget:
-      Expanded: ["/Global Options1", "/Map1", "/LaserScan1", "/Camera Detection1", "/TF1"]
+      Expanded: ["/Global Options1", "/Map1", "/LaserScan1", "/Camera Detection1"]
       Splitter Ratio: 0.55
     Tree Height: 620
   - Class: rviz_common/Selection
@@ -16,18 +16,18 @@ Visualization Manager:
   Displays:
     - Class: rviz_default_plugins/Grid
       Name: Grid
-      Enabled: true
+      Enabled: false
       Alpha: 0.5
       Cell Size: 1
       Color: 160; 160; 164
       Plane: XY
       Plane Cell Count: 20
       Reference Frame: <Fixed Frame>
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Map
       Name: Map
       Enabled: true
-      Alpha: 0.8
+      Alpha: 1
       Color Scheme: map
       Draw Behind: true
       Topic:
@@ -47,12 +47,12 @@ Visualization Manager:
       Name: LaserScan
       Enabled: true
       Alpha: 1
-      Color: 255; 32; 32
+      Color: 0; 255; 255
       Color Transformer: FlatColor
       Decay Time: 0
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 4
+      Size (Pixels): 2
       Size (m): 0.03
       Style: Points
       Topic:
@@ -65,7 +65,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/TF
       Name: TF
-      Enabled: true
+      Enabled: false
       Frame Timeout: 15
       Frames:
         All Enabled: true
@@ -75,7 +75,7 @@ Visualization Manager:
       Show Names: true
       Tree: {}
       Update Interval: 0
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/RobotModel
       Name: RobotModel
       Enabled: true

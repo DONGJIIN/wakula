@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，94 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，97 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -507,6 +507,8 @@ ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 仿真载体只用于验证 `/scan`、`/odom`、`/imu/data`、`/cmd_vel`、RGB 图像和深度点云链路，不是四足
 动力学模型，不能用来评价站立、步态或真实越障能力。规则没有给出的杆径、材料随机形态和
 地面启动区尺寸仅作可复现近似；正式坐标未发布前不得把当前 pose 当作官方坐标。
+测试载体的两只轮子以车体 Y 轴为转轴，碰撞/外观圆柱单独旋转 90°；若修改模型，不能把
+整个 wheel link 一起旋转，否则 joint 轴也会随 link 变换，表现为轮子在地面上绕竖轴打转。
 
 完整 SLAM/RViz 测试需保持两个终端，不要重复启动 Gazebo，否则多个 `/clock` 会导致 TF
 时间回跳：
@@ -525,6 +527,10 @@ ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 `camera_link` 约定，因此仿真专用 bridge 会覆写点云 frame，避免算法把点云重复旋转。
 真机仍应由驱动发布真实 frame 和 TF，不需要这一仿真修正。RViz 中应看到 `/map`、
 LaserScan、机器人 TF、Nav2 代价地图，以及 `Camera Detection` 面板中的识别标注画面。
+默认 RViz 已关闭容易遮挡地图的 TF 箭头和网格，并将实时激光显示为细青色点；需要查 TF
+时再手动勾选。地图中白色是已观测自由区、黑色是占用区、灰色是未知区。只直行几段时，
+白色区域会呈雷达视锥扇形，并非地图损坏；应低速沿通道分段探索、在转角停留旋转观测，
+完成覆盖和回环后再评价地图质量。
 诊断 TF 请运行 `./scripts/diagnose.sh`；不要将持续输出的 `tf2_echo` 直接连接到 `head`，
 否则读取端提前关闭可能让 ROS 2 Jazzy 报 `BrokenPipeError`，但这不代表算法节点崩溃。
 
@@ -616,6 +622,10 @@ RViz 的 `Camera Detection` 面板默认订阅 `/vision/annotated_image`：青�
 黄框是当前帧候选，绿框是多帧确认后的稳定障碍；顶部 `FRONT` 显示视觉类别，
 `IMAGE QUALITY` 显示输入质量。安全判断仍以点云融合结果为准，因此终端中的
 `[正前方障碍]` 可能比单帧视觉框更保守。融合结果还会发布中文速查话题：
+
+当 OpenCV 发现目标而点云尚未确认尺度时，终端会明确显示“视觉疑似××（点云未确认，
+已限速）”；一旦点云确认台阶、墙等几何类别，中文名称以点云融合结果为准。超大、贴近
+整幅画面的纯边缘轮廓会被视为地面/天空边界或近距遮挡，不单独触发视觉限速。
 
 ```bash
 ros2 topic echo /perception/front_obstacle_name

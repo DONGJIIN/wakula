@@ -13,6 +13,7 @@ ROS 2 launch 在收到 Ctrl-C 时会近乎同时向所有子进程发送 SIGINT�
 
 from __future__ import annotations
 
+import ctypes
 import os
 from pathlib import Path
 import signal
@@ -27,6 +28,7 @@ from ament_index_python.packages import get_package_prefix
 # 速度平滑器为 20 Hz，0.25 s 覆盖五个发布周期；之后不再让已知有缺陷的官方信号处理器
 # 执行资源销毁，而是结束隔离子进程并让内核回收进程私有资源。
 DEFAULT_DRAIN_SECONDS = 0.25
+PR_SET_PDEATHSIG = 1
 
 
 def collision_monitor_executable() -> str:
@@ -47,6 +49,20 @@ def _drain_seconds() -> float:
     return min(max(value, 0.0), 2.0)
 
 
+def _isolate_child_and_arm_parent_death_signal() -> None:
+    """建立独立会话，并保证监督器异常消失时子进程不会成为孤儿。
+
+    launch 正常退出会走 ``supervise`` 的排空路径；若终端、IDE 或监督器被 SIGKILL，普通
+    ``start_new_session`` 会让 Collision Monitor 被 systemd 收养并继续占用同名 ROS 节点。
+    Linux ``PR_SET_PDEATHSIG`` 让内核在父进程消失时直接终止无状态子进程。
+    """
+    os.setsid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
 def supervise(command: Sequence[str], drain_seconds: float = DEFAULT_DRAIN_SECONDS) -> int:
     """运行官方节点，并在本进程收到终止信号后按“排空→隔离终止”顺序关闭。
 
@@ -65,7 +81,9 @@ def supervise(command: Sequence[str], drain_seconds: float = DEFAULT_DRAIN_SECON
         signum: signal.signal(signum, request_shutdown)
         for signum in (signal.SIGINT, signal.SIGTERM)
     }
-    child = subprocess.Popen(list(command), start_new_session=True)
+    child = subprocess.Popen(
+        list(command), preexec_fn=_isolate_child_and_arm_parent_death_signal
+    )
     try:
         while child.poll() is None and shutdown_signal is None:
             time.sleep(0.05)

@@ -29,16 +29,21 @@
     </link>
 
     <link name="left_wheel">
-      <pose>0 0.19 0.08 1.570796 0 0</pose>
-      <inertial><mass>0.4</mass><inertia><ixx>0.0013</ixx><iyy>0.0013</iyy><izz>0.0025</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-      <collision name="collision"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry></collision>
-      <visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry><material><diffuse>0.03 0.03 0.03 1</diffuse></material></visual>
+      <!--
+        link frame 与车体保持同向，因此 joint 的 Y 轴就是实际轮轴。圆柱默认沿 Z 轴，
+        只旋转 visual/collision 几何到 Y 轴；若旋转整个 link，joint 的局部 Y 会被一起
+        转到竖直方向，表现为轮子在地面绕圈而非向前滚动。
+      -->
+      <pose>0 0.19 0.08 0 0 0</pose>
+      <inertial><mass>0.4</mass><inertia><ixx>0.0013</ixx><iyy>0.0025</iyy><izz>0.0013</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision"><pose>0 0 0 1.570796 0 0</pose><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry></collision>
+      <visual name="visual"><pose>0 0 0 1.570796 0 0</pose><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry><material><diffuse>0.03 0.03 0.03 1</diffuse></material></visual>
     </link>
     <link name="right_wheel">
-      <pose>0 -0.19 0.08 1.570796 0 0</pose>
-      <inertial><mass>0.4</mass><inertia><ixx>0.0013</ixx><iyy>0.0013</iyy><izz>0.0025</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-      <collision name="collision"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry></collision>
-      <visual name="visual"><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry><material><diffuse>0.03 0.03 0.03 1</diffuse></material></visual>
+      <pose>0 -0.19 0.08 0 0 0</pose>
+      <inertial><mass>0.4</mass><inertia><ixx>0.0013</ixx><iyy>0.0025</iyy><izz>0.0013</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision"><pose>0 0 0 1.570796 0 0</pose><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry></collision>
+      <visual name="visual"><pose>0 0 0 1.570796 0 0</pose><geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry><material><diffuse>0.03 0.03 0.03 1</diffuse></material></visual>
     </link>
     <joint name="left_wheel_joint" type="revolute">
       <parent>base_link</parent><child>left_wheel</child>

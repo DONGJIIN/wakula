@@ -584,13 +584,19 @@ def detect_obstacle_evidence(
         box
         for box in edge_boxes
         if box[2] >= image_width * 0.28
+        # 覆盖几乎整幅画面的轮廓通常是地面/天空分界、ROI 边缘或近距离遮挡。
+        # 它没有可靠的单目尺度，应由点云几何分支判断，避免黄色赛场边缘持续误报墙。
+        and box[2] <= image_width * 0.70
         and box[3] >= image_height * 0.15
+        and box[3] <= image_height * 0.75
         and box[1] + box[3] / 2.0 >= image_height * 0.45
     ]
     if wall_edges:
         box = max(wall_edges, key=lambda item: item[4])
         return evidence_from_boxes(
-            "wall", 0.56, [box], image_width, image_height
+            # 单个无颜色闭合轮廓歧义较大，保留在标注图中供调试，但默认低于规划层
+            # 0.55 的视觉介入阈值；墙体安全结论由深度/点云几何确认。
+            "wall", 0.54, [box], image_width, image_height
         )
 
     colored_boxes = orange_boxes + blue_boxes
@@ -1087,6 +1093,12 @@ def main(args=None):
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RuntimeError:
+        # Jazzy 在 Gazebo 仍高速发布图像、launch 同时关闭订阅句柄时，pybind11 偶尔
+        # 会在 take_message 抛出转换 RuntimeError。仅在 ROS context 已关闭时把它视为
+        # 正常退出；运行期错误仍继续抛出，避免掩盖真正的图像消息兼容问题。
+        if rclpy.ok():
+            raise
     finally:
         # launch 与终端可能同时发送 SIGINT，清理阶段再次中断也应正常退出。
         try:

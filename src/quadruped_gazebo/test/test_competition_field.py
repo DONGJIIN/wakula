@@ -179,6 +179,24 @@ def test_sensor_carrier_matches_slam_and_perception_contracts():
     assert drive.findtext("child_frame_id") == "base_link"
 
 
+def test_sensor_carrier_wheels_rotate_about_vehicle_y_axis():
+    """轮子 link 不得预旋转 joint 轴；只有圆柱几何需要从 Z 轴转到车辆 Y 轴。"""
+    for side in ("left", "right"):
+        wheel = ROBOT.find(f"link[@name='{side}_wheel']")
+        assert wheel is not None
+        wheel_pose = [float(value) for value in wheel.findtext("pose").split()]
+        assert_close(wheel_pose[3:], [0.0, 0.0, 0.0])
+        for shape in ("collision", "visual"):
+            shape_pose = [
+                float(value)
+                for value in wheel.findtext(f"{shape}/pose").split()
+            ]
+            assert_close(shape_pose[3:], [1.570796, 0.0, 0.0])
+        joint = ROBOT.find(f"joint[@name='{side}_wheel_joint']")
+        assert joint is not None
+        assert joint.findtext("axis/xyz").strip() == "0 1 0"
+
+
 def test_rgbd_point_cloud_bridge_corrects_gazebo_numeric_frame():
     """Gazebo 点云的 x/y/z 数值轴必须与覆盖后的 camera_link Header 一致。"""
     launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text()

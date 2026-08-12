@@ -85,6 +85,24 @@ def test_grayscale_geometry_and_temporal_confirmation():
     assert stabilize_evidence(history[:2], 3).hint == "none"
 
 
+def test_wall_detector_rejects_full_frame_scene_boundary():
+    """地面/天空分界形成的超大轮廓不能持续误报为正前方墙面。"""
+    mask = np.zeros((240, 320), dtype=np.uint8)
+    cv2.rectangle(mask, (20, 45), (300, 220), 255, 4)
+    evidence = detect_obstacle_evidence(
+        np.zeros_like(mask), np.zeros_like(mask), mask, 100.0
+    )
+    assert evidence.hint != "wall"
+
+    # 中等大小且位于前向 ROI 下半部的墙体轮廓仍需保留召回率。
+    mask.fill(0)
+    cv2.rectangle(mask, (80, 100), (240, 210), 255, 4)
+    evidence = detect_obstacle_evidence(
+        np.zeros_like(mask), np.zeros_like(mask), mask, 100.0
+    )
+    assert evidence.hint == "wall"
+
+
 def test_pole_pair_rejects_unaligned_vertical_clutter():
     """Two unrelated vertical color regions must not masquerade as a gate."""
     orange = np.zeros((240, 320), dtype=np.uint8)

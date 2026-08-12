@@ -19,6 +19,7 @@ from quadruped_planning.terrain_safety_assessor import (
     select_fused_assessment,
     select_terrain_assessment,
     validate_height_thresholds,
+    visual_obstacle_name_zh,
     visual_evidence_in_path,
 )
 
@@ -39,6 +40,22 @@ def test_front_obstacle_names_and_status_are_human_readable():
     assert "横杆" in text
     assert "模式=STOP" in text
     assert "距离=0.60 m" in text
+
+    safety.obstacle_type = NavigationSafety.OBSTACLE_CLEAR
+    safety.mode = NavigationSafety.MODE_WALK
+    safety.visual_assist_active = True
+    text = format_front_obstacle_status(safety, "横杆")
+    assert "疑似横杆" in text
+    assert "点云未确认" in text
+
+
+def test_visual_obstacle_name_requires_valid_integer_code_and_target():
+    """视觉中文名不能从无效、未知或非整数类别中猜测。"""
+    assert visual_obstacle_name_zh([2.0, 0.8], True) == "横杆"
+    assert visual_obstacle_name_zh([2.0, 0.8], False) == ""
+    assert visual_obstacle_name_zh([2.4, 0.8], True) == ""
+    assert visual_obstacle_name_zh([99.0, 0.8], True) == ""
+    assert visual_obstacle_name_zh([], True) == ""
 
 
 def assess(height=0.0, points=100.0, slope=0.0, roughness=0.0):

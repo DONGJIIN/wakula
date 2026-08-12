@@ -128,6 +128,12 @@ RViz 的 Camera Detection 面板会显示 /vision/annotated_image：青色为 RO
 
   ros2 topic echo /perception/front_obstacle_name
 
+RViz 地图：白色=已观测自由区，黑色=障碍，灰色=未知区。默认隐藏 TF 箭头和网格；需要
+排查坐标时再勾选 TF。只走一两段直线会留下扇形白区，属于覆盖不足；低速沿通道探索，
+每到转角停留并旋转一周，再通过闭环后的墙线重合程度判断 SLAM，而不是看初始扇形外观。
+若终端显示“视觉疑似××（点云未确认）”，表示 OpenCV 只触发保守限速，几何类别尚未
+得到点云尺度确认。
+
 Nav2 只会在雷达角度/样本/frame、里程计时间/frame/协方差和定位 TF 全部有效后激活。
 点云进入局部代价地图前会自动剔除拟合地面和坡面；真机只需保证点云 TF 正确，并用
 rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动侧重复裁成绝对 z>0。

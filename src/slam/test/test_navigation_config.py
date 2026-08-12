@@ -101,6 +101,7 @@ def test_collision_monitor_uses_ordered_shutdown_supervisor():
         encoding="utf-8"
     )
     assert "child.kill()" in supervisor
+    assert "PR_SET_PDEATHSIG" in supervisor
     assert "child.send_signal(signal.SIGINT)" not in supervisor
 
 
