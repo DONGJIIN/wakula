@@ -19,7 +19,9 @@
   -->
   <world name="robocon_obstacle_field">
     <physics name="robocon_physics" type="ignored">
-      <max_step_size>0.001</max_step_size>
+      <!-- 该世界只做上层算法联调，测试狗没有腿部接触动力学。250 Hz 已高于 100 Hz IMU，
+           同时避免 1 kHz /clock 让所有 use_sim_time 节点承担无意义的 DDS 唤醒。 -->
+      <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
     <gravity>0 0 -9.80665</gravity>

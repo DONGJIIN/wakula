@@ -18,7 +18,11 @@
           </RecoveryNode>
         </RateController>
         <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <!-- 当前仅配置一组检查器，仍显式传入 ID；这样不会依赖 Controller Server
+               对空字符串的隐式回退，也避免首次导航打印含糊的一次性警告。 -->
+          <FollowPath path="{path}" controller_id="{selected_controller}"
+                      goal_checker_id="goal_checker" progress_checker_id="progress_checker"
+                      error_code_id="{follow_path_error_code}"/>
           <Sequence>
             <!-- 仅当错误类型适合恢复时清局部代价地图，避免掩盖不可恢复配置错误。 -->
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>

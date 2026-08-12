@@ -66,6 +66,54 @@ def test_navigation_health_parameters_are_versioned_with_nav2():
         assert readiness[key] == health[key]
 
 
+def test_bt_navigator_declares_every_custom_tree_error_code():
+    """自定义恢复树新增行为时，错误码必须同步登记到 Nav2 聚合列表。"""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    configured = set(
+        config["bt_navigator"]["ros__parameters"]["error_code_names"]
+    )
+    tree = (PACKAGE_ROOT / "behavior_trees" / "navigate_to_pose_wakula.xml").read_text(
+        encoding="utf-8"
+    )
+    referenced = {
+        name
+        for name in (
+            "compute_path_error_code",
+            "follow_path_error_code",
+            "backup_error_code",
+            "spin_error_code",
+        )
+        if "{" + name + "}" in tree
+    }
+    assert referenced <= configured
+
+
+def test_custom_tree_selects_configured_goal_and_progress_checkers():
+    """行为树应显式选择唯一检查器，避免用空 ID 触发运行期回退警告。"""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    controller = config["controller_server"]["ros__parameters"]
+    tree = (PACKAGE_ROOT / "behavior_trees" / "navigate_to_pose_wakula.xml").read_text(
+        encoding="utf-8"
+    )
+    assert controller["goal_checker_plugins"] == ["goal_checker"]
+    assert controller["progress_checker_plugins"] == ["progress_checker"]
+    assert 'goal_checker_id="goal_checker"' in tree
+    assert 'progress_checker_id="progress_checker"' in tree
+
+
+def test_slam_scan_queue_absorbs_short_tf_jitter_without_large_backlog():
+    """异步扫描队列要大于默认 1，同时限制在不足半秒的 15 Hz 扫描量。"""
+    slam_file = PACKAGE_ROOT / "config" / "slam.yaml"
+    with slam_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    queue_size = config["slam_toolbox"]["ros__parameters"]["scan_queue_size"]
+    assert 2 <= queue_size <= 7
+
+
 def test_depth_costmap_accepts_low_steps_after_ground_filtering():
     """上游按相对地面滤波后，Nav2 不能再用正 z 下限漏掉机身下方台阶。"""
     nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"

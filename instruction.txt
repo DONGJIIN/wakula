@@ -14,8 +14,11 @@ Twist 适配和离线评估。
 1. slam
    slam.launch.py：统一解析传感器 profile，并一键启动感知、SLAM、Nav2 和 RViz。
    slam.yaml：SLAM Toolbox 的地图分辨率、扫描匹配和回环参数。
+   slam.yaml 中 scan_queue_size=5 只用于吸收短时 TF/调度抖动；它不是回环扫描缓存，不能
+   无限制调大，否则会让旧激光积压。
    nav2.yaml：全局/局部代价地图、规划器、控制器、平滑器、行为与碰撞监控参数。
-   navigate_to_pose_wakula.xml：规划失败、控制失败时清图、等待、后退、旋转再规划。
+   navigate_to_pose_wakula.xml：规划失败、控制失败时清图、等待、后退、旋转再规划；
+   FollowPath 显式选择 goal_checker 和 progress_checker，避免依赖空 ID 的运行期回退。
    nav2_readiness_monitor.py：复用运行期数据合同，只有 scan、odom 和 map->base_link
    均有效且新鲜才激活 Nav2。
    navigation_health_monitor.py：检查激光 frame/样本数/角度/量程/有效率、采样时间戳、
@@ -31,6 +34,8 @@ Twist 适配和离线评估。
    双 HSV 掩膜补偿阴影，高光掩膜抑制灯光和金属反射边缘；随后通过同类投票率、位置/
    尺寸抖动和目标框 IoU 去除瞬时误检。相机断流或 ROS 时钟回拨会清空历史，恢复后
    必须重新积累确认帧，不能复用旧画面的票数。
+   蓝色横杆必须满足长宽比及最大画面占比；未着色的孤立水平 Canny 边缘只作结构辅助，
+   不能单独输出 BAR，防止远处障碍顶边、地平线和地面交界形成稳定误报。
    它输出归一化图像框和置信度，不把像素尺寸伪装成真实米制高度；另发布带检测 ROI、
    原始候选和多帧确认框的 /vision/annotated_image，RViz 可直接查看算法实际看到的画面。
 
@@ -98,6 +103,9 @@ Twist 适配和离线评估。
    固定腿仅用于辨认外形，机身由平面速度插件保持水平且没有动力学碰撞。它专门隔离验证
    SLAM/Nav2/OpenCV，不能评价步态、接触或真实越障；直接 /cmd_vel 测试可能穿过障碍。
    顶置 360° 二维雷达用可见掩码忽略测试狗自身外观，避免自遮挡和机身倾斜形成假墙。
+   RGB-D 使用 424×240@15 Hz 的仿真轻量档并关闭 Gazebo 传感器可视化，降低同机运行
+   Gazebo、SLAM、Nav2 和 OpenCV 时的渲染/桥接压力；world 物理更新率为 250 Hz，仍高于
+   100 Hz IMU。这些优化不改变任何标准话题或算法接口。
    robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
    slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
    2D SLAM 的必要链路是 /scan、/odom、odom->base_link 和 base_link->lidar_link；RGB-D

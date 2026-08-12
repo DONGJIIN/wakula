@@ -124,7 +124,9 @@ Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 /scan、/odom、odom->base_link、/imu/data、/camera/image_raw、/camera/depth/points，并
 提供 lidar_link、camera_link、camera_optical_frame、imu_link 的 TF，不需要额外 remap。
 它的腿仅为固定外观，载体保持水平且无动力学碰撞，只用于算法联调；不能验证步态/接触，
-直接 /cmd_vel 也可能穿过障碍。正式模型可这样一次替换：
+直接 /cmd_vel 也可能穿过障碍。仿真 RGB-D 默认 424×240@15 Hz 并关闭传感器可视化，
+world 物理时钟为 250 Hz，用于降低全栈同机负载；默认话题不变，真机更换常见分辨率
+无需改算法。正式模型可这样一次替换：
 
   ros2 launch quadruped_gazebo robocon_field.launch.py \
     robot_sdf:=/绝对路径/real_quadruped/model.sdf \
@@ -256,7 +258,8 @@ odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组�
 
 十、RK3588 建议
 -------------
-保持 OpenCV 路径，不启用 YOLO；图像宽度 640、处理 8 Hz，点云处理 10 Hz 并限制最大点数。
+保持 OpenCV 路径，不启用 YOLO；算法处理图像最大宽度 640、处理 8 Hz，点云处理 10 Hz 并限制最大点数。
+独立 Gazebo 测试载体使用 424×240，但真机可先用 640×480 或 640×360，再根据实测余量调整。
 确认 CPU/内存余量后再提高分辨率或频率。优先让相机/雷达驱动在硬件侧完成对齐、降采样
 和滤波，避免同一份点云被多个节点重复转换。算法侧 `terrain.yaml` 的
 transform_max_points 默认把 TF 前原始云限制为 120000 点；离线对照时可设为 0，真机算力

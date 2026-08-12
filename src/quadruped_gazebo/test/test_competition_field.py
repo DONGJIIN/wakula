@@ -49,6 +49,13 @@ def test_all_eight_rule_obstacles_exist():
     assert expected.issubset({item.attrib["name"] for item in WORLD.findall("model")})
 
 
+def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
+    """纯算法联调无需 1 kHz 物理时钟，避免每个仿真时钟节点被过度唤醒。"""
+    step_size = float(WORLD.findtext("physics/max_step_size"))
+    # 既足以支撑 100 Hz IMU，又将物理更新率限制在不超过 500 Hz。
+    assert 0.002 <= step_size <= 0.01
+
+
 def test_rule_dimensions_are_locked():
     # 高墙 1000 × 50 × 300 mm；T 台阶中心台 1000 × 1000 × 400 mm。
     assert_close(collision_box("high_wall", "wall"), [0.05, 1.0, 0.30])
@@ -181,6 +188,16 @@ def test_sensor_carrier_matches_slam_and_perception_contracts():
     assert odometry.findtext("odom_frame") == "odom"
     assert odometry.findtext("robot_base_frame") == "base_link"
     assert odometry.findtext("dimensions") == "2"
+
+
+def test_generic_rgbd_resolution_is_bounded_for_realtime_integration():
+    """测试相机保留可用细节，但不能以无意义的高像素拖慢整套联调。"""
+    image = ROBOT.find(".//sensor[@name='rgbd']/camera/image")
+    assert image is not None
+    width = int(image.findtext("width"))
+    height = int(image.findtext("height"))
+    assert width >= 320 and height >= 180
+    assert width * height <= 150_000
 
 
 def test_generic_quadruped_is_planar_and_has_no_fake_leg_controller():

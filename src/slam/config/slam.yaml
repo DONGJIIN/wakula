@@ -17,6 +17,10 @@ slam_toolbox:
     # 不要把该值设得高于传感器 range_max，否则 SLAM Toolbox 会发出能力不匹配警告。
     max_laser_range: 12.0
     minimum_time_interval: 0.2
+    # SLAM Toolbox 的异步节点默认只保留 1 帧等待 TF 的扫描；CPU 短时繁忙时会因此
+    # 直接出现 queue full。5 帧在 15 Hz 雷达下最多覆盖约 0.33 s，足以吸收调度抖动，
+    # 又不会形成明显的旧扫描积压。它和下方用于回环匹配的 scan_buffer_size 含义不同。
+    scan_queue_size: 5
     transform_publish_period: 0.05
     map_update_interval: 2.0
     transform_timeout: 0.2

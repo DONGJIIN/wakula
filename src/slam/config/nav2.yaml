@@ -110,6 +110,13 @@ bt_navigator:
     odom_topic: /odom
     default_nav_to_pose_bt_xml: "$(find-pkg-share slam)/behavior_trees/navigate_to_pose_wakula.xml"
     default_nav_through_poses_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
+    # 必须覆盖自定义 BT 中所有 error_code_id 黑板键。显式登记后，导航结果会按正确
+    # 优先级汇总规划、跟踪、后退和旋转错误，也不再依赖 Nav2 的两个默认键。
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+      - backup_error_code
+      - spin_error_code
 
 # ---------- 速度平滑：/cmd_vel_nav -> /cmd_vel_smoothed ----------
 velocity_smoother:

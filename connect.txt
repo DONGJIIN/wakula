@@ -29,6 +29,7 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：/vision/obstacle_stamped、/vision/annotated_image（RViz 标注画面）、
         /vision/debug_mask（可选）及调试信息。
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
+        限高杆必须有合格蓝色细长区域；孤立水平 Canny 边缘不会单独输出横杆类别。
 
 /perception_fusion（quadruped_perception / perception_fusion）
   作用：按时间戳同步点云几何与视觉结果，并检查视觉框与前向通道相交，输出统一障碍信息。
@@ -137,7 +138,8 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
   /camera/camera_info、/camera/depth/points。
 
 /robocon_image_bridge（ros_gz_bridge / parameter_bridge）
-  作用：把 Gazebo RGB 图像转换为标准 /camera/image_raw，供 OpenCV 直接使用。
+  作用：把 Gazebo 424×240@15 Hz RGB 图像转换为标准 /camera/image_raw，供 OpenCV 直接使用；
+        分辨率只是独立仿真的轻量档，话题类型和名称与真机合同相同。
 
 /lidar_static_tf、/camera_static_tf、/camera_optical_static_tf、/imu_static_tf
   作用：只为仿真通用机械狗补齐 base_link 到雷达、相机、光学帧和 IMU 的固定外参。

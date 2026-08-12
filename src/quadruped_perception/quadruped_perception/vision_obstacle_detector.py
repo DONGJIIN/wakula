@@ -504,15 +504,24 @@ def detect_obstacle_evidence(
     edge_mask: np.ndarray,
     min_area: float,
     min_color_fill_ratio: float = 0.18,
+    min_bar_aspect_ratio: float = 3.0,
+    max_bar_width_ratio: float = 0.85,
+    max_bar_height_ratio: float = 0.22,
 ) -> ObstacleEvidence:
     """融合颜色与轮廓几何，产生一帧尚未时序确认的候选证据。
 
-    优先级依次为带颜色横杆、带颜色立柱、纯边缘立柱/横杆/墙、一般色块。
+    优先级依次为带颜色横杆、带颜色立柱、纯边缘立柱/墙、一般色块。
     越靠后的分支歧义越大，因此置信度上限更低；同一帧只返回一个完整候选，避免
     多话题字段在不同时间被规划层拼接。
     """
     image_height, image_width = orange_mask.shape[:2]
     image_area = float(image_height * image_width)
+    # 横杆应是一条有限宽度的细长结构。开放场地中的地平线、坡面边缘或整片地板颜色
+    # 经透视后也可能形成稳定横向轮廓，但它们往往横跨几乎整幅图像，且外接框很高。
+    # 这些比例保持为可标定参数，换相机视场后只改 YAML，不改检测逻辑。
+    bar_aspect = max(1.0, float(min_bar_aspect_ratio))
+    bar_width_limit = float(np.clip(max_bar_width_ratio, 0.10, 1.0))
+    bar_height_limit = float(np.clip(max_bar_height_ratio, 0.02, 1.0))
     orange_boxes = contour_boxes(orange_mask, min_area)
     blue_boxes = contour_boxes(blue_mask, min_area)
 
@@ -520,7 +529,9 @@ def detect_obstacle_evidence(
     horizontal_blue = [
         box
         for box in blue_boxes
-        if box[2] >= box[3] * 2.2
+        if box[2] >= box[3] * bar_aspect
+        and box[2] <= image_width * bar_width_limit
+        and box[3] <= image_height * bar_height_limit
         and box[4] / image_area >= 0.005
         and box_fill_ratio(box) >= min_color_fill_ratio
         and box[1] + box[3] / 2.0 <= image_height * 0.70
@@ -567,18 +578,10 @@ def detect_obstacle_evidence(
             "poles", confidence, edge_pair, image_width, image_height
         )
 
-    horizontal_edges = [
-        box
-        for box in edge_boxes
-        if box[2] >= box[3] * 3.0
-        and box[2] >= image_width * 0.30
-        and box[1] + box[3] / 2.0 <= image_height * 0.65
-    ]
-    if horizontal_edges:
-        box = max(horizontal_edges, key=lambda item: item[2])
-        return evidence_from_boxes(
-            "height_bar", 0.60, [box], image_width, image_height
-        )
+    # 单条无颜色横边不能区分真正横杆、台阶顶边、坡面边缘和地平线。联调中这类轮廓
+    # 即使跨多帧完全稳定，也会把远处成排障碍误报成限高横杆。Canny 仍用于给蓝色横杆
+    # 提供 edge_support，并可辅助墙/立柱候选；但 HEIGHT_BAR 类别必须拥有蓝色色块证据，
+    # 近距离无色横杆则由深度点云的离地净空分类兜底。
 
     wall_edges = [
         box
@@ -712,6 +715,9 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("roi_bottom_ratio", 0.95)
         self.declare_parameter("roi_side_margin_ratio", 0.02)
         self.declare_parameter("min_color_fill_ratio", 0.18)
+        self.declare_parameter("min_bar_aspect_ratio", 3.0)
+        self.declare_parameter("max_bar_width_ratio", 0.85)
+        self.declare_parameter("max_bar_height_ratio", 0.22)
         self.declare_parameter("min_image_quality", 0.35)
         self.declare_parameter("history_size", 5)
         self.declare_parameter("confirmation_frames", 3)
@@ -784,6 +790,15 @@ class VisionObstacleDetector(Node):
         )
         self.min_color_fill_ratio = float(
             np.clip(self.get_parameter("min_color_fill_ratio").value, 0.0, 1.0)
+        )
+        self.min_bar_aspect_ratio = max(
+            1.0, float(self.get_parameter("min_bar_aspect_ratio").value)
+        )
+        self.max_bar_width_ratio = float(
+            np.clip(self.get_parameter("max_bar_width_ratio").value, 0.10, 1.0)
+        )
+        self.max_bar_height_ratio = float(
+            np.clip(self.get_parameter("max_bar_height_ratio").value, 0.02, 1.0)
         )
         self.min_image_quality = float(
             np.clip(self.get_parameter("min_image_quality").value, 0.0, 1.0)
@@ -1033,6 +1048,9 @@ class VisionObstacleDetector(Node):
             edge_mask,
             effective_min_area,
             self.min_color_fill_ratio,
+            self.min_bar_aspect_ratio,
+            self.max_bar_width_ratio,
+            self.max_bar_height_ratio,
         )
         raw_evidence = apply_image_quality(
             raw_evidence, quality, self.min_image_quality

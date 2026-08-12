@@ -68,6 +68,32 @@ def test_detects_simple_poles_and_height_bar():
     assert evidence.hint == "height_bar"
 
 
+def test_height_bar_rejects_scene_spanning_floor_or_horizon_region():
+    """贴近左右边界的宽高色块是场地/地平线，不应长期触发横杆限速。"""
+    empty = np.zeros((240, 320), dtype=np.uint8)
+    blue = np.zeros_like(empty)
+    # 复现 Gazebo 联调中稳定误报的约 96% 宽、34% 高蓝色外接框。
+    cv2.rectangle(blue, (6, 60), (313, 141), 255, -1)
+    evidence = detect_obstacle_evidence(empty, blue, empty, 100.0)
+    assert evidence.hint != "height_bar"
+
+    # 即使框较薄，横跨近乎整幅画面的地平线也应交给点云而不是单目横杆分支。
+    blue.fill(0)
+    cv2.rectangle(blue, (3, 70), (316, 100), 255, -1)
+    evidence = detect_obstacle_evidence(empty, blue, empty, 100.0)
+    assert evidence.hint != "height_bar"
+
+
+def test_uncolored_horizontal_edges_cannot_claim_height_bar():
+    """台阶顶边和地平线仅有 Canny 轮廓时，必须等待颜色或点云确认。"""
+    empty = np.zeros((240, 320), dtype=np.uint8)
+    edges = np.zeros_like(empty)
+    # 复现联调标注图中约 57% 宽、8% 高且跨多帧稳定的远处障碍顶边。
+    cv2.rectangle(edges, (38, 83), (220, 103), 255, 3)
+    evidence = detect_obstacle_evidence(empty, empty, edges, 100.0)
+    assert evidence.hint != "height_bar"
+
+
 def test_grayscale_geometry_and_temporal_confirmation():
     """Edges work without target colors, while one-frame noise is rejected."""
     mask = np.zeros((240, 320), dtype=np.uint8)

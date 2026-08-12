@@ -42,6 +42,11 @@ vision_obstacle_detector:
     roi_side_margin_ratio: 0.02
     # 大矩形内部颜色过稀疏时视为反光而非实体色块。
     min_color_fill_ratio: 0.18
+    # 限高横杆必须细长且不能贴满画面。后两项会排除地平线、坡面边缘及整片地板颜色
+    # 形成的超宽/超高框；更换相机视场后用标定 rosbag 调整，不要直接删除边界门控。
+    min_bar_aspect_ratio: 3.0
+    max_bar_width_ratio: 0.85
+    max_bar_height_ratio: 0.22
     # 严重欠曝、过曝或模糊帧在进入时序投票前即被拒绝。
     min_image_quality: 0.35
 
