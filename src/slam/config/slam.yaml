@@ -16,23 +16,27 @@ slam_toolbox:
     # 比赛场地为 14 m × 6 m，12 m 已覆盖有效建图距离，并与仿真/推荐真机雷达合同一致。
     # 不要把该值设得高于传感器 range_max，否则 SLAM Toolbox 会发出能力不匹配警告。
     max_laser_range: 12.0
-    minimum_time_interval: 0.2
+    # 15 Hz 雷达最快约每 0.067 s 一帧。限制为 0.10 s 可把倒退/转向扫描匹配提高到
+    # 约 10 Hz，同时仍主动丢弃过密帧，避免 RK3588 因追赶历史扫描而产生越来越大的延迟。
+    minimum_time_interval: 0.1
     # SLAM Toolbox 的异步节点默认只保留 1 帧等待 TF 的扫描；CPU 短时繁忙时会因此
     # 直接出现 queue full。5 帧在 15 Hz 雷达下最多覆盖约 0.33 s，足以吸收调度抖动，
     # 又不会形成明显的旧扫描积压。它和下方用于回环匹配的 scan_buffer_size 含义不同。
     scan_queue_size: 5
     transform_publish_period: 0.05
-    # 0.5 s 可让 0.5 m/s 移动时的可视滞后保持在约 0.25 m；2 s 会落后约 1 m，
-    # 容易被误认为 SLAM 没有跟上。扫描匹配频率仍由 minimum_time_interval 限制。
-    map_update_interval: 0.5
+    # 0.25 s 即 4 Hz 地图发布；在 0.5 m/s 时可视位移约 0.125 m。它只提高 OccupancyGrid
+    # 刷新频率，实时定位仍由上面的扫描匹配和 20 Hz map->odom TF 负责。
+    map_update_interval: 0.25
     transform_timeout: 0.2
     tf_buffer_duration: 30.0
 
     # ---------- 扫描匹配和关键帧选择 ----------
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.15
-    minimum_travel_heading: 0.15
+    # 关键帧阈值降低到 8 cm / 0.08 rad（约 4.6°），避免倒退或原地旋转时必须等到
+    # 明显位移后才纳入新扫描；仍保留阈值以抑制静止雷达噪声和无意义的 CPU 消耗。
+    minimum_travel_distance: 0.08
+    minimum_travel_heading: 0.08
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     # 匹配响应越高要求越严格；过低易错误闭环，过高可能错过真实闭环。

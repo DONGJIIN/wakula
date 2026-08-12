@@ -91,8 +91,13 @@ def _launch_complete_stack(context):
         condition=IfCondition(LaunchConfiguration("rviz")),
         output="screen",
     )
+    # 把时间源和模型 TF 选择直接打印在启动终端中。漏写仿真参数时，使用者无需翻查
+    # launch 临时参数文件即可立即发现 use_sim_time=false / robot_model=true。
     summary = (
-        f"Wakula profile={profile_name}: scan={topics['scan_topic']}, "
+        f"Wakula profile={profile_name}, "
+        f"use_sim_time={LaunchConfiguration('use_sim_time').perform(context)}, "
+        f"robot_model={LaunchConfiguration('robot_model').perform(context)}: "
+        f"scan={topics['scan_topic']}, "
         f"odom={topics['odom_topic']}, image={topics['camera_topic'] or 'auto'}, "
         f"points={topics['point_cloud_topic'] or 'auto'}"
     )

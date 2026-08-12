@@ -119,7 +119,12 @@ def test_mapping_and_rviz_follow_live_robot_without_long_visual_lag():
     with (PACKAGE_ROOT / "config" / "slam.yaml").open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
     params = config["slam_toolbox"]["ros__parameters"]
-    assert 0.1 <= params["map_update_interval"] <= 0.5
+    assert 0.1 <= params["map_update_interval"] <= 0.25
+    # 15 Hz 输入下将扫描匹配限制在约 10 Hz；关键帧足够密，后退和原地旋转不会等到
+    # 15 cm / 8.6° 后才更新定位。
+    assert 0.08 <= params["minimum_time_interval"] <= 0.12
+    assert params["minimum_travel_distance"] <= 0.1
+    assert params["minimum_travel_heading"] <= 0.1
     rviz = (PACKAGE_ROOT / "rviz" / "slam.rviz").read_text(encoding="utf-8")
     assert "Fixed Frame: map" in rviz
     assert "Target Frame: base_link" in rviz
@@ -246,6 +251,29 @@ def test_slam_launch_is_the_complete_one_command_entry():
         "terrain_params_file",
         "terrain_navigation_params_file",
     } <= launch_argument_names(description)
+
+
+def test_simulation_entry_locks_clock_and_tf_ownership():
+    """仿真快捷入口必须固定仿真时钟并禁止算法占位 TF，避免看似断流的错配。"""
+    path = PACKAGE_ROOT / "launch" / "slam_sim.launch.py"
+    spec = importlib.util.spec_from_file_location("slam_sim_launch", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    description = module.generate_launch_description()
+    assert {
+        "sensor_profile",
+        "scan_topic",
+        "odom_topic",
+        "camera_topic",
+        "point_cloud_topic",
+        "rviz",
+    } <= launch_argument_names(description)
+    source = path.read_text(encoding="utf-8")
+    assert '"use_sim_time": "true"' in source
+    assert '"robot_model": "false"' in source
+    # 文档字符串可以说明场地入口，但可执行代码不能解析或 include 仿真包。
+    assert 'FindPackageShare("quadruped_gazebo")' not in source
+    assert 'package="quadruped_gazebo"' not in source
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

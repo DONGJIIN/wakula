@@ -155,6 +155,10 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
 
 以上节点不是核心算法节点，slam.launch.py 不会启动它们；真机运行时也不应启动。
 同一 ROS 域不得重复启动 robocon_field.launch.py；必须保证 /clock 只有一个发布者。
+仿真算法请在另一终端执行 `ros2 launch slam slam_sim.launch.py`。该入口不新增节点，也不
+启动 Gazebo，只固定 use_sim_time=true、robot_model=false，确保传感器时间和 TF 所有权一致。
+若 /scan、/odom 或 /camera/depth/points 任一路停止，地图/障碍结果会保持最后一帧或进入
+“感知数据无效”；先用 `ros2 topic hz <话题>` 区分数据源断流与算法识别失败。
 TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输出，避免诊断管道关闭被
 误认为 ros2 节点崩溃。
 

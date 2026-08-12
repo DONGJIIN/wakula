@@ -112,7 +112,8 @@ Twist 适配和离线评估。
    Gazebo、SLAM、Nav2 和 OpenCV 时的渲染/桥接压力；world 物理更新率为 100 Hz，足以
    支撑测试 IMU。/clock 独立桥接，/scan、/odom、/tf、/cmd_vel 使用轻量导航桥，IMU 与
    CameraInfo 使用辅助桥；不再桥接算法未使用的 /scan/points，避免高带宽数据拖住导航。
-   地图每 0.5 s 发布，RViz 视图跟随 base_link，但 Fixed Frame 仍保持 map。
+   地图每 0.25 s（4 Hz）发布；扫描匹配最多约 10 Hz，倒退/转向达到 8 cm / 0.08 rad
+   即可加入关键帧。RViz 视图跟随 base_link，但 Fixed Frame 仍保持 map。
    点云在线以 6 Hz 处理最新帧并前视 2.5 m。这些优化不改变任何标准真机接口。
    robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
    slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
@@ -126,7 +127,11 @@ Twist 适配和离线评估。
    算法入口、标准话题和节点不需要修改。
    同一 ROS_DOMAIN_ID 内只能运行一个场地 launch；两个 /clock 会触发 TF 时间回跳并使
    SLAM 丢弃扫描。算法联合命令为：
-     ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+     ros2 launch slam slam_sim.launch.py
+   slam_sim.launch.py 仅包装核心算法，固定 use_sim_time=true、robot_model=false，并不
+   include Gazebo；因此场地和算法仍可独立启停，真机入口不受影响。
+   Gazebo 服务端被 Ctrl-C 或关闭窗口后，RViz 可能继续显示最后一张地图；此时 /scan、
+   /odom、点云已停止，“感知数据无效”是正确的安全降级。先用 ros2 topic hz 分别检查三路。
    Ubuntu 可能延迟弹出旧的 RViz 崩溃报告；以报告 Date 和最新 launch.log 为准。最新日志若为
    “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。
    TF 诊断统一使用 scripts/diagnose.sh。tf2_echo 是持续输出程序，不要直接接 head 等会

@@ -118,8 +118,10 @@ Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 
 联合测试须另开终端启动算法，避免重复发布占位 TF：
 
-  ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+  ros2 launch slam slam_sim.launch.py
 
+slam_sim.launch.py 不启动 Gazebo，只把核心 slam.launch.py 固定为 use_sim_time=true、
+robot_model=false，避免漏参造成仿真时钟不一致或重复 TF。真机仍使用 slam.launch.py。
 这会由算法入口启动 RViz、SLAM Toolbox、Nav2、OpenCV 和点云分析。通用机械狗测试替身已经发布默认
 /scan、/odom、odom->base_link、/imu/data、/camera/image_raw、/camera/depth/points，并
 提供 lidar_link、camera_link、camera_optical_frame、imu_link 的 TF，不需要额外 remap。
@@ -132,6 +134,11 @@ world 物理时钟为 100 Hz，/clock、关键导航和辅助数据分桥运行�
   ros2 launch quadruped_gazebo robocon_field.launch.py \
     robot_sdf:=/绝对路径/real_quadruped/model.sdf \
     robot_name:=real_quadruped publish_test_sensor_tf:=false
+
+联合测试中 Gazebo 的终端/窗口必须保持运行；关闭后 RViz 可能仍保留最后一张地图，但数据
+已经停止。出现“感知数据无效”先分别执行 ros2 topic hz /scan、/odom 和
+/camera/depth/points。当前参考仿真的正常值约为 15 Hz、25~30 Hz 和 15 Hz；地图在运动中
+约 4 Hz 发布，扫描匹配最多约 10 Hz，8 cm / 0.08 rad 即可加入新关键帧。
 
 RViz 的 Camera Detection 面板会显示 /vision/annotated_image：青色为 ROI，黄色为当前帧
 候选，绿色为多帧稳定结果。算法终端会周期打印“[正前方障碍]”；也可单独查看：

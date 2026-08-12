@@ -410,7 +410,7 @@ ros2 launch slam slam.launch.py
 | `vision` | `true` | 是否启动 OpenCV 障碍识别 |
 | `robot_model` | `true` | 是否启动未标定的占位 URDF 与固定传感器 TF |
 | `rviz` | `true` | 是否启动 RViz |
-| `use_sim_time` | `false` | rosbag 回放时使用 `/clock` |
+| `use_sim_time` | `false` | rosbag 回放时使用 `/clock`；Gazebo 请直接用 `slam_sim.launch.py` |
 | `*_params_file` | 项目默认 YAML | 覆盖 SLAM、Nav2、视觉、地形和决策参数文件 |
 
 查看全部参数：
@@ -505,11 +505,15 @@ ros2 launch quadruped_gazebo robocon_field.launch.py gui:=false
 ros2 launch quadruped_gazebo robocon_field.launch.py spawn_test_robot:=false
 ```
 
-该 launch 不 include 任何算法。需要联合测试时另开终端显式启动算法，并关闭算法侧占位 TF：
+该 launch 不 include 任何算法。需要联合测试时另开终端使用仿真算法入口：
 
 ```bash
-ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+ros2 launch slam slam_sim.launch.py
 ```
+
+`slam_sim.launch.py` 也不会启动 Gazebo；它只包装核心 `slam.launch.py`，强制
+`use_sim_time=true`、`robot_model=false`，防止漏写参数后出现传感器时间基准不一致或测试狗
+TF 与占位 URDF 重复。真机仍使用 `slam.launch.py`，两套入口共享同一套算法和参数。
 
 仿真载体现为 `models/generic_quadruped/model.sdf` 中的蓝色通用机械狗外形，只用于验证
 `/scan`、`/odom`、`/imu/data`、`/cmd_vel`、RGB 图像和深度点云链路。它的腿是固定外观，
@@ -538,8 +542,8 @@ ros2 launch quadruped_gazebo robocon_field.launch.py \
 # 终端 1：场地和仿真传感器
 ros2 launch quadruped_gazebo robocon_field.launch.py
 
-# 终端 2：既有 SLAM + Nav2 + OpenCV + RViz
-ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+# 终端 2：既有 SLAM + Nav2 + OpenCV + RViz（固定仿真时间和 TF 所有权）
+ros2 launch slam slam_sim.launch.py
 ```
 
 通用机械狗测试替身已直接对齐算法默认接口：720 点 360° `/scan`（15 Hz、12 m）、`/odom` 和
@@ -557,8 +561,15 @@ LaserScan、机器人 TF、Nav2 代价地图，以及 `Camera Detection` 面板�
 LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色是未知区。开放场地初始地图
 会从出生点向可见障碍展开，白色射线边缘是探索范围而不是墙；应低速覆盖通道、在转角
 旋转观测并完成回环，再用黑色墙线是否重合评价地图质量。实测闭环已消除旧模型的黑色
-放射假墙；地图以 0.5 s 周期发布，RViz 顶视图跟随 `base_link`，但全局固定坐标仍是
+放射假墙；地图以 0.25 s（4 Hz）周期发布，扫描匹配最多约 10 Hz，移动 8 cm 或旋转
+0.08 rad 即可加入新关键帧，改善倒退和原地旋转时的跟随。RViz 顶视图跟随 `base_link`，但全局固定坐标仍是
 `map`。地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
+
+联合测试时不要关闭“终端 1”或 Gazebo 窗口：Gazebo 服务端退出后，窗口和 RViz 仍可能
+保留最后一帧，但 `/scan`、`/odom`、点云已经全部停止，此时“感知数据无效”是安全降级。
+可用 `ros2 topic hz /scan`、`ros2 topic hz /odom`、
+`ros2 topic hz /camera/depth/points` 分别确认数据仍在流动；障碍名称用
+`ros2 topic echo /perception/front_obstacle_name` 查看。
 
 从 Snap 版 VS Code 集成终端启动时，本项目的 Gazebo/RViz launch 会清理其注入的
 `GTK_PATH=/snap/code/...`，避免加载 core20 `libpthread` 后出现 `GLIBC_PRIVATE` 错误；终端中
