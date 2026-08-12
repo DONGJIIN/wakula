@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 WORLD_PATH = PACKAGE_ROOT / "worlds" / "robocon_obstacle_field.sdf"
 WORLD = ET.parse(WORLD_PATH).getroot().find("world")
-ROBOT_PATH = PACKAGE_ROOT / "models" / "sensor_test_base" / "model.sdf"
+ROBOT_PATH = PACKAGE_ROOT / "models" / "generic_quadruped" / "model.sdf"
 ROBOT = ET.parse(ROBOT_PATH).getroot().find("model")
 ORANGE = [223.0 / 255.0, 117.0 / 255.0, 0.0, 1.0]
 
@@ -171,30 +171,51 @@ def test_sensor_carrier_matches_slam_and_perception_contracts():
         sensors["rgbd_camera"].findtext("camera/optical_frame_id")
         == "camera_optical_frame"
     )
-    drive = ROBOT.find("plugin[@name='gz::sim::systems::DiffDrive']")
-    assert drive is not None
-    assert drive.findtext("odom_topic") == "/odom"
-    assert drive.findtext("tf_topic") == "/tf"
-    assert drive.findtext("frame_id") == "odom"
-    assert drive.findtext("child_frame_id") == "base_link"
+    motion = ROBOT.find("plugin[@name='gz::sim::systems::VelocityControl']")
+    odometry = ROBOT.find("plugin[@name='gz::sim::systems::OdometryPublisher']")
+    assert motion is not None
+    assert motion.findtext("topic") == "/cmd_vel"
+    assert odometry is not None
+    assert odometry.findtext("odom_topic") == "/odom"
+    assert odometry.findtext("tf_topic") == "/tf"
+    assert odometry.findtext("odom_frame") == "odom"
+    assert odometry.findtext("robot_base_frame") == "base_link"
+    assert odometry.findtext("dimensions") == "2"
 
 
-def test_sensor_carrier_wheels_rotate_about_vehicle_y_axis():
-    """轮子 link 不得预旋转 joint 轴；只有圆柱几何需要从 Z 轴转到车辆 Y 轴。"""
-    for side in ("left", "right"):
-        wheel = ROBOT.find(f"link[@name='{side}_wheel']")
-        assert wheel is not None
-        wheel_pose = [float(value) for value in wheel.findtext("pose").split()]
-        assert_close(wheel_pose[3:], [0.0, 0.0, 0.0])
-        for shape in ("collision", "visual"):
-            shape_pose = [
-                float(value)
-                for value in wheel.findtext(f"{shape}/pose").split()
-            ]
-            assert_close(shape_pose[3:], [1.570796, 0.0, 0.0])
-        joint = ROBOT.find(f"joint[@name='{side}_wheel_joint']")
-        assert joint is not None
-        assert joint.findtext("axis/xyz").strip() == "0 1 0"
+def test_generic_quadruped_is_planar_and_has_no_fake_leg_controller():
+    """测试替身必须保持雷达水平，且不能伪装成真正的关节/步态控制。"""
+    assert ROBOT.attrib["name"] == "generic_quadruped"
+    base = ROBOT.find("link[@name='base_link']")
+    assert base is not None
+    assert base.findtext("gravity") == "false"
+    assert base.find("collision") is None
+    assert not any("wheel" in link.attrib["name"] for link in ROBOT.findall("link"))
+    assert ROBOT.find("plugin[@name='gz::sim::systems::JointController']") is None
+
+    lidar = ROBOT.find("link[@name='lidar_link']")
+    assert lidar is not None
+    lidar_pose = [float(value) for value in lidar.findtext("pose").split()]
+    assert_close(lidar_pose[3:], [0.0, 0.0, 0.0])
+    scan = lidar.find("sensor/lidar/scan/horizontal")
+    assert scan is not None
+    # 纯 SLAM 测试替身使用 360° 雷达，避免有限视场把扇形未知区误看成“地图乱线”。
+    assert float(scan.findtext("max_angle")) - float(scan.findtext("min_angle")) >= 6.28
+    assert lidar.findtext("sensor/lidar/visibility_mask") == "0x01"
+    # 机械狗外观使用另一可见位；激光不得把机身和腿扫入地图。
+    assert all(
+        visual.findtext("visibility_flags") == "0x02"
+        for visual in ROBOT.findall(".//visual")
+    )
+
+
+def test_launch_exposes_one_step_robot_replacement_contract():
+    """真实 SDF 到位后只换 launch 参数，不允许改 SLAM/Nav2/OpenCV。"""
+    source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text()
+    for argument in ("robot_sdf", "robot_name", "publish_test_sensor_tf"):
+        assert "DeclareLaunchArgument" in source
+        assert f'"{argument}"' in source
+    assert 'models" / "generic_quadruped"' in source
 
 
 def test_rgbd_point_cloud_bridge_corrects_gazebo_numeric_frame():

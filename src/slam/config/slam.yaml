@@ -13,7 +13,9 @@ slam_toolbox:
 
     # ---------- 地图更新、TF 与计算频率 ----------
     resolution: 0.05
-    max_laser_range: 20.0
+    # 比赛场地为 14 m × 6 m，12 m 已覆盖有效建图距离，并与仿真/推荐真机雷达合同一致。
+    # 不要把该值设得高于传感器 range_max，否则 SLAM Toolbox 会发出能力不匹配警告。
+    max_laser_range: 12.0
     minimum_time_interval: 0.2
     transform_publish_period: 0.05
     map_update_interval: 2.0

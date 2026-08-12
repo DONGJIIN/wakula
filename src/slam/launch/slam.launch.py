@@ -84,6 +84,10 @@ def _launch_complete_stack(context):
         executable="rviz2",
         arguments=["-d", LaunchConfiguration("rviz_config_file")],
         parameters=[{"use_sim_time": use_sim_time}],
+        # Snap 版 VS Code 会向集成终端注入 GTK_PATH=/snap/code/...；RViz 的 Qt/GTK
+        # 插件随后可能错误加载 core20 的 libpthread，并以 GLIBC_PRIVATE 报错退出。
+        # 只清空 RViz 子进程的 GTK 模块搜索路径，不改 ROS/Gazebo 或用户系统环境。
+        additional_env={"GTK_PATH": "", "GTK_EXE_PREFIX": "", "GIO_MODULE_DIR": ""},
         condition=IfCondition(LaunchConfiguration("rviz")),
         output="screen",
     )

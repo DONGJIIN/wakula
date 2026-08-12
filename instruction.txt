@@ -94,16 +94,20 @@ Twist 适配和离线评估。
    robocon_obstacle_field.sdf：按规则 V1.0 复现 14m×6m 场地和八类障碍已公布的尺寸、
    高度、间距与颜色；world 开头的 REFERENCE LAYOUT 集中定义全部参考 pose。规则尚未
    公布障碍正式坐标，所以当前布局只用于联调，正式坐标到手后只改八个 layout_* frame。
-   sensor_test_base/model.sdf：仅提供可移动传感器载体以及 /scan、/odom、/imu/data、RGB、深度点云；
-   它不是四足模型，不用于评价越障运动。轮子 joint 的转轴固定为车体 Y 轴，只有圆柱
-   collision/visual 旋转 90°；不要旋转整个 wheel link，否则 joint 轴会变成竖直方向。
+   generic_quadruped/model.sdf：提供通用四足外观和 /scan、/odom、/imu/data、RGB、深度点云；
+   固定腿仅用于辨认外形，机身由平面速度插件保持水平且没有动力学碰撞。它专门隔离验证
+   SLAM/Nav2/OpenCV，不能评价步态、接触或真实越障；直接 /cmd_vel 测试可能穿过障碍。
+   顶置 360° 二维雷达用可见掩码忽略测试狗自身外观，避免自遮挡和机身倾斜形成假墙。
    robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
    slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
    2D SLAM 的必要链路是 /scan、/odom、odom->base_link 和 base_link->lidar_link；RGB-D
    用于 OpenCV/点云感知，IMU 是为 RViz、时间同步和未来状态估计预留，不会被 SLAM
    Toolbox 自动融合。相机消息使用 camera_optical_frame，避免把光学点云误当成机身坐标。
-   RViz 默认隐藏 TF 箭头和网格：白色为已观测自由区、黑色为占用区、灰色为未知区；少量
-   直线路径产生的扇形白区只是探索不足，应低速覆盖通道并在转角旋转扫描后再判断建图质量。
+   RViz 默认隐藏 TF、网格和实时 LaserScan：白色为已观测自由区、黑色为占用区、灰色为
+   未知区；开放场地的白色射线边缘只是探索范围，黑色放射线才需要检查雷达水平度/TF。
+   应低速覆盖通道并完成回环后，用墙线重合程度判断建图质量。
+   换正式 SDF 时使用 robot_sdf、robot_name 和 publish_test_sensor_tf:=false 三个 launch 参数；
+   算法入口、标准话题和节点不需要修改。
    同一 ROS_DOMAIN_ID 内只能运行一个场地 launch；两个 /clock 会触发 TF 时间回跳并使
    SLAM 丢弃扫描。算法联合命令为：
      ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false

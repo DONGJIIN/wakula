@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，97 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，98 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -504,11 +504,25 @@ ros2 launch quadruped_gazebo robocon_field.launch.py spawn_test_robot:=false
 ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 ```
 
-仿真载体只用于验证 `/scan`、`/odom`、`/imu/data`、`/cmd_vel`、RGB 图像和深度点云链路，不是四足
-动力学模型，不能用来评价站立、步态或真实越障能力。规则没有给出的杆径、材料随机形态和
-地面启动区尺寸仅作可复现近似；正式坐标未发布前不得把当前 pose 当作官方坐标。
-测试载体的两只轮子以车体 Y 轴为转轴，碰撞/外观圆柱单独旋转 90°；若修改模型，不能把
-整个 wheel link 一起旋转，否则 joint 轴也会随 link 变换，表现为轮子在地面上绕竖轴打转。
+仿真载体现为 `models/generic_quadruped/model.sdf` 中的蓝色通用机械狗外形，只用于验证
+`/scan`、`/odom`、`/imu/data`、`/cmd_vel`、RGB 图像和深度点云链路。它的腿是固定外观，
+机身是保持水平、无动力学碰撞的平面“幽灵载体”，因此不会再出现旧轮式测试底盘俯仰后
+让二维雷达扫到地面、在地图中生成放射状假墙的问题。它不能用于评价站立、步态、接触或
+真实越障能力；直接向 `/cmd_vel` 发命令也可以穿过障碍，真实碰撞必须等待正式动力学模型。
+规则没有给出的杆径、材料随机形态和地面启动区尺寸仅作可复现近似；正式坐标未发布前
+不得把当前 pose 当作官方坐标。
+
+正式机械狗 SDF 到位后可在场地 launch 上一次替换，不需要改 SLAM、Nav2 或 OpenCV：
+
+```bash
+ros2 launch quadruped_gazebo robocon_field.launch.py \
+  robot_sdf:=/绝对路径/real_quadruped/model.sdf \
+  robot_name:=real_quadruped \
+  publish_test_sensor_tf:=false
+```
+
+新模型需继续发布标准 `/scan`、`/odom`、`/tf`、相机/点云话题；若 frame 或话题不同，优先在
+驱动/profile/remap 层对齐。`publish_test_sensor_tf:=false` 可避免真实模型外参与测试外参重复。
 
 完整 SLAM/RViz 测试需保持两个终端，不要重复启动 Gazebo，否则多个 `/clock` 会导致 TF
 时间回跳：
@@ -521,16 +535,22 @@ ros2 launch quadruped_gazebo robocon_field.launch.py
 ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 ```
 
-小车已直接对齐算法默认接口：720 点 360° `/scan`（12 Hz）、`/odom` 和
-`odom -> base_link`（30 Hz）、640×480 RGB-D（15 Hz）、`/imu/data`（100 Hz）。RGB 图像
+通用机械狗测试替身已直接对齐算法默认接口：720 点 360° `/scan`（15 Hz、12 m）、`/odom` 和
+`odom -> base_link`（30 Hz）、640×480 RGB-D（15 Hz）、`/imu/data`（100 Hz）。360° 雷达
+位于机身中心且保持水平，并通过 Gazebo 可见掩码忽略测试狗自身外观，避免自遮挡写入地图。RGB 图像
 使用 `camera_optical_frame`；Gazebo 当前生成的 PointCloudPacked 数值轴实际采用
 `camera_link` 约定，因此仿真专用 bridge 会覆写点云 frame，避免算法把点云重复旋转。
 真机仍应由驱动发布真实 frame 和 TF，不需要这一仿真修正。RViz 中应看到 `/map`、
 LaserScan、机器人 TF、Nav2 代价地图，以及 `Camera Detection` 面板中的识别标注画面。
-默认 RViz 已关闭容易遮挡地图的 TF 箭头和网格，并将实时激光显示为细青色点；需要查 TF
-时再手动勾选。地图中白色是已观测自由区、黑色是占用区、灰色是未知区。只直行几段时，
-白色区域会呈雷达视锥扇形，并非地图损坏；应低速沿通道分段探索、在转角停留旋转观测，
-完成覆盖和回环后再评价地图质量。
+默认 RViz 已关闭容易遮挡地图的 TF、网格和实时 LaserScan；需要查原始雷达时再手动勾选
+LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色是未知区。开放场地初始地图
+会从出生点向可见障碍展开，白色射线边缘是探索范围而不是墙；应低速覆盖通道、在转角
+旋转观测并完成回环，再用黑色墙线是否重合评价地图质量。实测闭环已消除旧模型的黑色
+放射假墙；地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
+
+从 Snap 版 VS Code 集成终端启动时，本项目的 Gazebo/RViz launch 会清理其注入的
+`GTK_PATH=/snap/code/...`，避免加载 core20 `libpthread` 后出现 `GLIBC_PRIVATE` 错误；终端中
+偶尔出现 `canberra-gtk-module` 提示只影响提示音模块，不影响仿真或算法。
 诊断 TF 请运行 `./scripts/diagnose.sh`；不要将持续输出的 `tf2_echo` 直接连接到 `head`，
 否则读取端提前关闭可能让 ROS 2 Jazzy 报 `BrokenPipeError`，但这不代表算法节点崩溃。
 

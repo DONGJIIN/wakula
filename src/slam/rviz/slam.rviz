@@ -43,9 +43,11 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /map_updates
       Value: true
+    # 实时激光会随机器人转向形成青色射线，容易与占据地图黑色墙线混淆。
+    # 默认只显示 /map；需要检查原始雷达时在 Displays 中手动勾选 LaserScan。
     - Class: rviz_default_plugins/LaserScan
       Name: LaserScan
-      Enabled: true
+      Enabled: false
       Alpha: 1
       Color: 0; 255; 255
       Color Transformer: FlatColor
@@ -62,7 +64,7 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /scan
       Use Fixed Frame: true
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: false

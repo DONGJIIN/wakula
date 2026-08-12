@@ -1,0 +1,151 @@
+<?xml version="1.0"?>
+<sdf version="1.10">
+  <!--
+    通用四足“算法测试替身”，仅属于 quadruped_gazebo。
+
+    它不是动力学/步态模型：四条腿是固定外观且不参与碰撞，VelocityControl 只在 XY
+    平面执行 /cmd_vel，OdometryPublisher 从 Gazebo 位姿生成
+    /odom 与 odom->base_link。这样可以单独验证 SLAM/Nav2/OpenCV，而不会把尚未完成的
+    足式控制、轮式打滑或机身俯仰误差混入算法结果。
+
+    真机模型准备好后，可在 robocon_field.launch.py 中通过 robot_sdf/robot_name 参数
+    一次替换；只要新模型继续满足标准话题和 TF 合同，算法 launch 无需修改。
+  -->
+  <model name="generic_quadruped">
+    <self_collide>false</self_collide>
+    <allow_auto_disable>false</allow_auto_disable>
+
+    <link name="base_link">
+      <!-- 禁用重力并由平面速度插件约束姿态，保证二维雷达始终与地面平行。 -->
+      <gravity>false</gravity>
+      <kinematic>true</kinematic>
+      <inertial>
+        <pose>0 0 0.08 0 0 0</pose>
+        <mass>12.0</mass>
+        <inertia>
+          <ixx>0.22</ixx><iyy>0.42</iyy><izz>0.55</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+
+      <!--
+        刻意不放置碰撞体：这是不会与场地发生动力学接触的“幽灵载体”。Nav2 和
+        Collision Monitor 仍会依据真实仿真传感器停车/绕行，但直接发布 /cmd_vel 时不会
+        因接触力把机身掀翻。真实碰撞、站立和越障必须等正式四足动力学模型完成后验证。
+      -->
+
+      <!-- 机身、头部与传感器背板。 -->
+      <visual name="body">
+        <visibility_flags>0x02</visibility_flags>
+        <pose>0 0 0.34 0 0 0</pose>
+        <geometry><box><size>0.52 0.24 0.16</size></box></geometry>
+        <material><ambient>0.08 0.12 0.20 1</ambient><diffuse>0.10 0.28 0.55 1</diffuse></material>
+      </visual>
+      <visual name="body_top">
+        <visibility_flags>0x02</visibility_flags>
+        <pose>-0.02 0 0.435 0 0 0</pose>
+        <geometry><box><size>0.34 0.19 0.03</size></box></geometry>
+        <material><diffuse>0.04 0.05 0.07 1</diffuse></material>
+      </visual>
+      <visual name="head">
+        <visibility_flags>0x02</visibility_flags>
+        <pose>0.31 0 0.38 0 0 0</pose>
+        <geometry><box><size>0.16 0.20 0.17</size></box></geometry>
+        <material><ambient>0.10 0.14 0.22 1</ambient><diffuse>0.14 0.34 0.62 1</diffuse></material>
+      </visual>
+      <visual name="muzzle">
+        <visibility_flags>0x02</visibility_flags>
+        <pose>0.415 0 0.345 0 0 0</pose>
+        <geometry><box><size>0.07 0.14 0.08</size></box></geometry>
+        <material><diffuse>0.04 0.05 0.06 1</diffuse></material>
+      </visual>
+      <visual name="left_ear">
+        <visibility_flags>0x02</visibility_flags>
+        <pose>0.29 0.075 0.49 0.15 0 0</pose>
+        <geometry><box><size>0.07 0.035 0.10</size></box></geometry>
+        <material><diffuse>0.04 0.05 0.07 1</diffuse></material>
+      </visual>
+      <visual name="right_ear">
+        <visibility_flags>0x02</visibility_flags>
+        <pose>0.29 -0.075 0.49 -0.15 0 0</pose>
+        <geometry><box><size>0.07 0.035 0.10</size></box></geometry>
+        <material><diffuse>0.04 0.05 0.07 1</diffuse></material>
+      </visual>
+
+      <!-- 四条固定腿只表达通用四足外形，不发布关节状态，也不实现步态。 -->
+      <visual name="front_left_upper"><visibility_flags>0x02</visibility_flags><pose>0.19 0.14 0.235 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.18</length></cylinder></geometry><material><diffuse>0.12 0.30 0.58 1</diffuse></material></visual>
+      <visual name="front_left_lower"><visibility_flags>0x02</visibility_flags><pose>0.19 0.14 0.105 0 0 0</pose><geometry><cylinder><radius>0.027</radius><length>0.14</length></cylinder></geometry><material><diffuse>0.05 0.06 0.08 1</diffuse></material></visual>
+      <visual name="front_right_upper"><visibility_flags>0x02</visibility_flags><pose>0.19 -0.14 0.235 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.18</length></cylinder></geometry><material><diffuse>0.12 0.30 0.58 1</diffuse></material></visual>
+      <visual name="front_right_lower"><visibility_flags>0x02</visibility_flags><pose>0.19 -0.14 0.105 0 0 0</pose><geometry><cylinder><radius>0.027</radius><length>0.14</length></cylinder></geometry><material><diffuse>0.05 0.06 0.08 1</diffuse></material></visual>
+      <visual name="rear_left_upper"><visibility_flags>0x02</visibility_flags><pose>-0.19 0.14 0.235 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.18</length></cylinder></geometry><material><diffuse>0.12 0.30 0.58 1</diffuse></material></visual>
+      <visual name="rear_left_lower"><visibility_flags>0x02</visibility_flags><pose>-0.19 0.14 0.105 0 0 0</pose><geometry><cylinder><radius>0.027</radius><length>0.14</length></cylinder></geometry><material><diffuse>0.05 0.06 0.08 1</diffuse></material></visual>
+      <visual name="rear_right_upper"><visibility_flags>0x02</visibility_flags><pose>-0.19 -0.14 0.235 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.18</length></cylinder></geometry><material><diffuse>0.12 0.30 0.58 1</diffuse></material></visual>
+      <visual name="rear_right_lower"><visibility_flags>0x02</visibility_flags><pose>-0.19 -0.14 0.105 0 0 0</pose><geometry><cylinder><radius>0.027</radius><length>0.14</length></cylinder></geometry><material><diffuse>0.05 0.06 0.08 1</diffuse></material></visual>
+      <visual name="front_left_foot"><visibility_flags>0x02</visibility_flags><pose>0.215 0.14 0.035 0 0 0</pose><geometry><box><size>0.10 0.07 0.04</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
+      <visual name="front_right_foot"><visibility_flags>0x02</visibility_flags><pose>0.215 -0.14 0.035 0 0 0</pose><geometry><box><size>0.10 0.07 0.04</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
+      <visual name="rear_left_foot"><visibility_flags>0x02</visibility_flags><pose>-0.165 0.14 0.035 0 0 0</pose><geometry><box><size>0.10 0.07 0.04</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
+      <visual name="rear_right_foot"><visibility_flags>0x02</visibility_flags><pose>-0.165 -0.14 0.035 0 0 0</pose><geometry><box><size>0.10 0.07 0.04</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
+    </link>
+
+    <!--
+      SLAM 测试雷达安装在机身中心、离地 0.28 m，采用常见 360° 单线扫描。测试替身
+      的外观统一使用 0x02 可见位，而雷达只接收 0x01，因此不会把自己的身体/腿画进
+      地图；场地模型未限制可见位，仍会被完整扫描。12 m 量程足够覆盖 14 m × 6 m 赛场。
+    -->
+    <link name="lidar_link">
+      <pose>0 0 0.28 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial><mass>0.12</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <visual name="visual"><visibility_flags>0x02</visibility_flags><geometry><cylinder><radius>0.038</radius><length>0.045</length></cylinder></geometry><material><diffuse>0.02 0.02 0.025 1</diffuse></material></visual>
+      <sensor name="lidar" type="gpu_lidar">
+        <topic>/scan</topic><update_rate>15</update_rate><gz_frame_id>lidar_link</gz_frame_id>
+        <lidar>
+          <scan><horizontal><samples>720</samples><resolution>1</resolution><min_angle>-3.141593</min_angle><max_angle>3.141593</max_angle></horizontal></scan>
+          <range><min>0.10</min><max>12.0</max><resolution>0.01</resolution></range>
+          <noise><type>gaussian</type><mean>0</mean><stddev>0.003</stddev></noise>
+          <visibility_mask>0x01</visibility_mask>
+        </lidar>
+        <always_on>true</always_on><visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="lidar_fixed" type="fixed"><parent>base_link</parent><child>lidar_link</child></joint>
+
+    <link name="imu_link">
+      <pose>0 0 0.38 0 0 0</pose><gravity>false</gravity>
+      <inertial><mass>0.05</mass><inertia><ixx>0.00005</ixx><iyy>0.00005</iyy><izz>0.00005</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <sensor name="imu" type="imu">
+        <topic>/imu/data</topic><update_rate>100</update_rate><gz_frame_id>imu_link</gz_frame_id>
+        <always_on>true</always_on>
+      </sensor>
+    </link>
+    <joint name="imu_fixed" type="fixed"><parent>base_link</parent><child>imu_link</child></joint>
+
+    <link name="camera_link">
+      <pose>0.40 0 0.40 0 0.24 0</pose><gravity>false</gravity>
+      <inertial><mass>0.16</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <visual name="visual"><visibility_flags>0x02</visibility_flags><geometry><box><size>0.05 0.11 0.045</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
+      <sensor name="rgbd" type="rgbd_camera">
+        <topic>/camera</topic><update_rate>15</update_rate><gz_frame_id>camera_optical_frame</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.396263</horizontal_fov>
+          <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+          <clip><near>0.12</near><far>8.0</far></clip>
+          <depth_camera><clip><near>0.12</near><far>8.0</far></clip></depth_camera>
+          <optical_frame_id>camera_optical_frame</optical_frame_id>
+        </camera>
+        <always_on>true</always_on><visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="camera_fixed" type="fixed"><parent>base_link</parent><child>camera_link</child></joint>
+
+    <!-- 平面测试运动和仿真真值二维里程计；二者都不属于真实四足控制。 -->
+    <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
+      <topic>/cmd_vel</topic>
+    </plugin>
+    <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>odom</odom_frame><robot_base_frame>base_link</robot_base_frame>
+      <dimensions>2</dimensions><odom_topic>/odom</odom_topic><tf_topic>/tf</tf_topic>
+      <odom_publish_frequency>30</odom_publish_frequency>
+    </plugin>
+  </model>
+</sdf>
