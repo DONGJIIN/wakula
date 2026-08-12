@@ -123,6 +123,11 @@ Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 这会由算法入口启动 RViz、SLAM Toolbox、Nav2、OpenCV 和点云分析。小车已经发布默认
 /scan、/odom、odom->base_link、/imu/data、/camera/image_raw、/camera/depth/points，并
 提供 lidar_link、camera_link、camera_optical_frame、imu_link 的 TF，不需要额外 remap。
+RViz 的 Camera Detection 面板会显示 /vision/annotated_image：青色为 ROI，黄色为当前帧
+候选，绿色为多帧稳定结果。算法终端会周期打印“[正前方障碍]”；也可单独查看：
+
+  ros2 topic echo /perception/front_obstacle_name
+
 Nav2 只会在雷达角度/样本/frame、里程计时间/frame/协方差和定位 TF 全部有效后激活。
 点云进入局部代价地图前会自动剔除拟合地面和坡面；真机只需保证点云 TF 正确，并用
 rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动侧重复裁成绝对 z>0。
@@ -155,6 +160,8 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
   ros2 topic hz /odom
   ros2 topic hz /terrain/features_stamped
   ros2 topic hz /vision/obstacle_stamped
+  ros2 topic hz /vision/annotated_image
+  ros2 topic echo /perception/front_obstacle_name
   ros2 topic echo /terrain/navigation_mode
   ros2 topic echo /terrain/speed_limit
   ros2 topic echo /terrain/navigation_safety
@@ -233,4 +240,6 @@ odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组�
 -------------
 保持 OpenCV 路径，不启用 YOLO；图像宽度 640、处理 8 Hz，点云处理 10 Hz 并限制最大点数。
 确认 CPU/内存余量后再提高分辨率或频率。优先让相机/雷达驱动在硬件侧完成对齐、降采样
-和滤波，避免同一份点云被多个节点重复转换。
+和滤波，避免同一份点云被多个节点重复转换。算法侧 `terrain.yaml` 的
+transform_max_points 默认把 TF 前原始云限制为 120000 点；离线对照时可设为 0，真机算力
+不足时应结合 rosbag 准确率逐步降低，不能只凭运行流畅程度调参。

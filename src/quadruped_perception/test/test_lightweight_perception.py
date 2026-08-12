@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from quadruped_perception.terrain_analyzer import (
+    bounded_point_sample,
     compute_terrain_features,
     transform_xyz,
 )
@@ -21,6 +22,7 @@ from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
     ObstacleEvidence,
     adaptive_canny_thresholds,
+    annotate_detection_frame,
     apply_image_quality,
     apply_detection_roi,
     combined_hsv_mask,
@@ -34,6 +36,19 @@ from quadruped_perception.vision_obstacle_detector import (
     suppress_specular_edges,
     temporal_history_requires_reset,
 )
+
+
+def test_annotated_image_visualizes_roi_candidate_and_confirmed_result():
+    """RViz 调试图必须保留尺寸，并把候选/确认信息画到原始图像副本上。"""
+    source = np.zeros((120, 200, 3), dtype=np.uint8)
+    candidate = ObstacleEvidence("wall", 0.7, 0.5, 0.5, 0.4, 0.5)
+    confirmed = ObstacleEvidence("wall", 0.65, 0.5, 0.5, 0.4, 0.5)
+    annotated = annotate_detection_frame(
+        source, candidate, confirmed, 0.8, 0.05, 0.95, 0.02
+    )
+    assert annotated.shape == source.shape
+    assert np.count_nonzero(annotated) > 0
+    assert np.count_nonzero(source) == 0
 
 
 def test_detects_simple_poles_and_height_bar():
@@ -297,6 +312,18 @@ def test_xyz_transform_handles_rotation_translation_and_invalid_quaternion():
     )
     with pytest.raises(ValueError, match="degenerate"):
         transform_xyz(points, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0))
+
+
+def test_pre_transform_sampling_is_bounded_deterministic_and_full_span():
+    """高分辨率云必须覆盖首尾等距采样；禁用上限时不得复制或截断数据。"""
+    points = np.arange(300, dtype=np.float32).reshape(100, 3)
+    first = bounded_point_sample(points, 12)
+    second = bounded_point_sample(points, 12)
+    assert first.shape == (12, 3)
+    np.testing.assert_array_equal(first, second)
+    np.testing.assert_array_equal(first[0], points[0])
+    np.testing.assert_array_equal(first[-1], points[-1])
+    np.testing.assert_array_equal(bounded_point_sample(points, 0), points)
 
 
 def _dense_floor(z=0.0):

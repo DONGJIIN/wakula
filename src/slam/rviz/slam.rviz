@@ -2,7 +2,7 @@ Panels:
   - Class: rviz_common/Displays
     Name: Displays
     Property Tree Widget:
-      Expanded: ["/Global Options1", "/Map1", "/LaserScan1", "/TF1"]
+      Expanded: ["/Global Options1", "/Map1", "/LaserScan1", "/Camera Detection1", "/TF1"]
       Splitter Ratio: 0.55
     Tree Height: 620
   - Class: rviz_common/Selection
@@ -89,6 +89,21 @@ Visualization Manager:
         Value: /robot_description
       TF Prefix: ""
       Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Camera Detection
+      Normalize Range: false
+      Queue Size: 2
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /vision/annotated_image
       Value: true
   Enabled: true
   Global Options:

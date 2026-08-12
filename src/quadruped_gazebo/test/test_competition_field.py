@@ -177,3 +177,11 @@ def test_sensor_carrier_matches_slam_and_perception_contracts():
     assert drive.findtext("tf_topic") == "/tf"
     assert drive.findtext("frame_id") == "odom"
     assert drive.findtext("child_frame_id") == "base_link"
+
+
+def test_rgbd_point_cloud_bridge_corrects_gazebo_numeric_frame():
+    """Gazebo 点云的 x/y/z 数值轴必须与覆盖后的 camera_link Header 一致。"""
+    launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text()
+    assert 'name="robocon_point_cloud_bridge"' in launch_source
+    assert '{"override_frame_id": "camera_link"}' in launch_source
+    assert '("/camera/points", "/camera/depth/points")' in launch_source

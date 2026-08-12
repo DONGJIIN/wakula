@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，90 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，94 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -159,13 +159,15 @@ wakula/
 主要节点：
 
 - `vision_obstacle_detector`：OpenCV 双光照 HSV + Canny 轮廓识别，并用原始曝光、清晰度、
-  高光抑制、Hue 0/179 环绕、投票率和目标框 IoU 做多帧确认。
+  高光抑制、Hue 0/179 环绕、投票率和目标框 IoU 做多帧确认；同时发布带 ROI、候选框、
+  稳定类别和图像质量的 `/vision/annotated_image`，供 RViz 直接观察。
 - `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格、连通域和原始回波支撑量
   估计台阶、坡度、坑洞、墙、悬空横杆和立柱；送入 Nav2 前按拟合地面移除平地/坡面。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；相机断流时在
   0.25 s 后退化为纯点云结果；视觉框还必须与前向通道相交，点云始终掌握尺度权限。
 - `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，原子发布地形模式、Nav2
-  速度上限、有效性与几何摘要，供未来运动团队只读接入。
+  速度上限、有效性与几何摘要，并在终端周期显示正前方障碍中文名称、置信度、距离、
+  高度和视觉介入状态，供调试及未来运动团队只读接入。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、协方差
   和里程计突跳；跳变会锁存到连续稳定样本确认恢复。
 - `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2。
@@ -518,9 +520,11 @@ ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
 ```
 
 小车已直接对齐算法默认接口：720 点 360° `/scan`（12 Hz）、`/odom` 和
-`odom -> base_link`（30 Hz）、640×480 RGB-D（15 Hz）、`/imu/data`（100 Hz）。图像和
-点云使用 `camera_optical_frame`，并提供到 `base_link` 的标准光学 TF；无需添加 profile
-或 remap。RViz 中应看到 `/map`、LaserScan、点云、机器人 TF 和 Nav2 代价地图。
+`odom -> base_link`（30 Hz）、640×480 RGB-D（15 Hz）、`/imu/data`（100 Hz）。RGB 图像
+使用 `camera_optical_frame`；Gazebo 当前生成的 PointCloudPacked 数值轴实际采用
+`camera_link` 约定，因此仿真专用 bridge 会覆写点云 frame，避免算法把点云重复旋转。
+真机仍应由驱动发布真实 frame 和 TF，不需要这一仿真修正。RViz 中应看到 `/map`、
+LaserScan、机器人 TF、Nav2 代价地图，以及 `Camera Detection` 面板中的识别标注画面。
 诊断 TF 请运行 `./scripts/diagnose.sh`；不要将持续输出的 `tf2_echo` 直接连接到 `head`，
 否则读取端提前关闭可能让 ROS 2 Jazzy 报 `BrokenPipeError`，但这不代表算法节点崩溃。
 
@@ -583,6 +587,7 @@ IoU 连续，因此反光、画面边缘、无关竖条和跨帧跳变不容易�
 /vision/obstacle_evidence  std_msgs/Float32MultiArray
 /vision/obstacle_hint      std_msgs/String
 /vision/color_features     std_msgs/Float32MultiArray  # 标定/兼容接口
+/vision/annotated_image    sensor_msgs/Image           # RViz 默认显示的原图标注
 /vision/debug_mask         sensor_msgs/Image           # 默认关闭
 ```
 
@@ -607,6 +612,15 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 可临时开启 `publish_debug_mask`，在 `/vision/debug_mask` 检查分割与边缘效果；标定完成后
 关闭，以减少图像复制。
 
+RViz 的 `Camera Detection` 面板默认订阅 `/vision/annotated_image`：青框是实际检测 ROI，
+黄框是当前帧候选，绿框是多帧确认后的稳定障碍；顶部 `FRONT` 显示视觉类别，
+`IMAGE QUALITY` 显示输入质量。安全判断仍以点云融合结果为准，因此终端中的
+`[正前方障碍]` 可能比单帧视觉框更保守。融合结果还会发布中文速查话题：
+
+```bash
+ros2 topic echo /perception/front_obstacle_name
+```
+
 ## 8. 当前地形决策边界
 
 | 模式/类别 | 当前处理 | 是否执行腿部动作 |
@@ -618,7 +632,8 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 | 数据断流、TF 失败或字段非法 | 发布 `STOP` 和零速度上限 | 否 |
 
 当前接口没有动作建议或执行含义，只发布 `/terrain/navigation_mode`、
-`/terrain/speed_limit` 和诊断信息。仓库没有 `TraverseObstacle` Action、SDK 网关、
+`/terrain/speed_limit`、`/perception/front_obstacle_name` 和诊断信息。仓库没有
+`TraverseObstacle` Action、SDK 网关、
 关节轨迹或越障控制器；待真机运动控制稳定后再单独设计。
 
 ## 9. 点云地形与 Nav2 融合
@@ -633,6 +648,10 @@ type_code: 0=none, 1=poles, 2=height_bar, 3=wall, 4=colored_obstacle
 /perception/fused_obstacle     quadruped_interfaces/FusedObstacle
 /diagnostics                   diagnostic_msgs/DiagnosticArray
 ```
+
+高分辨率 RGB-D 原始云会先用 `transform_max_points` 做覆盖全幅的确定性等间隔采样，再
+执行 TF 和前向 ROI 分析；这不会改变话题合同，可显著降低 Gazebo 全栈或 RK3588 上的
+内存与矩阵运算压力。设为 `0` 可在离线标定时关闭该上限做精度对照。
 
 `/terrain/features` 字段：
 

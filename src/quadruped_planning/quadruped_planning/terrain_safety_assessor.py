@@ -26,6 +26,16 @@ MODE_CODES = {
     "CLIMB": NavigationSafety.MODE_CLIMB,
     "STOP": NavigationSafety.MODE_STOP,
 }
+MODE_NAMES = {int(code): name for name, code in MODE_CODES.items()}
+OBSTACLE_NAMES_ZH = {
+    NavigationSafety.OBSTACLE_UNKNOWN: "未知障碍",
+    NavigationSafety.OBSTACLE_CLEAR: "无障碍",
+    NavigationSafety.OBSTACLE_STEP: "台阶",
+    NavigationSafety.OBSTACLE_PIT: "坑洞",
+    NavigationSafety.OBSTACLE_WALL: "墙面",
+    NavigationSafety.OBSTACLE_BAR: "横杆",
+    NavigationSafety.OBSTACLE_POLE: "立柱",
+}
 
 # ``/terrain/features`` 是旧 rosbag 兼容接口。下标集中在这里，避免回调中出现难以审查
 # 的魔法数字；新代码优先读取带 Header 的 FusedObstacle。
@@ -110,6 +120,25 @@ def validate_height_thresholds(
 def navigation_mode_code(mode: str) -> int:
     """把可读字符串模式映射为稳定消息常量，未知值保持 UNKNOWN。"""
     return int(MODE_CODES.get(mode, NavigationSafety.MODE_UNKNOWN))
+
+
+def obstacle_name_zh(obstacle_type: int, perception_valid: bool = True) -> str:
+    """把稳定接口编码转换为终端和轻量 UI 共用的中文名称。"""
+    if not perception_valid:
+        return "感知数据无效"
+    return OBSTACLE_NAMES_ZH.get(int(obstacle_type), "未知障碍")
+
+
+def format_front_obstacle_status(safety: NavigationSafety) -> str:
+    """生成一行可读状态，明确这是前向 ROI 的融合判断而非全场物体列表。"""
+    name = obstacle_name_zh(safety.obstacle_type, safety.perception_valid)
+    mode = MODE_NAMES.get(int(safety.mode), "UNKNOWN")
+    vision = "已介入限速" if safety.visual_assist_active else "未介入限速"
+    return (
+        f"[正前方障碍] {name} | 模式={mode} | 限速={safety.speed_limit:.2f} | "
+        f"置信度={safety.confidence:.2f} | 距离={safety.distance:.2f} m | "
+        f"高度={safety.obstacle_height:.2f} m | 视觉辅助={vision}"
+    )
 
 
 def finite_or_zero(value: float) -> float:
@@ -336,13 +365,17 @@ class TerrainSafetyAssessor(Node):
             ("stop_threshold", 0.32),
             ("max_slope", 0.45),
             ("max_roughness", 0.06),
-            ("sensor_timeout", 0.7),
+            # 全栈同机运行时点云几何会有短时计算抖动。3.0 s 可容纳实测约 2.7 s 的极端
+            # 帧间隔；速度门仍以 0.7 s 独立监控输入，控制安全响应没有被这项 UI/决策
+            # 状态容错放慢，真正断流最终保持 fail-closed STOP。
+            ("sensor_timeout", 3.0),
             ("fused_min_confidence", 0.25),
             ("vision_timeout", 0.6),
             ("vision_min_confidence", 0.55),
             ("vision_center_margin", 0.20),
             ("vision_speed_scale", 0.35),
             ("future_stamp_tolerance", 0.10),
+            ("status_log_period", 1.0),
         ):
             self.declare_parameter(name, default)
         self.declare_parameter("min_points", 30)
@@ -369,7 +402,7 @@ class TerrainSafetyAssessor(Node):
             )
         self.max_slope = self._positive_parameter("max_slope", 0.45)
         self.max_roughness = self._positive_parameter("max_roughness", 0.06)
-        self.sensor_timeout = self._positive_parameter("sensor_timeout", 0.7)
+        self.sensor_timeout = self._positive_parameter("sensor_timeout", 3.0)
         self.future_stamp_tolerance = self._positive_parameter(
             "future_stamp_tolerance", 0.10
         )
@@ -394,6 +427,7 @@ class TerrainSafetyAssessor(Node):
         self.output_frame = (
             str(self.get_parameter("output_frame").value) or "base_link"
         )
+        self.status_log_period = self._positive_parameter("status_log_period", 1.0)
         self.assessment_filter = ConservativeAssessmentFilter(
             int(self.get_parameter("clear_confirmation_frames").value),
             ("STOP", 0.0),
@@ -411,6 +445,9 @@ class TerrainSafetyAssessor(Node):
         # mode、speed_limit 和 FusedObstacle 后自行拼接。
         self.navigation_safety_pub = self.create_publisher(
             NavigationSafety, "/terrain/navigation_safety", 10
+        )
+        self.front_obstacle_name_pub = self.create_publisher(
+            String, "/perception/front_obstacle_name", 10
         )
         self.create_subscription(
             Float32MultiArray, "/terrain/features", self.features_callback, 10
@@ -434,6 +471,8 @@ class TerrainSafetyAssessor(Node):
         self.perception_valid = False
         self.latest_observation = None
         self.last_assessment = None
+        self.last_obstacle_status = None
+        self.last_status_log_time = None
         self.create_timer(0.1, self.timeout_callback)
         self.publish_assessment("STOP", 0.0)
         self.get_logger().info("Terrain navigation safety assessor ready")
@@ -676,6 +715,32 @@ class TerrainSafetyAssessor(Node):
                 observation.valid_points
             )
         self.navigation_safety_pub.publish(safety)
+        obstacle_name = obstacle_name_zh(
+            safety.obstacle_type, safety.perception_valid
+        )
+        self.front_obstacle_name_pub.publish(String(data=obstacle_name))
+
+        # 类别/模式变化立即打印；稳定状态每秒刷新一次。这样终端始终能看到当前结果，
+        # 又不会按 10 Hz 感知帧率刷屏。数值不参与变化签名，由周期日志展示最新测量。
+        status_signature = (
+            bool(safety.perception_valid),
+            int(safety.obstacle_type),
+            int(safety.mode),
+            bool(safety.visual_assist_active),
+        )
+        now = self.get_clock().now()
+        log_age = (
+            float("inf")
+            if self.last_status_log_time is None
+            else (now - self.last_status_log_time).nanoseconds / 1e9
+        )
+        if (
+            status_signature != self.last_obstacle_status
+            or log_age >= self.status_log_period
+        ):
+            self.get_logger().info(format_front_obstacle_status(safety))
+            self.last_obstacle_status = status_signature
+            self.last_status_log_time = now
         assessment = (safe_mode, safe_speed)
         if assessment != self.last_assessment:
             self.get_logger().info(

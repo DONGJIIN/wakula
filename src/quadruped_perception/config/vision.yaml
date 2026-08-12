@@ -6,6 +6,10 @@ vision_obstacle_detector:
     image_topic_candidates: [/camera/image_raw, /camera/color/image_raw, /image_raw]
     debug_mask_topic: /vision/debug_mask
     publish_debug_mask: false
+    # RViz 默认显示带 ROI、单帧候选、多帧确认框和图像质量的调试画面。
+    # 该输出不参与决策；无显示器部署可关闭以减少一次图像复制和编码。
+    annotated_image_topic: /vision/annotated_image
+    publish_annotated_image: true
     processing_hz: 8.0
     resize_width: 640
 

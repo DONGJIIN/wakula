@@ -9,7 +9,8 @@ terrain_safety_assessor:
     max_slope: 0.45
     max_roughness: 0.06
     min_points: 30
-    sensor_timeout: 0.7
+    # 全栈同机实测极端输出间隔约 2.7 s；速度门另以 0.7 s 监控，控制安全响应不受此值放慢。
+    sensor_timeout: 3.0
     # 拒绝延迟/重放帧，以及时间戳明显超前于当前 ROS 时钟的帧。
     future_stamp_tolerance: 0.10
     # vision=true 时带时间戳融合消息是权威输入；vision=false 时 launch 将其关闭，
@@ -25,6 +26,8 @@ terrain_safety_assessor:
     vision_min_confidence: 0.55
     vision_center_margin: 0.20
     vision_speed_scale: 0.35
+    # 正前方类别变化立即打印；未变化时按该周期刷新，避免终端按感知帧率刷屏。
+    status_log_period: 1.0
 
 navigation_speed_gate:
   ros__parameters:

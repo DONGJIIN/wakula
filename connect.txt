@@ -26,7 +26,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 /vision_obstacle_detector（quadruped_perception / vision_obstacle_detector）
   作用：用 OpenCV 提取颜色、轮廓和多帧稳定证据，辅助判断比赛障碍。
   输入：Image，默认优先 /camera/image_raw。
-  输出：/vision/obstacle_stamped、/vision/debug_mask（可选）及调试信息。
+  输出：/vision/obstacle_stamped、/vision/annotated_image（RViz 标注画面）、
+        /vision/debug_mask（可选）及调试信息。
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
 
 /perception_fusion（quadruped_perception / perception_fusion）
@@ -40,8 +41,10 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 /terrain_safety_assessor（quadruped_planning / terrain_safety_assessor）
   作用：把融合障碍结果转换成 WALK、STEP、CLIMB 或 STOP，并给出速度上限。
   输入：优先 /perception/fused_obstacle；关闭视觉时使用 /terrain/features。
-  输出：/terrain/navigation_safety、/terrain/navigation_mode、/terrain/speed_limit。
-  注意：当前只提供导航约束，不发送抬腿、关节或越障动作命令。
+  输出：/terrain/navigation_safety、/terrain/navigation_mode、/terrain/speed_limit、
+        /perception/front_obstacle_name。
+  注意：终端约每秒打印一次正前方障碍名称、置信度、距离和高度；名称来自点云/相机融合
+        结果，不是只看单帧颜色。当前只提供导航约束，不发送抬腿、关节或越障动作命令。
 
 /navigation_speed_gate（quadruped_planning / navigation_speed_gate）
   作用：依据地形限制和导航健康状态缩放 Nav2 速度；数据异常或超时立即输出零速度。

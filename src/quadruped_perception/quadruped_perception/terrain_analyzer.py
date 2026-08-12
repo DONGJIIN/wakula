@@ -62,6 +62,22 @@ DEFAULT_POINT_CLOUD_TOPICS = [
 ]
 
 
+def bounded_point_sample(xyz: np.ndarray, maximum_points: int) -> np.ndarray:
+    """在坐标变换前确定性限制原始点数，避免高分辨率 RGB-D 云耗尽算力。
+
+    640x480 深度相机一帧可包含 30 万点，而地形 ROI 最终只有约 500 个 5 cm 栅格。
+    对完整点云逐点做 TF 既没有增加有效空间分辨率，也会在 Gazebo 与 Nav2 同机运行时
+    造成秒级调度抖动。等间隔索引覆盖整幅有序点云，结果可复现，且不会像截取数组前段
+    那样只保留图像顶部。非正上限表示不采样，便于离线精度对照。
+    """
+    points = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
+    limit = int(maximum_points)
+    if limit <= 0 or len(points) <= limit:
+        return points
+    indices = np.linspace(0, len(points) - 1, limit, dtype=np.int64)
+    return points[indices]
+
+
 def transform_xyz(xyz: np.ndarray, translation, quaternion) -> np.ndarray:
     """只变换 XYZ，同时允许 PointCloud2 携带任意其他字段。
 
@@ -274,6 +290,7 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("target_frame", "base_link")
         self.declare_parameter("processing_hz", 10.0)
         self.declare_parameter("transform_timeout", 0.05)
+        self.declare_parameter("transform_max_points", 120000)
         self.declare_parameter("max_points", 30000)
         self.declare_parameter("nav2_cloud_max_points", 5000)
         self.declare_parameter("nav2_obstacle_min_height_above_ground", 0.05)
@@ -305,6 +322,9 @@ class TerrainAnalyzer(Node):
         self.target_frame = str(self.get_parameter("target_frame").value)
         self.transform_timeout = max(
             0.0, float(self.get_parameter("transform_timeout").value)
+        )
+        self.transform_max_points = int(
+            self.get_parameter("transform_max_points").value
         )
         self.max_points = max(1, int(self.get_parameter("max_points").value))
         self.nav2_cloud_max_points = max(
@@ -551,6 +571,9 @@ class TerrainAnalyzer(Node):
         except (AssertionError, ValueError) as exc:
             self.get_logger().warning(f"Invalid PointCloud2 XYZ layout: {exc}")
             return None
+        # 先降采样再做 TF。后续仍会按 base_link 前向 ROI 和 max_points 二次筛选；这一层
+        # 只负责限制全图变换成本，不假设任何厂商坐标轴或图像宽高。
+        xyz = bounded_point_sample(xyz, self.transform_max_points)
         if not self.target_frame or msg.header.frame_id == self.target_frame:
             return msg.header, np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
         try:

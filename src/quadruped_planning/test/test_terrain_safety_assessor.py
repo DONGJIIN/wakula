@@ -9,16 +9,36 @@ from quadruped_planning.terrain_safety_assessor import (
     apply_geometry_classification,
     apply_visual_assist,
     finite_or_zero,
+    format_front_obstacle_status,
     fused_observation_valid,
     navigation_mode_code,
     nonnegative_finite_or_zero,
     nonnegative_integer_or_zero,
     observation_stamp_is_current,
+    obstacle_name_zh,
     select_fused_assessment,
     select_terrain_assessment,
     validate_height_thresholds,
     visual_evidence_in_path,
 )
+
+
+def test_front_obstacle_names_and_status_are_human_readable():
+    """终端摘要必须直说障碍名称，并在无效数据时避免误报无障碍。"""
+    assert obstacle_name_zh(NavigationSafety.OBSTACLE_STEP) == "台阶"
+    assert obstacle_name_zh(NavigationSafety.OBSTACLE_CLEAR) == "无障碍"
+    assert obstacle_name_zh(NavigationSafety.OBSTACLE_CLEAR, False) == "感知数据无效"
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
+    safety.mode = NavigationSafety.MODE_STOP
+    safety.confidence = 0.8
+    safety.distance = 0.6
+    safety.obstacle_height = 0.3
+    text = format_front_obstacle_status(safety)
+    assert "横杆" in text
+    assert "模式=STOP" in text
+    assert "距离=0.60 m" in text
 
 
 def assess(height=0.0, points=100.0, slope=0.0, roughness=0.0):

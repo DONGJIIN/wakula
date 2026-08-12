@@ -42,6 +42,13 @@ HINT_CODES = {
     "wall": 3.0,
     "colored_obstacle": 4.0,
 }
+HINT_DISPLAY_NAMES = {
+    "none": "NONE",
+    "poles": "POLES",
+    "height_bar": "HEIGHT BAR",
+    "wall": "WALL",
+    "colored_obstacle": "COLORED OBSTACLE",
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,88 @@ class ObstacleEvidence:
             self.width,
             self.height,
         ]
+
+
+def annotate_detection_frame(
+    bgr: np.ndarray,
+    raw_evidence: ObstacleEvidence,
+    stable_evidence: ObstacleEvidence,
+    quality: float,
+    roi_top_ratio: float,
+    roi_bottom_ratio: float,
+    roi_side_margin_ratio: float,
+) -> np.ndarray:
+    """生成供 RViz 调试的标注图，不参与检测或规划决策。
+
+    黄色框表示本帧候选，绿色框表示通过多帧一致性门的最终视觉证据；青色矩形是实际
+    检测 ROI。把候选与确认结果同时显示，能够快速区分“没检测到”和“检测到但尚未
+    连续确认”，避免为了画面好看而降低生产阈值。
+    """
+    annotated = np.asarray(bgr, dtype=np.uint8).copy()
+    if annotated.ndim != 3 or annotated.shape[2] != 3 or annotated.size == 0:
+        return annotated
+    image_height, image_width = annotated.shape[:2]
+    top = int(np.clip(roi_top_ratio, 0.0, 0.95) * image_height)
+    bottom = int(np.clip(roi_bottom_ratio, 0.05, 1.0) * image_height)
+    margin = int(np.clip(roi_side_margin_ratio, 0.0, 0.45) * image_width)
+    if bottom > top and image_width - margin > margin:
+        cv2.rectangle(
+            annotated,
+            (margin, top),
+            (image_width - margin - 1, bottom - 1),
+            (255, 255, 0),
+            1,
+        )
+
+    def draw_evidence(evidence: ObstacleEvidence, color, prefix: str, row: int) -> None:
+        if evidence.hint == "none" or evidence.width <= 0.0 or evidence.height <= 0.0:
+            return
+        left = int((evidence.center_x - evidence.width / 2.0) * image_width)
+        right = int((evidence.center_x + evidence.width / 2.0) * image_width)
+        top_px = int((evidence.center_y - evidence.height / 2.0) * image_height)
+        bottom_px = int((evidence.center_y + evidence.height / 2.0) * image_height)
+        left, right = sorted(
+            (
+                int(np.clip(left, 0, image_width - 1)),
+                int(np.clip(right, 0, image_width - 1)),
+            )
+        )
+        top_px, bottom_px = sorted(
+            (
+                int(np.clip(top_px, 0, image_height - 1)),
+                int(np.clip(bottom_px, 0, image_height - 1)),
+            )
+        )
+        cv2.rectangle(annotated, (left, top_px), (right, bottom_px), color, 2)
+        label = (
+            f"{prefix}: {HINT_DISPLAY_NAMES.get(evidence.hint, 'UNKNOWN')} "
+            f"{evidence.confidence:.2f}"
+        )
+        cv2.putText(
+            annotated,
+            label,
+            (8, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    draw_evidence(raw_evidence, (0, 190, 255), "CANDIDATE", 44)
+    draw_evidence(stable_evidence, (0, 255, 0), "CONFIRMED", 68)
+    stable_name = HINT_DISPLAY_NAMES.get(stable_evidence.hint, "UNKNOWN")
+    cv2.putText(
+        annotated,
+        f"FRONT: {stable_name} | IMAGE QUALITY: {quality:.2f}",
+        (8, 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 255, 0) if stable_evidence.hint != "none" else (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated
 
 
 def contour_boxes(mask: np.ndarray, min_area: float) -> List[ContourBox]:
@@ -594,6 +683,8 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("image_topic_candidates", DEFAULT_IMAGE_TOPICS)
         self.declare_parameter("debug_mask_topic", "/vision/debug_mask")
         self.declare_parameter("publish_debug_mask", False)
+        self.declare_parameter("annotated_image_topic", "/vision/annotated_image")
+        self.declare_parameter("publish_annotated_image", True)
         self.declare_parameter("processing_hz", 8.0)
         self.declare_parameter("resize_width", 640)
         self.declare_parameter("min_area_px", 300.0)
@@ -635,6 +726,9 @@ class VisionObstacleDetector(Node):
             [override_topic] if override_topic else list(dict.fromkeys(candidates))
         )
         self.publish_debug = bool(self.get_parameter("publish_debug_mask").value)
+        self.publish_annotated = bool(
+            self.get_parameter("publish_annotated_image").value
+        )
         self.resize_width = max(0, int(self.get_parameter("resize_width").value))
         self.min_area = max(1.0, float(self.get_parameter("min_area_px").value))
         self.min_area_ratio = float(
@@ -744,6 +838,17 @@ class VisionObstacleDetector(Node):
                 Image, str(self.get_parameter("debug_mask_topic").value), 1
             )
             if self.publish_debug
+            else None
+        )
+        # 标注图仅用于 RViz/录包调试，不回灌检测算法。使用传感器 QoS，避免慢速 GUI
+        # 订阅导致图像队列积压并拖慢 RK3588 上的主感知回调。
+        self.annotated_pub = (
+            self.create_publisher(
+                Image,
+                str(self.get_parameter("annotated_image_topic").value),
+                qos_profile_sensor_data,
+            )
+            if self.publish_annotated
             else None
         )
         self._image_subscriptions = [
@@ -947,6 +1052,20 @@ class VisionObstacleDetector(Node):
         typed.height = float(evidence.height)
         self.typed_evidence_pub.publish(typed)
         self.hint_pub.publish(String(data=evidence.hint))
+
+        if self.annotated_pub is not None:
+            annotated = annotate_detection_frame(
+                bgr,
+                raw_evidence,
+                evidence,
+                quality,
+                self.roi_top_ratio,
+                self.roi_bottom_ratio,
+                self.roi_side_margin_ratio,
+            )
+            annotated_msg = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
+            annotated_msg.header = msg.header
+            self.annotated_pub.publish(annotated_msg)
 
         if self.publish_debug:
             debug_mask = cv2.merge((blue_mask, edge_mask, orange_mask))

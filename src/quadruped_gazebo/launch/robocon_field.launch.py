@@ -75,12 +75,23 @@ def generate_launch_description():
                     "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
                     "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
                     "/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
-                    "/camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
-                ],
-                remappings=[
-                    ("/camera/points", "/camera/depth/points"),
                 ],
                 parameters=[use_sim_time],
+            ),
+            # Gazebo Harmonic 的 RGB-D PointCloudPacked 数值轴是 camera_link 约定
+            # （x 前、y 左、z 上），但相机的 optical_frame_id 会把消息头标成光学坐标系。
+            # 若直接交给算法，点云会被错误地再旋转一次。单独桥接并覆盖 frame_id，保证
+            # 数据数值和 Header 一致；真机标准光学点云不需要也不应使用此仿真修正。
+            Node(
+                package="ros_gz_bridge",
+                executable="parameter_bridge",
+                name="robocon_point_cloud_bridge",
+                output="screen",
+                arguments=[
+                    "/camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
+                ],
+                remappings=[("/camera/points", "/camera/depth/points")],
+                parameters=[use_sim_time, {"override_frame_id": "camera_link"}],
             ),
             # 图像使用 ros_gz_image 可避免 parameter_bridge 的额外图像复制路径。
             Node(

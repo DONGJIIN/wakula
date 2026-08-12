@@ -7,6 +7,8 @@ terrain_analyzer:
     target_frame: base_link
     processing_hz: 10.0
     transform_timeout: 0.05
+    # 先对原始高分辨率点云做全幅等间隔采样，再执行 TF；<=0 可关闭以做离线精度对照。
+    transform_max_points: 120000
     # 节点只处理最新帧；max_points 限制几何计算量，避免高线数雷达拖慢 RK3588。
     max_points: 30000
     # 发布给 Nav2 局部代价地图的 base_link 降采样障碍点数上限。
