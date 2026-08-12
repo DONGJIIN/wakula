@@ -93,7 +93,18 @@ def generate_launch_description():
                     "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
                     "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
                 ],
+                # ROS 侧只接收仲裁后的唯一速度；Gazebo 侧仍保持模型插件默认 /cmd_vel。
+                remappings=[("/cmd_vel", "/cmd_vel_gazebo")],
                 parameters=[use_sim_time],
+            ),
+            # 仿真专用速度仲裁：手动 /cmd_vel_teleop 短时优先，算法继续使用标准
+            # /cmd_vel。节点使用墙钟看门狗，因此明确不启用 use_sim_time。
+            Node(
+                package="quadruped_gazebo",
+                executable="sim_cmd_vel_mux",
+                name="sim_cmd_vel_mux",
+                output="screen",
+                parameters=[{"use_sim_time": False}],
             ),
             # IMU 与 CameraInfo 属于辅助数据；独立桥确保其频率或格式异常不会拖住导航。
             Node(

@@ -122,6 +122,8 @@ Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 
 slam_sim.launch.py 不启动 Gazebo，只把核心 slam.launch.py 固定为 use_sim_time=true、
 robot_model=false，避免漏参造成仿真时钟不一致或重复 TF。真机仍使用 slam.launch.py。
+普通 slam.launch.py 现在也会自动检测运行中的 /clock；首行必须显示
+simulation_detected=true、use_sim_time=true、robot_model=false。
 这会由算法入口启动 RViz、SLAM Toolbox、Nav2、OpenCV 和点云分析。通用机械狗测试替身已经发布默认
 /scan、/odom、odom->base_link、/imu/data、/camera/image_raw、/camera/depth/points，并
 提供 lidar_link、camera_link、camera_optical_frame、imu_link 的 TF，不需要额外 remap。
@@ -152,7 +154,7 @@ T 字形台阶、限高杆、直角绕杆区、砂砾与碎木坑或高墙。仅
 证据不足以区分结构时会明确显示“待确认”。
 
 RViz 地图：白色=已观测自由区，黑色=障碍，灰色=未知区。默认隐藏 TF、网格和实时
-LaserScan；顶视图默认跟随 base_link，地图仍固定在 map 坐标，并以 0.5 s 周期发布。
+LaserScan；顶视图默认跟随 base_link，地图仍固定在 map 坐标，并以 0.25 s 周期发布。
 排查时再手动勾选。开放场地初始的白色射线边缘属于探索范围；低速覆盖通道，
 每到转角停留并旋转一周，再通过闭环后的黑色墙线重合程度判断 SLAM。地图整体旋转不影响
 导航。若出现从机器人向外发散的黑墙，先检查二维雷达是否水平以及 lidar_link TF。
@@ -164,7 +166,12 @@ Nav2 只会在雷达角度/样本/frame、里程计时间/frame/协方差和定�
 rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动侧重复裁成绝对 z>0。
 键盘移动测试：
 
-  ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=/cmd_vel
+  cd ~/wakula
+  ./scripts/keyboard_teleop.sh
+
+保持键盘终端获得焦点，i/k 前后、j/l 原地旋转。不要再把键盘直接 remap 到 /cmd_vel：
+算法的 Collision Monitor 也会发布该标准话题，二者会互相覆盖。Gazebo 专用 mux 将
+/cmd_vel_teleop 作为短时高优先级输入，统一输出 /cmd_vel_gazebo；真机接口不受影响。
 
 若日志持续出现 Detected jump back in time，先运行 `ros2 topic info /clock --verbose`；通常
 是重复启动了两个 Gazebo。每次只能保留一个 robocon_field.launch.py，停止旧实例后重启

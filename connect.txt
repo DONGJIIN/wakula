@@ -78,10 +78,10 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 2.4 Nav2 节点组
 
 /planner_server
-  作用：根据地图和目标点生成全局路径。
+  作用：运行 NavFnPlanner，根据 SLAM 地图和全局代价地图生成全局路径。
 
 /controller_server
-  作用：跟踪全局路径并产生局部速度指令 /cmd_vel_nav。
+  作用：运行 DWBLocalPlanner，结合局部代价地图跟踪全局路径并产生 /cmd_vel_nav。
 
 /smoother_server
   作用：平滑路径，减少折线和不必要转向。
@@ -137,7 +137,12 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
   作用：独立发布 /clock，避免其他传感器转换阻塞所有 use_sim_time 节点。
 
 /robocon_navigation_bridge（ros_gz_bridge / parameter_bridge）
-  作用：桥接关键 /scan、/odom、/tf，并把 /cmd_vel 送回 Gazebo；不承载大点云。
+  作用：桥接关键 /scan、/odom、/tf，并把唯一的 /cmd_vel_gazebo 送到 Gazebo 模型的
+        /cmd_vel；不承载大点云。
+
+/sim_cmd_vel_mux（quadruped_gazebo）
+  作用：仅在仿真中仲裁算法 /cmd_vel 与高优先级键盘 /cmd_vel_teleop，输出
+        /cmd_vel_gazebo；两路断流时自动停车，避免 j/l 被 Collision Monitor 零速度覆盖。
 
 /robocon_aux_sensor_bridge（ros_gz_bridge / parameter_bridge）
   作用：桥接 /imu/data 和 /camera/camera_info；辅助数据异常不影响导航桥。
@@ -157,6 +162,7 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
 同一 ROS 域不得重复启动 robocon_field.launch.py；必须保证 /clock 只有一个发布者。
 仿真算法请在另一终端执行 `ros2 launch slam slam_sim.launch.py`。该入口不新增节点，也不
 启动 Gazebo，只固定 use_sim_time=true、robot_model=false，确保传感器时间和 TF 所有权一致。
+普通 slam.launch.py 也会自动探测 /clock，启动首行应显示 simulation_detected=true。
 若 /scan、/odom 或 /camera/depth/points 任一路停止，地图/障碍结果会保持最后一帧或进入
 “感知数据无效”；先用 `ros2 topic hz <话题>` 区分数据源断流与算法识别失败。
 TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输出，避免诊断管道关闭被
@@ -172,6 +178,10 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   类型：nav_msgs/msg/Odometry
   配套 TF：odom -> base_link
   用途：Nav2 控制与健康监控。当前仓库不生成真实 odom；独立 Gazebo 测试载体只生成仿真 odom。
+
+/cmd_vel、/cmd_vel_teleop、/cmd_vel_gazebo
+  类型：geometry_msgs/msg/Twist
+  用途：/cmd_vel 是算法/未来真机标准输出；后两者只属于 Gazebo 手动联调仲裁，不是真机接口。
 
 /joy
   类型：sensor_msgs/msg/Joy

@@ -4,8 +4,11 @@
 正式坐标公布后允许修改，不应因此修改 SLAM、Nav2 或 OpenCV 源码。
 """
 
+import importlib.util
 from pathlib import Path
 import xml.etree.ElementTree as ET
+
+from geometry_msgs.msg import Twist
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -188,6 +191,37 @@ def test_sensor_carrier_matches_slam_and_perception_contracts():
     assert odometry.findtext("odom_frame") == "odom"
     assert odometry.findtext("robot_base_frame") == "base_link"
     assert odometry.findtext("dimensions") == "2"
+
+
+def test_simulation_velocity_mux_prioritizes_keyboard_and_stops_stale_input():
+    """键盘命令必须覆盖算法零速度，两个来源都断流时必须回到零 Twist。"""
+    path = PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
+    spec = importlib.util.spec_from_file_location("sim_cmd_vel_mux", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    autonomous = Twist()
+    autonomous.linear.x = 0.3
+    manual = Twist()
+    manual.angular.z = 0.6
+    selected = module.select_command(10.0, manual, 9.8, autonomous, 9.9, 0.7, 0.5)
+    assert selected.angular.z == 0.6
+    selected = module.select_command(10.6, manual, 9.8, autonomous, 10.4, 0.7, 0.5)
+    assert selected.linear.x == 0.3
+    selected = module.select_command(12.0, manual, 9.8, autonomous, 10.4, 0.7, 0.5)
+    assert selected.linear.x == 0.0 and selected.angular.z == 0.0
+
+
+def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
+    """Gazebo bridge 只能接收 mux 输出，避免键盘和 Collision Monitor 相互覆盖。"""
+    launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'executable="sim_cmd_vel_mux"' in launch_source
+    assert '("/cmd_vel", "/cmd_vel_gazebo")' in launch_source
+    assert "/cmd_vel_teleop" in (
+        PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
+    ).read_text(encoding="utf-8")
 
 
 def test_generic_rgbd_resolution_is_bounded_for_realtime_integration():

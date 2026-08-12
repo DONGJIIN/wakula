@@ -180,6 +180,11 @@ wakula/
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
 
+导航采用 Nav2 标准的“全局规划器 + 局部规划器”两层框架：`NavFnPlanner` 在 SLAM 地图和
+全局代价地图上生成整段路径，`DWBLocalPlanner` 在局部代价地图上结合实时 `/scan` 与
+去地面点云跟踪路径、避开新障碍。OpenCV/点云为规划层补充类别、地形与安全约束，不替代
+这两个规划器。
+
 ```text
 2D 雷达 /scan ──> SLAM Toolbox ──> /map + map→odom
        │                                  │
@@ -408,9 +413,9 @@ ros2 launch slam slam.launch.py
 | `slam_enabled`、`nav2_enabled` | `true` | 分别启停 SLAM Toolbox 和 Nav2 |
 | `nav2_autostart` | `true` | 数据与 TF 就绪后是否自动激活 Nav2 |
 | `vision` | `true` | 是否启动 OpenCV 障碍识别 |
-| `robot_model` | `true` | 是否启动未标定的占位 URDF 与固定传感器 TF |
+| `robot_model` | `auto` | 自动在 Gazebo 关闭占位 TF、真机开启；也可显式覆盖 |
 | `rviz` | `true` | 是否启动 RViz |
-| `use_sim_time` | `false` | rosbag 回放时使用 `/clock`；Gazebo 请直接用 `slam_sim.launch.py` |
+| `use_sim_time` | `auto` | 自动检测 `/clock`；也可显式设为 `true/false` |
 | `*_params_file` | 项目默认 YAML | 覆盖 SLAM、Nav2、视觉、地形和决策参数文件 |
 
 查看全部参数：
@@ -514,6 +519,8 @@ ros2 launch slam slam_sim.launch.py
 `slam_sim.launch.py` 也不会启动 Gazebo；它只包装核心 `slam.launch.py`，强制
 `use_sim_time=true`、`robot_model=false`，防止漏写参数后出现传感器时间基准不一致或测试狗
 TF 与占位 URDF 重复。真机仍使用 `slam.launch.py`，两套入口共享同一套算法和参数。
+即使误用普通 `slam.launch.py`，当前入口也会直接探测实时 `/clock` 发布者，并在启动首行
+打印 `simulation_detected=true, use_sim_time=true, robot_model=false`，不再静默使用错误时间。
 
 仿真载体现为 `models/generic_quadruped/model.sdf` 中的蓝色通用机械狗外形，只用于验证
 `/scan`、`/odom`、`/imu/data`、`/cmd_vel`、RGB 图像和深度点云链路。它的腿是固定外观，
@@ -564,6 +571,18 @@ LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色�
 放射假墙；地图以 0.25 s（4 Hz）周期发布，扫描匹配最多约 10 Hz，移动 8 cm 或旋转
 0.08 rad 即可加入新关键帧，改善倒退和原地旋转时的跟随。RViz 顶视图跟随 `base_link`，但全局固定坐标仍是
 `map`。地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
+
+算法运行时不要让键盘和 Collision Monitor 同时直接发布 `/cmd_vel`。Gazebo 场地 launch
+现内置仿真专用速度仲裁器：算法保持标准 `/cmd_vel`，键盘走高优先级
+`/cmd_vel_teleop`，唯一输出 `/cmd_vel_gazebo` 再送入模型。启动键盘请另开终端运行：
+
+```bash
+cd ~/wakula
+./scripts/keyboard_teleop.sh
+```
+
+继续使用 `i/j/k/l`；`j`、`l` 为原地左右旋转。该仲裁只属于 Gazebo，不改变未来真机的
+`/cmd_vel` 合同，也不会被加入算法 launch。
 
 联合测试时不要关闭“终端 1”或 Gazebo 窗口：Gazebo 服务端退出后，窗口和 RViz 仍可能
 保留最后一帧，但 `/scan`、`/odom`、点云已经全部停止，此时“感知数据无效”是安全降级。

@@ -4,6 +4,9 @@
 Nav2 是否真正激活则由 readiness monitor 根据 /scan、/odom 和 TF 决定。
 """
 
+import re
+import subprocess
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -26,8 +29,55 @@ def package_file(package: str, folder: str, filename: str):
     return PathJoinSubstitution([FindPackageShare(package), folder, filename])
 
 
+def _robocon_simulation_is_running() -> bool:
+    """直接查询当前 ROS 域的 /clock 发布者，避免使用可能残留缓存的 ros2 daemon。
+
+    这里只在入口参数为 ``auto`` 时执行一次，最长等待 1.5 秒。真机没有 /clock 发布者，
+    解析失败或命令超时也一律保守回退到系统时间；显式传入 true/false 时完全跳过探测。
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ros2",
+                "topic",
+                "info",
+                "/clock",
+                "--no-daemon",
+                "--spin-time",
+                "1.0",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    match = re.search(r"Publisher count:\s*(\d+)", result.stdout)
+    return bool(match and int(match.group(1)) > 0)
+
+
+def _resolve_runtime_mode(context) -> bool:
+    """把 auto 时间/模型参数解析成 ROS 节点可接受的 true/false 字符串。"""
+    requested_time = LaunchConfiguration("use_sim_time").perform(context).lower()
+    requested_model = LaunchConfiguration("robot_model").perform(context).lower()
+    valid = {"auto", "true", "false"}
+    if requested_time not in valid or requested_model not in valid:
+        raise RuntimeError("use_sim_time and robot_model must be auto, true or false")
+
+    detected = False
+    if "auto" in (requested_time, requested_model):
+        detected = _robocon_simulation_is_running()
+    if requested_time == "auto":
+        context.launch_configurations["use_sim_time"] = "true" if detected else "false"
+    if requested_model == "auto":
+        context.launch_configurations["robot_model"] = "false" if detected else "true"
+    return detected
+
+
 def _launch_complete_stack(context):
     """解析传感器 profile 后创建硬件无关的完整导航栈。"""
+    simulation_detected = _resolve_runtime_mode(context)
     # OpaqueFunction 让我们在运行期取得字符串值，再执行 YAML profile 校验与覆盖合并。
     profile_name = LaunchConfiguration("sensor_profile").perform(context)
     profiles_file = LaunchConfiguration("sensor_profiles_file").perform(context)
@@ -95,6 +145,7 @@ def _launch_complete_stack(context):
     # launch 临时参数文件即可立即发现 use_sim_time=false / robot_model=true。
     summary = (
         f"Wakula profile={profile_name}, "
+        f"simulation_detected={str(simulation_detected).lower()}, "
         f"use_sim_time={LaunchConfiguration('use_sim_time').perform(context)}, "
         f"robot_model={LaunchConfiguration('robot_model').perform(context)}: "
         f"scan={topics['scan_topic']}, "
@@ -148,7 +199,9 @@ def generate_launch_description():
                 description="非空时固定 PointCloud2 输入；空值自动选源",
             ),
             DeclareLaunchArgument(
-                "use_sim_time", default_value="false", description="使用 /clock；rosbag 回放时设为 true"
+                "use_sim_time",
+                default_value="auto",
+                description="auto 自动检测 /clock；也可显式设为 true/false",
             ),
             DeclareLaunchArgument(
                 "slam_enabled", default_value="true", description="是否启动在线 SLAM Toolbox"
@@ -165,7 +218,9 @@ def generate_launch_description():
                 "vision", default_value="true", description="是否启动 OpenCV 与相机/点云融合节点"
             ),
             DeclareLaunchArgument(
-                "robot_model", default_value="true", description="是否发布仓库内占位 URDF/TF"
+                "robot_model",
+                default_value="auto",
+                description="auto 在本项目 Gazebo 中关闭占位 TF，真机默认开启",
             ),
             DeclareLaunchArgument(
                 "rviz", default_value="true", description="是否启动 RViz；无显示器部署应关闭"

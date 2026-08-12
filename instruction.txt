@@ -73,6 +73,10 @@ Twist 适配和离线评估。
    0.32 m 的 STEP 显示 T 字形台阶。算法不读取 Gazebo 坐标，局部证据不足以区分木桥 A/B
    时会明确写“待结构确认”。视觉通用有色候选仍显示给操作员，但不覆盖已经确认的点云
    名称，也不伪装成参与限速的几何证据。3 秒
+
+   Nav2 仍采用标准双层规划：planner_server 的 NavFnPlanner 使用 SLAM 地图生成全局路径；
+   controller_server 的 DWBLocalPlanner 使用实时局部代价地图跟踪路径和绕开临时障碍。
+   /scan 同时进入全局/局部代价地图，去地面后的点云只补充 local_costmap。
    状态超时用于容纳全栈同机运行时实测约 2.7 秒的极端帧抖动；速度门仍以 0.7 秒独立
    检查评估心跳，因此不会延后控制链停车，真正断流后决策状态也会 fail-closed STOP。
 
@@ -130,8 +134,13 @@ Twist 适配和离线评估。
      ros2 launch slam slam_sim.launch.py
    slam_sim.launch.py 仅包装核心算法，固定 use_sim_time=true、robot_model=false，并不
    include Gazebo；因此场地和算法仍可独立启停，真机入口不受影响。
+   普通 slam.launch.py 的 use_sim_time 和 robot_model 默认值也已改为 auto：入口直接查询
+   当前 ROS 域的 /clock，不使用 ros2 daemon 缓存；检测到场地后自动得到 true/false。
    Gazebo 服务端被 Ctrl-C 或关闭窗口后，RViz 可能继续显示最后一张地图；此时 /scan、
    /odom、点云已停止，“感知数据无效”是正确的安全降级。先用 ros2 topic hz 分别检查三路。
+   仿真键盘不要直接占用 /cmd_vel。运行 scripts/keyboard_teleop.sh 后，i/j/k/l 发布到
+   /cmd_vel_teleop；sim_cmd_vel_mux 令新鲜手动命令优先于算法 /cmd_vel，并将唯一结果写入
+   /cmd_vel_gazebo。手动与算法都超时后输出零速度，避免遗留运动指令。
    Ubuntu 可能延迟弹出旧的 RViz 崩溃报告；以报告 Date 和最新 launch.log 为准。最新日志若为
    “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。
    TF 诊断统一使用 scripts/diagnose.sh。tf2_echo 是持续输出程序，不要直接接 head 等会
