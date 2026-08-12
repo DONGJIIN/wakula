@@ -111,6 +111,8 @@ Twist 适配和离线评估。
    同一 ROS_DOMAIN_ID 内只能运行一个场地 launch；两个 /clock 会触发 TF 时间回跳并使
    SLAM 丢弃扫描。算法联合命令为：
      ros2 launch slam slam.launch.py use_sim_time:=true robot_model:=false
+   Ubuntu 可能延迟弹出旧的 RViz 崩溃报告；以报告 Date 和最新 launch.log 为准。最新日志若为
+   “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。
    TF 诊断统一使用 scripts/diagnose.sh。tf2_echo 是持续输出程序，不要直接接 head 等会
    提前关闭读取管道的命令；否则 ros2run 可能产生与算法无关的 BrokenPipeError 弹窗。
 

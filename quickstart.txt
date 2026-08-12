@@ -153,6 +153,8 @@ rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动�
 是重复启动了两个 Gazebo。每次只能保留一个 robocon_field.launch.py，停止旧实例后重启
 Gazebo 和算法。当前 launch 已隔离 Snap VS Code 的 GTK_PATH，`libpthread/GLIBC_PRIVATE`
 不应再出现；若使用自定义 launch，仍需清除该变量或改用 Ubuntu 系统终端。
+Ubuntu 崩溃窗口可能延迟显示旧报告；核对窗口中的 Date 和最新 ~/.ros/log。最新日志若显示
+“rviz2 process has finished cleanly”，可关闭旧弹窗，不要误判为当前算法崩溃。
 检查 TF 优先运行 `./scripts/diagnose.sh`。不要使用 `tf2_echo ... | head`：tf2_echo 会持续
 输出，head 提前关闭管道时 ROS 2 Jazzy 可能弹出 BrokenPipeError；这不是 SLAM/Nav2 崩溃。
 若曾看到 collision_monitor 在 get_subscription_count() 处 SIGSEGV，请重新编译并通过

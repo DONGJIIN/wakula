@@ -551,6 +551,8 @@ LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色�
 从 Snap 版 VS Code 集成终端启动时，本项目的 Gazebo/RViz launch 会清理其注入的
 `GTK_PATH=/snap/code/...`，避免加载 core20 `libpthread` 后出现 `GLIBC_PRIVATE` 错误；终端中
 偶尔出现 `canberra-gtk-module` 提示只影响提示音模块，不影响仿真或算法。
+Ubuntu 的崩溃报告窗口可能延迟显示上一次关闭留下的报告；先核对窗口内 `Date` 与最新
+`~/.ros/log`。若最新日志写明 `rviz2 process has finished cleanly`，它不是当前算法故障。
 诊断 TF 请运行 `./scripts/diagnose.sh`；不要将持续输出的 `tf2_echo` 直接连接到 `head`，
 否则读取端提前关闭可能让 ROS 2 Jazzy 报 `BrokenPipeError`，但这不代表算法节点崩溃。
 

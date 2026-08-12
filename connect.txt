@@ -122,6 +122,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 /rviz2
   作用：显示地图、点云、路径和障碍结果，不参与算法决策。
   注意：默认隐藏 TF/网格以保持地图清晰；白=自由、黑=占用、灰=未知，TF 可按需手动开启。
+  退出诊断：Ubuntu 可能延迟显示旧崩溃报告；以报告 Date 和最新 launch.log 中 rviz2 的
+  实际退出状态为准，`process has finished cleanly` 表示当前通信与算法未受影响。
 
 perception_bag_evaluator（离线工具，不随一键启动运行）
   作用：读取 rosbag 和人工标签，统计识别准确率、召回率及连续量误差。
