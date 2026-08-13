@@ -108,6 +108,12 @@ sim_traverse_obstacle（不包含任何算法）：
 
 再另开终端启动 slam.launch.py，最后执行 ./auto。
 
+仿真中 slam.launch.py 的启动摘要必须包含：
+  simulation_detected=true, use_sim_time=true, robot_model=false
+入口会重试检测 /clock。若现场仍未显示上述值，停止该算法进程并显式运行：
+  ros2 launch slam slam_sim.launch.py
+然后再执行 ./auto；仿真传感器时间与算法系统时间不一致时，安全门会正确输出零速。
+
 无相机：
 
   ros2 launch slam slam.launch.py vision:=false

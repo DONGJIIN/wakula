@@ -467,7 +467,7 @@ ros2 launch slam slam.launch.py
 | `autonomy_autostart` | `false` | 是否启动即执行；安全起见保持默认关闭 |
 | `robot_model` | `auto` | 自动在 Gazebo 关闭占位 TF、真机开启；也可显式覆盖 |
 | `rviz` | `true` | 是否启动 RViz |
-| `use_sim_time` | `auto` | 自动检测 `/clock`；也可显式设为 `true/false` |
+| `use_sim_time` | `auto` | 重试检测 `/clock`；也可显式设为 `true/false` |
 | `*_params_file` | 项目默认 YAML | 覆盖 SLAM、Nav2、视觉、地形和决策参数文件 |
 
 查看全部参数：
@@ -570,6 +570,11 @@ ros2 launch quadruped_gazebo autonomous_field_test.launch.py
 然后在另一个终端运行 `ros2 launch slam slam.launch.py`，最后用 `./auto` 或空格键开启。
 Gazebo 入口只启动独立场地和 `sim_traverse_obstacle`，不加载 SLAM、Nav2、OpenCV 或
 `autonomous_mission`。测试适配器不是四足动力学或真实越障控制，也不会被算法入口隐式加载。
+
+启动 `slam.launch.py` 后先看终端摘要。仿真联调必须显示
+`simulation_detected=true, use_sim_time=true, robot_model=false`；入口会对 `/clock` 做多次
+DDS 发现重试，避免 Gazebo 已运行却因首次查询漏报而错误使用系统时间。若摘要不是这三个值，
+不要开启自动任务，可直接使用等价的显式仿真入口 `ros2 launch slam slam_sim.launch.py`。
 
 ### 6.2 比赛障碍参考场地（独立启动，不属于 slam.launch.py）
 

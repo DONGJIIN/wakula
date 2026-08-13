@@ -171,8 +171,10 @@ Action 成功也不能声称真机已经具备越障能力。
      ros2 launch slam slam_sim.launch.py
    slam_sim.launch.py 仅包装核心算法，固定 use_sim_time=true、robot_model=false，并不
    include Gazebo；因此场地和算法仍可独立启停，真机入口不受影响。
-   普通 slam.launch.py 的 use_sim_time 和 robot_model 默认值也已改为 auto：入口直接查询
-   当前 ROS 域的 /clock，不使用 ros2 daemon 缓存；检测到场地后自动得到 true/false。
+   普通 slam.launch.py 的 use_sim_time 和 robot_model 默认为 auto：入口不使用 ros2 daemon
+   缓存，并多次查询当前 ROS 域的 /clock，避免 DDS 首次发现漏报后把 Gazebo 误判成真机。
+   仿真摘要必须是 simulation_detected=true/use_sim_time=true/robot_model=false；否则使用
+   slam_sim.launch.py 显式锁定仿真时钟，不能在系统时间下消费 Gazebo 传感器时间戳。
    Gazebo 服务端被 Ctrl-C 或关闭窗口后，RViz 可能继续显示最后一张地图；此时 /scan、
    /odom、点云已停止，“感知数据无效”是正确的安全降级。先用 ros2 topic hz 分别检查三路。
    仿真键盘不要直接占用 /cmd_vel。运行 scripts/keyboard_teleop.sh 后，i/j/k/l 发布到

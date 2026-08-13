@@ -315,6 +315,34 @@ def test_core_entry_auto_detects_clock_without_ros2_daemon_cache(monkeypatch):
     assert '"robot_model",\n                default_value="auto"' in source
 
 
+def test_core_entry_retries_transient_clock_discovery_failure(monkeypatch):
+    """首次 DDS 查询漏报 publisher 时不能立即把 Gazebo 当成真机。"""
+    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
+    spec = importlib.util.spec_from_file_location("slam_launch_retry", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Result:
+        def __init__(self, publishers):
+            self.stdout = (
+                "Type: rosgraph_msgs/msg/Clock\n"
+                f"Publisher count: {publishers}\n"
+            )
+
+    results = iter([Result(0), Result(0), Result(1)])
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return next(results)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    assert module._robocon_simulation_is_running()
+    assert len(calls) == 3
+    assert all("--no-daemon" in command for command, _kwargs in calls)
+
+
 def test_simulation_entry_locks_clock_and_tf_ownership():
     """仿真快捷入口必须固定仿真时钟并禁止算法占位 TF，避免看似断流的错配。"""
     path = PACKAGE_ROOT / "launch" / "slam_sim.launch.py"

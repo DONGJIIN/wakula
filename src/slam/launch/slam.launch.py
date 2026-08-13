@@ -6,6 +6,7 @@ Nav2 是否真正激活则由 readiness monitor 根据 /scan、/odom 和 TF 决�
 
 import re
 import subprocess
+import time
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -31,31 +32,39 @@ def package_file(package: str, folder: str, filename: str):
 
 
 def _robocon_simulation_is_running() -> bool:
-    """直接查询当前 ROS 域的 /clock 发布者，避免使用可能残留缓存的 ros2 daemon。
+    """重复查询当前 ROS 域的 /clock 发布者，避免 DDS 冷启动时漏判 Gazebo。
 
-    这里只在入口参数为 ``auto`` 时执行一次，最长等待 1.5 秒。真机没有 /clock 发布者，
-    解析失败或命令超时也一律保守回退到系统时间；显式传入 true/false 时完全跳过探测。
+    ROS 2 CLI 每次使用 ``--no-daemon`` 都会创建临时 DDS participant。Gazebo 刚启动或同机
+    负载较高时，1 秒内可能尚未发现桥接器；单次查询会把仿真误判为真机，造成传感器时间戳
+    与算法时钟完全不一致。这里最多重试 4 次，只要任一次看到真实发布者就选择仿真时间。
+    显式传入 true/false 时完全跳过探测。
     """
-    try:
-        result = subprocess.run(
-            [
-                "ros2",
-                "topic",
-                "info",
-                "/clock",
-                "--no-daemon",
-                "--spin-time",
-                "1.0",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    match = re.search(r"Publisher count:\s*(\d+)", result.stdout)
-    return bool(match and int(match.group(1)) > 0)
+    for attempt in range(4):
+        try:
+            result = subprocess.run(
+                [
+                    "ros2",
+                    "topic",
+                    "info",
+                    "/clock",
+                    "--no-daemon",
+                    "--spin-time",
+                    "2.0",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.8,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None:
+            match = re.search(r"Publisher count:\s*(\d+)", result.stdout)
+            if match and int(match.group(1)) > 0:
+                return True
+        if attempt < 3:
+            time.sleep(0.15)
+    return False
 
 
 def _resolve_runtime_mode(context) -> bool:
