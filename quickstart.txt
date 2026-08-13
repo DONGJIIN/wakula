@@ -85,8 +85,8 @@ SLAM 产生 map -> odom。启用地形感知还需：
   ros2 launch slam autonomous_navigation.launch.py
 
 第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo；现实传感器和 Gazebo 传感器接口
-一致。在第三个终端按 Ctrl-C，会先锁住所有自主速度并立即停车，再取消 Action；第一、二条
-进程继续运行。只启动前两条时系统不会自主运动。
+一致。在第三个终端按 Ctrl-C，会先锁住自动导航速度并停车，再取消 Action；第一、二条
+进程继续运行。键盘或手柄持续发布时仍可人工接管，不需要重新启动第三条。
 
 该功能要求运动组提供 /traverse_obstacle Action 服务端。仿真时先独立启动场地和
 sim_traverse_obstacle（不包含任何算法）：

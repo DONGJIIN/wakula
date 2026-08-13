@@ -146,7 +146,7 @@ class NavigationSpeedGate(Node):
         self.last_health_time = self.get_clock().now()
 
     def autonomy_stop_callback(self, msg: Bool) -> None:
-        """接收独立自主进程的锁止状态；true 后持续停车直到下一次启动发 false。"""
+        """锁止核心速度链；最终底盘仲裁器还必须用同一信号覆盖手动输入。"""
         self.external_stop = bool(msg.data)
 
     def publish_safe_command(self) -> None:

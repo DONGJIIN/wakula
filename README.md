@@ -539,9 +539,10 @@ SLAM、Nav2、OpenCV、点云和 RViz，且默认没有自主任务；第三条�
 真机联调时用真实驱动替换第一条，后两条保持不变。
 
 启动该 launch 就立即执行，回到该终端按 `Ctrl-C` 就停止并取消任务；核心 SLAM、Nav2、
-OpenCV、RViz 和地图继续运行。退出时先通过 `/navigation/autonomy_stop` 锁住速度输出，再
-取消 Nav2/越障 Action，因此机械狗立即停车。它不 include `slam.launch.py`，也不读取
-Gazebo world。真机底盘适配器必须遵守该布尔停车接口，与 `/cmd_vel` 一起作为对接合同。
+OpenCV、RViz 和地图继续运行。退出时先通过 `/navigation/autonomy_stop` 锁住自动导航速度，
+再取消 Nav2/越障 Action；没有人工输入时机械狗立即停车，键盘或手柄持续发布时仍可人工
+接管。它不 include `slam.launch.py`，也不读取 Gazebo world。真机最终速度仲裁器必须遵守
+同一优先级：有效人工输入 > 自动导航锁 > 自动导航输入 > 零速度。
 
 运行逻辑为：选择未知地图前沿 → Nav2 探索 → 连续确认障碍 → 冻结障碍位置并导航至入口 →
 调用 `/traverse_obstacle` → 成功后登记该障碍并继续下一前沿。前沿目标来自 `/map`，代码不读
@@ -662,8 +663,9 @@ LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色�
 `map`。地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
 
 算法运行时不要让键盘和 Collision Monitor 同时直接发布 `/cmd_vel`。Gazebo 场地 launch
-现内置仿真专用速度仲裁器：算法保持标准 `/cmd_vel`，键盘走高优先级
-`/cmd_vel_teleop`，唯一输出 `/cmd_vel_gazebo` 再送入模型。启动键盘请另开终端运行：
+现内置仿真专用速度仲裁器：算法保持标准 `/cmd_vel`，键盘走 `/cmd_vel_teleop`，Xbox 走
+`/cmd_vel_joy`；有效人工输入拥有最高优先级，唯一输出 `/cmd_vel_gazebo` 再送入模型。
+自主任务退出只锁自动导航分支，键盘和手柄仍能人工接管。启动键盘请另开终端运行：
 
 ```bash
 cd ~/wakula

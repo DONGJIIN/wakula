@@ -63,7 +63,7 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     assert "autonomous_mission" not in launch
     mux = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(encoding="utf-8")
     assert '"/navigation/autonomy_stop"' in mux
-    assert "if emergency_stop:" in mux
+    assert "if autonomy_stop:" in mux
 
 
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
@@ -207,8 +207,8 @@ def test_sensor_carrier_matches_slam_and_perception_contracts():
     assert odometry.findtext("dimensions") == "2"
 
 
-def test_simulation_velocity_mux_prioritizes_keyboard_and_stops_stale_input():
-    """键盘命令必须覆盖算法零速度，两个来源都断流时必须回到零 Twist。"""
+def test_simulation_velocity_mux_autonomy_stop_keeps_manual_takeover():
+    """自主进程退出只锁自主分支，持续键盘/手柄输入仍能人工接管。"""
     path = PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
     spec = importlib.util.spec_from_file_location("sim_cmd_vel_mux", path)
     module = importlib.util.module_from_spec(spec)
@@ -220,6 +220,14 @@ def test_simulation_velocity_mux_prioritizes_keyboard_and_stops_stale_input():
     manual.angular.z = 0.6
     selected = module.select_command(10.0, manual, 9.8, autonomous, 9.9, 0.7, 0.5)
     assert selected.angular.z == 0.6
+    selected = module.select_command(
+        10.0, manual, 9.8, autonomous, 9.9, 0.7, 0.5, autonomy_stop=True
+    )
+    assert selected.angular.z == 0.6
+    selected = module.select_command(
+        11.0, manual, 9.8, autonomous, 10.9, 0.7, 0.5, autonomy_stop=True
+    )
+    assert selected.linear.x == 0.0 and selected.angular.z == 0.0
     selected = module.select_command(10.6, manual, 9.8, autonomous, 10.4, 0.7, 0.5)
     assert selected.linear.x == 0.3
     selected = module.select_command(12.0, manual, 9.8, autonomous, 10.4, 0.7, 0.5)
@@ -236,6 +244,17 @@ def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     assert "/cmd_vel_teleop" in (
         PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
     ).read_text(encoding="utf-8")
+    assert "/cmd_vel_joy" in (
+        PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
+    ).read_text(encoding="utf-8")
+    assert "/teleop/active" in (
+        PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
+    ).read_text(encoding="utf-8")
+    mux_source = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(
+        encoding="utf-8"
+    )
+    assert "self.autonomous_stamp = None" in mux_source
+    assert "self.publisher.publish(Twist())" in mux_source
 
 
 def test_generic_rgbd_resolution_is_bounded_for_realtime_integration():
