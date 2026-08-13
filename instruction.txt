@@ -32,7 +32,9 @@ Action 成功也不能声称真机已经具备越障能力。
    autonomy_autostart=false，启动后保持 IDLE，不会自行运动。autonomous_navigation.launch.py
    仅为旧命令兼容转发，不重复创建节点。
    根目录 auto：纯控制入口，只原子调用 /autonomy/toggle；不会启动 Gazebo、SLAM 或后台
-   服务。autonomy_keyboard.py 提供空格/t 切换、q 退出的终端单键入口。
+   服务。autonomy_keyboard.py 提供空格/t 切换、q 退出的终端单键入口，并在服务响应后
+   继续监听 /autonomy/state；只有 EXPLORING、ALIGNING_OBSTACLE 等执行态才代表机器人已开始
+   自主任务，WAITING_FOR_INPUTS 仅代表开关已打开但输入尚未就绪。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、

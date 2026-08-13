@@ -553,6 +553,12 @@ ros2 run slam autonomy_keyboard
 # 空格或 t：开启/停止；q：只退出键盘工具
 ```
 
+请先点击该终端使其获得键盘焦点，再按空格或 `t`。工具会继续显示真实任务状态：
+`EXPLORING`/`ALIGNING_OBSTACLE` 表示已经执行；若仍为 `WAITING_FOR_INPUTS`，说明开关请求
+虽已接受但地图、Nav2 或传感器尚未就绪，不应把它当作“已经自动导航”。Gazebo 启动终端
+必须先出现 `Created entity` 和 `Spawning Gazebo test quadruped: name=generic_quadruped`。
+若只有场地没有狗，应关闭残留 Gazebo 后重新启动完整 launch，不要单独保留 `gz sim server`。
+
 VS Code 的“终端 → 运行任务”中选择 `ROS: 一键开启或停止自动导航`，效果与 `./auto`
 相同。调试时仍可用 `./scripts/autonomy.sh start|stop|status|toggle`。
 

@@ -331,7 +331,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /autonomy/toggle，std_srvs/srv/Trigger
   由节点按内部真实使能状态原子切换，不需要客户端猜测当前状态。根目录 ./auto 和
-  ros2 run slam autonomy_keyboard 均调用此服务；前者重复执行切换，后者使用空格/t 切换。
+  ros2 run slam autonomy_keyboard 均调用此服务；前者重复执行切换，后者在终端获得焦点后
+  使用空格/t 切换，并订阅 /autonomy/state 显示任务是否真正进入探索或仍在等待输入。
 
 六、设备替换合同
 ------------

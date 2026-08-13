@@ -11,10 +11,12 @@ import select
 import sys
 import termios
 import tty
+import time
 
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
+from std_msgs.msg import String
 
 
 class AutonomyKeyboard(Node):
@@ -23,6 +25,12 @@ class AutonomyKeyboard(Node):
     def __init__(self):
         super().__init__("autonomy_keyboard")
         self.client = self.create_client(Trigger, "/autonomy/toggle")
+        self.latest_state = "UNKNOWN"
+        self.create_subscription(String, "/autonomy/state", self._state_callback, 10)
+
+    def _state_callback(self, msg: String) -> None:
+        """缓存任务状态，让按键结果能够反映真实任务执行而不只是服务响应。"""
+        self.latest_state = msg.data
 
     def toggle(self) -> None:
         """等待服务并切换；只有服务端成功响应才向操作员报告成功。"""
@@ -36,6 +44,32 @@ class AutonomyKeyboard(Node):
             print("切换超时，自主导航状态未确认。")
         elif result.success:
             print(f"切换成功：{result.message}")
+            # Trigger 成功只说明 autonomous_mission 接受了开关请求。继续短暂监听状态，
+            # 区分真正进入 EXPLORING/ALIGNING_OBSTACLE 与仍缺少地图、TF 或 Nav2 输入。
+            deadline = time.monotonic() + 3.0
+            initial_state = self.latest_state
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if self.latest_state in {
+                    "EXPLORING",
+                    "APPROACHING_OBSTACLE",
+                    "ALIGNING_OBSTACLE",
+                    "TRAVERSING",
+                    "STOPPED",
+                    "COMPLETED",
+                }:
+                    break
+                # 关闭请求通常立即变为 STOPPED；开启请求允许 WAITING_FOR_INPUTS 继续
+                # 等待短暂的地图/导航发现，但不能因此把“接受请求”误报成“已经在走”。
+                if self.latest_state != initial_state:
+                    initial_state = self.latest_state
+            if self.latest_state == "WAITING_FOR_INPUTS":
+                print(
+                    "当前状态：WAITING_FOR_INPUTS（尚未开始移动；请检查 /map、"
+                    "/navigation/healthy、/scan 和 /odom）"
+                )
+            else:
+                print(f"当前状态：{self.latest_state}")
         else:
             print(f"切换被拒绝：{result.message}")
 

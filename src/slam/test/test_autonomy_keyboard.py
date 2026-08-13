@@ -23,3 +23,6 @@ def test_keyboard_has_explicit_toggle_and_quit_keys():
     assert 'key in (" ", "t", "T")' in source
     assert 'key in ("q", "Q")' in source
     assert '"/autonomy/toggle"' in source
+    assert '"/autonomy/state"' in source
+    assert '"EXPLORING"' in source
+    assert "WAITING_FOR_INPUTS（尚未开始移动" in source

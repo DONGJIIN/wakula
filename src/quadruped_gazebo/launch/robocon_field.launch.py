@@ -13,6 +13,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     GroupAction,
     IncludeLaunchDescription,
+    LogInfo,
     SetEnvironmentVariable,
 )
 from launch.conditions import IfCondition, UnlessCondition
@@ -52,6 +53,15 @@ def generate_launch_description():
     robot_group = GroupAction(
         condition=IfCondition(spawn_robot),
         actions=[
+            LogInfo(
+                msg=[
+                    "Spawning Gazebo test quadruped: name=",
+                    robot_name,
+                    ", sdf=",
+                    robot_sdf,
+                    ". Wait for 'Created entity' before starting SLAM.",
+                ]
+            ),
             Node(
                 package="ros_gz_sim",
                 executable="create",
