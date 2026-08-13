@@ -40,6 +40,42 @@ def test_local_costmap_fuses_scan_and_depth_points():
     assert obstacle_layer["terrain_points"]["data_type"] == "PointCloud2"
 
 
+def test_nav2_rk3588_budget_keeps_safety_rates_and_bounds_trajectory_samples():
+    """性能档只能削减重复计算，不能把局部更新或控制频率降到不可用。"""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    controller = config["controller_server"]["ros__parameters"]
+    dwb = controller["FollowPath"]
+    local = config["local_costmap"]["local_costmap"]["ros__parameters"]
+    global_map = config["global_costmap"]["global_costmap"]["ros__parameters"]
+    planner = config["planner_server"]["ros__parameters"]
+    assert controller["controller_frequency"] >= 10.0
+    assert local["update_frequency"] >= 5.0
+    assert local["publish_frequency"] >= 2.0
+    assert global_map["update_frequency"] >= 1.0
+    assert planner["expected_planner_frequency"] >= 1.0
+    assert 150 <= dwb["vx_samples"] * dwb["vtheta_samples"] <= 320
+    assert 1.2 <= dwb["sim_time"] <= 2.0
+
+
+def test_nav2_supports_multi_pose_and_bounded_dead_end_recovery():
+    """多目标 Action 必须保留，死路恢复顺序必须有限且从低风险动作开始。"""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    navigator = config["bt_navigator"]["ros__parameters"]
+    assert "navigate_through_poses_w_replanning_and_recovery.xml" in navigator[
+        "default_nav_through_poses_bt_xml"
+    ]
+    tree = (PACKAGE_ROOT / "behavior_trees" / "navigate_to_pose_wakula.xml").read_text(
+        encoding="utf-8"
+    )
+    assert 'number_of_retries="4"' in tree
+    assert tree.index("ClearEntireCostmap") < tree.index("<Wait")
+    assert tree.index("<Wait") < tree.index("<BackUp") < tree.index("<Spin")
+
+
 def test_navigation_health_parameters_are_versioned_with_nav2():
     """导航健康阈值必须进入正式配置，不能只隐藏在源码默认值中。"""
     nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"

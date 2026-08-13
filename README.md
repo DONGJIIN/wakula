@@ -44,8 +44,8 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同和 rosbag 离线评估：
-9 个 ROS 2 包可编译，111 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和
+全栈长时间回归工具：9 个 ROS 2 包可编译，128 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -127,7 +127,7 @@ wakula/
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
 │   ├── quadruped_planning/     # 保守地形决策与 Nav2 速度门
 │   ├── quadruped_teleop/       # Xbox /joy 到独立 /cmd_vel_joy 的安全适配
-│   ├── quadruped_tools/        # rosbag 离线标注与准确率报告
+│   ├── quadruped_tools/        # rosbag 准确率评估与全栈长时间回归
 │   └── slam/                   # SLAM Toolbox、Nav2 参数与自主启动
 ├── scripts/
 │   ├── record_bag.sh           # 记录感知、导航与诊断数据
@@ -153,7 +153,7 @@ wakula/
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
 | `quadruped_planning` | 地形风险分类、Nav2 速度上限和失效安全门 | 两个导航辅助节点 |
 | `quadruped_teleop` | Xbox 按键安全状态机和独立 Twist 候选 | `xbox_teleop` |
-| `quadruped_tools` | rosbag 标注匹配与准确率报告 | `perception_bag_evaluator` |
+| `quadruped_tools` | rosbag 标注评估、SLAM/Nav2 长测与资源报告 | `perception_bag_evaluator`、`stack_regression` |
 | `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
 
 主要节点：
@@ -177,6 +177,8 @@ wakula/
 - `navigation_speed_gate`：检查 Nav2 命令、地形评估和导航健康心跳，任一失效立即输出零速。
 - `xbox_teleop`：将 `/joy` 转换为带 LB 使能、B 急停和断流归零的 `/cmd_vel_joy`。
 - `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
+- `stack_regression`：在明确允许仿真运动后自动执行连续旋转、前进、倒退、回环、多目标、
+  1 m 绕杆窄通道和不可达目标恢复，并记录数据断流、闭环误差、CPU 与常驻内存峰值。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
 
@@ -357,7 +359,8 @@ source install/setup.bash
 ```
 
 视觉仅依赖 `python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
-默认 8 Hz、最大 640 像素宽；点云默认 10 Hz 且限制采样数量，适合 RK3588 起步调试。
+默认 5 Hz、最大 576 像素宽；点云默认 5 Hz，TF 前最多 40000 点、几何分析最多 12000 点，
+适合 RK3588 起步调试。关闭标注图发布还可省去一次图像复制与编码。
 Xbox 输入使用标准 `ros-jazzy-joy`，不依赖厂家手柄 SDK。
 独立仿真还需 Gazebo Harmonic / Gazebo Sim 8 对应的 `ros-jazzy-ros-gz`；`rosdep` 会按
 `quadruped_gazebo/package.xml` 自动补齐桥接组件。
@@ -369,9 +372,25 @@ colcon test --event-handlers console_direct+
 colcon test-result --verbose
 ```
 
-最近一次 Gazebo 全栈联调结果：`/navigation/healthy=true`，连续 25 秒感知样本均有效，
-NavigateToPose 两次闭环到达目标；仿真机实测 `/scan` 约 14.9 Hz、RGB 约 14.2 Hz、点云约
-4.1 Hz。以上是当前电脑上的功能回归，不代替真机 rosbag 准确率、时延和 RK3588 温升测试。
+2026-08-13 的 Gazebo 全栈长测执行 5 轮“双向整圈旋转—前进—倒退”，约 3 分 20 秒内
+地图更新 787 次、`/scan` 2996 帧、`/odom` 4941 帧，1962 个导航健康样本全部为 true；
+最大闭环位置误差 0.0103 m、偏航误差 0.0152 rad。另一次联调已通过三点
+`NavigateThroughPoses` 和规则 1 m 柱间窄通道，高墙占用体内目标按预期失败并走失败/恢复链；
+该轮 700 个导航健康样本全部为 true。核心算法进程峰值约 861 MiB、瞬时约 1.55 个 CPU
+核；这是当前 x86 电脑的近似 `/proc` 采样，不是 RK3588
+温升、功耗或真机精度结论。
+
+OpenCV 合成矩阵已覆盖正常光、约 62% 暗光、局部阴影、全白过曝和 31 像素运动模糊：
+暗光/阴影保留有效杆体候选，过曝帧被质量门拒绝，模糊帧的质量与置信度均下降。点云含噪
+阈值扫测覆盖约 0.08 m 低台阶、0.09 m 坑、10°/14° 坡面和约 0.30 m 限高杆；这些是
+确定性软件回归，换镜头、曝光、雷达和安装角度后必须用真机 rosbag 重做统计。
+
+可复现长测（会让 Gazebo 测试狗运动，真机不得运行）：
+
+```bash
+ros2 run quadruped_tools stack_regression --allow-motion --cycles 5 \
+  --report reports/stack_regression.json
+```
 
 ## 6. 启动方式
 
@@ -732,7 +751,7 @@ ros2 topic echo /perception/front_obstacle_name
 
 高分辨率 RGB-D 原始云会先用 `transform_max_points` 做覆盖全幅的确定性等间隔采样，再
 执行 TF 和前向 ROI 分析；这不会改变话题合同，可显著降低 Gazebo 全栈或 RK3588 上的
-内存与矩阵运算压力。在线默认以 6 Hz 处理最新帧、前视 2.5 m；设采样上限为 `0` 可在
+内存与矩阵运算压力。在线默认以 5 Hz 处理最新帧、前视 2.5 m；设采样上限为 `0` 可在
 离线标定时关闭限制做精度对照。
 
 `/terrain/features` 字段：
@@ -752,7 +771,7 @@ obstacle_type, confidence, width, clearance_height]
 `vision_confirmed=false` 的纯点云几何，避免辅助相机成为安全链单点故障。关闭
 OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达的真机继续使用。
 
-判定默认值：高度 `0.08 m` 起分类为 `STEP`，`0.18 m` 起分类为 `CLIMB`，`0.32 m` 起
+判定默认值：高度 `0.07 m` 起分类为 `STEP`，`0.18 m` 起分类为 `CLIMB`，`0.32 m` 起
 标记为必须重规划；当前三种情况都会停车。阈值必须依据机器狗的实际腿长、质心、步态
 能力和相机安装误差重新标定。
 
@@ -769,6 +788,8 @@ OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达
 算法先用拟合平面计算 ROI 中每点的相对地面高度，只将凸起降采样发布为
 `/perception/obstacle_points`，因此 10°/14° 坡面不会随前向距离增加而被误标成墙；
 低台阶即便位于机身 `base_link` 下方、绝对 z 为负，也不会被 Nav2 的高度过滤漏掉。
+经真实低回波与连通域确认的坑洞会被投影为贴近局部地面的虚拟障碍点写入代价地图；
+无回波盲区仍按未知处理，不能凭空制造坑洞。
 Nav2 local costmap 以该 `PointCloud2` 进行 marking，2D 雷达继续负责 marking + clearing。点云层不主动
 clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗口会移除离开视野的旧区域。
 
@@ -825,6 +846,9 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 
 融合模式采用非对称防抖：紧急 STOP 立即生效；STEP/CLIMB 需要连续几帧几何证据；向
 更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
+已进入代价地图的台阶、坑洞、墙、横杆和立柱在 0.75 m 以外保留 0.25 倍低速窗口，
+让 Nav2 有机会转向和绕行；进入硬停车区仍立即归零。未实现真机坡面动作前，坡度危险
+不使用这条远距放行规则。
 视觉细分类也不能无条件覆盖点云：横杆必须同时具有米制离地净空，立柱必须满足点云窄宽度；
 视觉与几何冲突时保留几何类别并降低置信度，等待后续同步帧确认。
 高度、坡度、粗糙度、点数、消息采样时刻和超时等运行参数也在节点入口及纯决策函数处

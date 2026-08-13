@@ -392,6 +392,46 @@ def apply_geometry_classification(
     return assessment
 
 
+def apply_distance_aware_constraint(
+    assessment: Assessment,
+    obstacle_type: int,
+    distance: float,
+    hard_stop_distance: float,
+    approach_speed: float,
+) -> Assessment:
+    """让远处、已进入代价地图的实体障碍先由 Nav2 绕行。
+
+    旧策略只要在 2.5 m ROI 内看到台阶、坑、墙或横杆就立刻输出零速度。机器人因而连
+    原地转向和沿全局路径绕行都做不到，最终触发 Nav2 的无进展恢复。对已经有明确几何
+    类别的实体障碍，距离大于硬停车区时保留一个低速 ``WALK`` 窗口，让局部代价地图
+    选择绕行轨迹；进入硬停车区仍立即归零。
+
+    ``CLEAR`` 坡面不使用这条放行规则：坡度估计的 distance 不是坡脚距离，贸然放行会
+    让尚无腿部控制器的机器人直接驶上坡。无效、零或负距离也继续 fail-closed。
+    """
+    mode, speed = assessment
+    # POLE 也必须采用同一距离策略。比赛限高杆的横梁很细，深度云经常只看见
+    # 一侧支柱并把它归为 POLE；若让 POLE 在两米外就硬停车，Nav2 虽然已经把
+    # 支柱写入代价地图，却没有速度执行绕行，最终会触发“无进展”恢复循环。
+    explicit_hazards = (
+        GEOMETRY_STEP,
+        GEOMETRY_PIT,
+        GEOMETRY_WALL,
+        GEOMETRY_BAR,
+        GEOMETRY_POLE,
+    )
+    values = (distance, hard_stop_distance, approach_speed)
+    if (
+        obstacle_type in explicit_hazards
+        and mode in ("STEP", "CLIMB", "STOP")
+        and all(isfinite(float(value)) for value in values)
+        and hard_stop_distance > 0.0
+        and distance > hard_stop_distance
+    ):
+        return "WALK", min(1.0, max(0.0, approach_speed))
+    return mode, speed
+
+
 def fused_observation_valid(
     msg: FusedObstacle, min_confidence: float, min_points: int
 ) -> bool:
@@ -437,6 +477,8 @@ def select_fused_assessment(
     max_slope: float,
     max_roughness: float,
     vision_speed_scale: float,
+    hard_stop_distance: float = 0.75,
+    hazard_approach_speed: float = 0.25,
 ) -> Assessment:
     """从一条时间同步融合消息生成原子导航评估。"""
     if not fused_observation_valid(msg, min_confidence, min_points):
@@ -455,6 +497,13 @@ def select_fused_assessment(
     )
     assessment = apply_geometry_classification(
         assessment, int(msg.obstacle_type), float(msg.pit_depth)
+    )
+    assessment = apply_distance_aware_constraint(
+        assessment,
+        int(msg.obstacle_type),
+        float(msg.distance),
+        hard_stop_distance,
+        hazard_approach_speed,
     )
     return apply_visual_assist(
         assessment, bool(msg.vision_confirmed), vision_speed_scale
@@ -486,6 +535,8 @@ class TerrainSafetyAssessor(Node):
             ("vision_min_confidence", 0.55),
             ("vision_center_margin", 0.20),
             ("vision_speed_scale", 0.35),
+            ("hard_stop_distance", 0.75),
+            ("hazard_approach_speed", 0.25),
             ("future_stamp_tolerance", 0.10),
             ("status_log_period", 1.0),
         ):
@@ -536,6 +587,12 @@ class TerrainSafetyAssessor(Node):
             self.get_parameter("vision_center_margin").value
         )
         self.vision_speed_scale = self._unit_parameter("vision_speed_scale")
+        self.hard_stop_distance = self._positive_parameter(
+            "hard_stop_distance", 0.75
+        )
+        self.hazard_approach_speed = self._unit_parameter(
+            "hazard_approach_speed"
+        )
         self.output_frame = (
             str(self.get_parameter("output_frame").value) or "base_link"
         )
@@ -704,6 +761,13 @@ class TerrainSafetyAssessor(Node):
         assessment = apply_geometry_classification(
             assessment, obstacle_type, pit_depth
         )
+        assessment = apply_distance_aware_constraint(
+            assessment,
+            obstacle_type,
+            float(observation.distance),
+            self.hard_stop_distance,
+            self.hazard_approach_speed,
+        )
         assessment = self.assessment_filter.update(assessment)
         visual_active = self._fresh_visual_target()
         assessment = apply_visual_assist(
@@ -748,6 +812,8 @@ class TerrainSafetyAssessor(Node):
             self.max_slope,
             self.max_roughness,
             self.vision_speed_scale,
+            self.hard_stop_distance,
+            self.hazard_approach_speed,
         )
         assessment = self.assessment_filter.update(assessment)
         visual_active = bool(msg.vision_confirmed) and assessment[0] == "WALK"

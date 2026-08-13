@@ -23,6 +23,7 @@ setup(
         "console_scripts": [
             "perception_bag_evaluator = "
             "quadruped_tools.perception_bag_evaluator:main",
+            "stack_regression = quadruped_tools.stack_regression:main",
         ],
     },
 )

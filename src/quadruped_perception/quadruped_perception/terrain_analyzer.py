@@ -288,17 +288,19 @@ class TerrainAnalyzer(Node):
             "input_topic_candidates", DEFAULT_POINT_CLOUD_TOPICS
         )
         self.declare_parameter("target_frame", "base_link")
-        self.declare_parameter("processing_hz", 10.0)
+        # 声明默认值与正式 terrain.yaml 保持一致；这样直接 ros2 run 调试时不会
+        # 悄悄退回高负载旧档。launch 参数仍可按真机 rosbag 覆盖这些初值。
+        self.declare_parameter("processing_hz", 5.0)
         self.declare_parameter("transform_timeout", 0.05)
-        self.declare_parameter("transform_max_points", 120000)
-        self.declare_parameter("max_points", 30000)
-        self.declare_parameter("nav2_cloud_max_points", 5000)
+        self.declare_parameter("transform_max_points", 40000)
+        self.declare_parameter("max_points", 12000)
+        self.declare_parameter("nav2_cloud_max_points", 1800)
         self.declare_parameter("nav2_obstacle_min_height_above_ground", 0.05)
         self.declare_parameter("front_x_min", 0.10)
-        self.declare_parameter("front_x_max", 1.50)
-        self.declare_parameter("lateral_half_width", 0.45)
+        self.declare_parameter("front_x_max", 2.50)
+        self.declare_parameter("lateral_half_width", 0.55)
         self.declare_parameter("ground_percentile", 0.10)
-        self.declare_parameter("warning_height", 0.08)
+        self.declare_parameter("warning_height", 0.07)
         self.declare_parameter("critical_height", 0.28)
         self.declare_parameter("max_slope", 0.45)
         self.declare_parameter("max_roughness", 0.06)
@@ -306,11 +308,11 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("grid_cell_size", 0.05)
         self.declare_parameter("ground_height_bin", 0.03)
-        self.declare_parameter("pit_depth_threshold", 0.08)
-        self.declare_parameter("wall_height_threshold", 0.25)
+        self.declare_parameter("pit_depth_threshold", 0.07)
+        self.declare_parameter("wall_height_threshold", 0.23)
         self.declare_parameter("bar_min_clearance", 0.18)
-        self.declare_parameter("min_connected_region_cells", 3)
-        self.declare_parameter("min_connected_region_points", 12)
+        self.declare_parameter("min_connected_region_cells", 4)
+        self.declare_parameter("min_connected_region_points", 16)
 
         override_topic = str(self.get_parameter("input_topic").value)
         candidates = list(self.get_parameter("input_topic_candidates").value)
@@ -507,7 +509,12 @@ class TerrainAnalyzer(Node):
             maximum_points=self.nav2_cloud_max_points,
         )
         self.obstacle_cloud_pub.publish(
-            point_cloud2.create_cloud_xyz32(header, nav2_points.tolist())
+            # sensor_msgs_py 原生接受 float32 ndarray。不要先 ``tolist()``：3000 个点会
+            # 额外构造约 12000 个 Python list/float 对象，增加 RK3588 的瞬时内存、GC
+            # 和序列化延迟；直接传连续数组还能走 create_cloud 的快速内存视图路径。
+            point_cloud2.create_cloud_xyz32(
+                header, np.ascontiguousarray(nav2_points, dtype=np.float32)
+            )
         )
         if geometry.valid:
             # 旧九字段继续由原算法提供，扩展字段和强类型话题承载新几何合同。

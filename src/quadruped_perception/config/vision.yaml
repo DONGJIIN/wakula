@@ -10,8 +10,10 @@ vision_obstacle_detector:
     # 该输出不参与决策；无显示器部署可关闭以减少一次图像复制和编码。
     annotated_image_topic: /vision/annotated_image
     publish_annotated_image: true
-    processing_hz: 6.0
-    resize_width: 640
+    # RK3588 在线档：5 Hz 足够覆盖低速导航的多帧确认；576 px 保留细杆结构，同时比
+    # 640 px 少约 19% 像素。离线 rosbag 标定可临时提高频率或关闭缩放做准确率对照。
+    processing_hz: 5.0
+    resize_width: 576
 
     # ---------- 轮廓面积与形态学去噪 ----------
     min_area_px: 300.0

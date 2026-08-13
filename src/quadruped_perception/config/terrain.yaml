@@ -5,15 +5,15 @@ terrain_analyzer:
     input_topic: ""
     input_topic_candidates: [/camera/depth/points, /camera/depth/color/points, /camera/points, /points]
     target_frame: base_link
-    # 6 Hz 已快于四足上层地形决策所需频率；只处理最新帧，避免与 SLAM/RViz 抢占 CPU。
-    processing_hz: 6.0
+    # 5 Hz 已快于当前上层地形决策所需频率；只处理最新帧，避免与 SLAM/RViz 抢占 CPU。
+    processing_hz: 5.0
     transform_timeout: 0.05
     # 先对原始高分辨率点云做全幅等间隔采样，再执行 TF；<=0 可关闭以做离线精度对照。
-    transform_max_points: 60000
+    transform_max_points: 40000
     # 节点只处理最新帧；max_points 限制几何计算量，避免高线数雷达拖慢 RK3588。
-    max_points: 20000
+    max_points: 12000
     # 发布给 Nav2 局部代价地图的 base_link 降采样障碍点数上限。
-    nav2_cloud_max_points: 3000
+    nav2_cloud_max_points: 1800
     # 先按拟合地面平面计算相对高度，只把高于地面 5 cm 的点送入 Nav2；避免坡面误标障。
     nav2_obstacle_min_height_above_ground: 0.05
 
@@ -25,7 +25,9 @@ terrain_analyzer:
 
     # ---------- 旧特征接口与通行性阈值 ----------
     ground_percentile: 0.10
-    warning_height: 0.12
+    # 比赛最低一级台阶约 0.10 m；采用 0.07 m 几何门可容纳约 2 cm 深度/外参误差，
+    # 同时仍高于 0.04 m 地面吸收带，并受连续栅格与原始回波双重支撑约束。
+    warning_height: 0.07
     critical_height: 0.28
     max_slope: 0.45
     max_roughness: 0.06
@@ -36,11 +38,13 @@ terrain_analyzer:
     # 不同深度相机/3D 雷达优先使用 rosbag 调整这组参数。
     grid_cell_size: 0.05
     ground_height_bin: 0.03
-    pit_depth_threshold: 0.08
-    wall_height_threshold: 0.25
+    # 规则坑深约 0.10 m、高墙约 0.30 m。阈值分别预留 2～3 cm 测量余量；单个低点或
+    # 高点不会触发，因为后面还要求连续区域和最少原始回波。
+    pit_depth_threshold: 0.07
+    wall_height_threshold: 0.23
     # 横杆底部预期约 0.30 m；此值留出深度噪声和外参误差余量。
     bar_min_clearance: 0.18
     # 危险区域必须在 XY 高度图中形成 8 邻域连通块，以过滤孤立飞点。
-    min_connected_region_cells: 3
+    min_connected_region_cells: 4
     # 连通块还必须有足够原始回波，防止一小团聚集飞点被误认为真实障碍。
-    min_connected_region_points: 12
+    min_connected_region_points: 16

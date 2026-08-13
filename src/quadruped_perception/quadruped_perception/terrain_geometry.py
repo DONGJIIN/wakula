@@ -67,7 +67,23 @@ def navigation_obstacle_points(
         + float(estimate.ground_height)
     )
     threshold = max(0.0, float(minimum_height_above_ground))
-    selected = points[(points[:, 2] - plane) >= threshold]
+    relative_height = points[:, 2] - plane
+    selected = points[relative_height >= threshold]
+    if estimate.obstacle_type == PIT and estimate.pit_depth > 0.0:
+        # 坑洞的真实回波低于地面，直接发布后可能落到 costmap 的绝对 z 下限以下；完全
+        # 不发布又会造成“上层知道有坑、局部规划器却看不到”的死锁。把已经由连通域确认
+        # 的低回波投影到局部地面稍上方，形成仅供 Nav2 绕行的虚拟障碍点。未知/无回波
+        # 区域仍不会被凭空当成坑，安全性前提与几何分类保持一致。
+        pit_gate = max(threshold, min(float(estimate.pit_depth) * 0.60, 0.12))
+        pit_mask = relative_height <= -pit_gate
+        if np.any(pit_mask):
+            virtual_pit = points[pit_mask].copy()
+            virtual_pit[:, 2] = plane[pit_mask] + max(threshold, 0.05)
+            selected = (
+                virtual_pit
+                if not len(selected)
+                else np.vstack((selected, virtual_pit))
+            )
     limit = max(1, int(maximum_points))
     if len(selected) > limit:
         indices = np.linspace(0, len(selected) - 1, limit, dtype=np.int64)
@@ -76,29 +92,51 @@ def navigation_obstacle_points(
 
 
 def _grid_samples(points: np.ndarray, cell_size: float):
-    """每个 XY 栅格返回低、中、高三个稳健高度分位数。"""
+    """每个 XY 栅格返回低、中、高三个稳健高度分位数。
+
+    旧实现为每个栅格分别调用 ``np.quantile``。一帧 RGB-D 点云通常会形成数百个栅格，
+    Python 循环和数百次临时数组分配在 RK3588 上比实际平面拟合更昂贵。这里一次性按
+    ``(cell_x, cell_y, z)`` 排序，再以向量索引计算线性分位数；复杂度仍为
+    ``O(N log N)``，但热路径只进入 NumPy 数次。XY 使用格内均值，它一定仍落在原格内，
+    并且比逐格中位数少两次排序。高度分位数保持与 NumPy 默认 linear 方法一致。
+    """
     xy = np.floor(points[:, :2] / cell_size).astype(np.int32)
-    order = np.lexsort((xy[:, 1], xy[:, 0]))
+    # lexsort 的最后一个键优先，因此先按格 x/y 分组，再让每个格内的 z 单调递增。
+    order = np.lexsort((points[:, 2], xy[:, 1], xy[:, 0]))
     xy, ordered = xy[order], points[order]
     changes = np.r_[True, np.any(xy[1:] != xy[:-1], axis=1)]
     starts = np.flatnonzero(changes)
-    rows = []
-    for begin, end in zip(starts, np.r_[starts[1:], len(ordered)]):
-        cell = ordered[begin:end]
-        # 单点格很容易是飞点；至少两个回波才参与地面与坑洞判定。
-        if len(cell) < 2:
-            continue
-        rows.append(
-            (
-                float(np.median(cell[:, 0])),
-                float(np.median(cell[:, 1])),
-                float(np.quantile(cell[:, 2], 0.15)),
-                float(np.median(cell[:, 2])),
-                float(np.quantile(cell[:, 2], 0.90)),
-                len(cell),
-            )
+    counts = np.diff(np.r_[starts, len(ordered)])
+    # 单点格很容易是飞点；至少两个回波才参与地面与坑洞判定。
+    valid = counts >= 2
+    if not np.any(valid):
+        return np.empty((0, 6), dtype=np.float64)
+    valid_starts = starts[valid]
+    valid_counts = counts[valid]
+
+    sums_x = np.add.reduceat(ordered[:, 0], starts)[valid]
+    sums_y = np.add.reduceat(ordered[:, 1], starts)[valid]
+
+    def linear_quantile(quantile: float) -> np.ndarray:
+        """在已经按格内 z 排序的数组上向量计算一个分位数。"""
+        positions = (valid_counts - 1) * quantile
+        lower = np.floor(positions).astype(np.int64)
+        upper = np.ceil(positions).astype(np.int64)
+        weight = positions - lower
+        lower_values = ordered[valid_starts + lower, 2]
+        upper_values = ordered[valid_starts + upper, 2]
+        return lower_values + (upper_values - lower_values) * weight
+
+    return np.column_stack(
+        (
+            sums_x / valid_counts,
+            sums_y / valid_counts,
+            linear_quantile(0.15),
+            linear_quantile(0.50),
+            linear_quantile(0.90),
+            valid_counts,
         )
-    return np.asarray(rows, dtype=np.float64).reshape(-1, 6)
+    ).astype(np.float64, copy=False)
 
 
 def _dominant_ground_mask(cells: np.ndarray, bin_size: float) -> np.ndarray:

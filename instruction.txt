@@ -50,7 +50,9 @@ Twist 适配和离线评估。
    高度统计、迭代 MAD 离群剔除和稳健拟合；高低异常格必须同时达到八邻域格数和原始
    回波数，再根据
    高度突变、占据分布、空洞和净空分类 CLEAR/STEP/PIT/
-   WALL/BAR/POLE。无真机数据时阈值只能作为初值。
+   WALL/BAR/POLE。栅格分位数已改为一次排序后的 NumPy 向量计算，避免逐格 Python
+   quantile；确认坑洞后把真实低回波投影成局部代价地图虚拟障碍，但无回波盲区仍不判坑。
+   无真机数据时阈值只能作为初值。
 
    perception_fusion.py：在两个有界小队列中全局寻找 Header 时间差最小的相机/点云对，
    能容忍回调乱序；零时间戳、重复旧帧或超过 sync_slop 的观测拒绝融合。输出把点数、
@@ -72,7 +74,12 @@ Twist 适配和离线评估。
    限高杆和高墙；低横滚的 7～12° 坡面显示主斜坡，12～17° 显示木桥引坡；宽且高度不低于
    0.32 m 的 STEP 显示 T 字形台阶。算法不读取 Gazebo 坐标，局部证据不足以区分木桥 A/B
    时会明确写“待结构确认”。视觉通用有色候选仍显示给操作员，但不覆盖已经确认的点云
-   名称，也不伪装成参与限速的几何证据。3 秒
+   名称，也不伪装成参与限速的几何证据。
+
+   已确认的台阶、坑洞、墙、横杆和立柱若仍在 0.75 m 硬停车区以外，会暂时转换为
+   WALK/0.25 倍低速，让 Nav2 根据代价地图绕行；进入近距区仍停车。这个机制解决了
+   “两米外已经识别障碍，却因为速度先归零而永远无法转向”的联调死锁。坡面距离不是
+   坡脚距离，当前没有腿控时仍保持 CLIMB/STOP，不套用远距放行。
 
    Nav2 仍采用标准双层规划：planner_server 的 NavFnPlanner 使用 SLAM 地图生成全局路径；
    controller_server 的 DWBLocalPlanner 使用实时局部代价地图跟踪路径和绕开临时障碍。
@@ -99,6 +106,10 @@ Twist 适配和离线评估。
 5. quadruped_tools
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类
    TP/FP/FN、precision、recall、F1、混淆矩阵以及连续量误差，帮助客观调整阈值。
+   stack_regression.py：仿真专用长测工具；只有显式 --allow-motion 才向 /cmd_vel_teleop
+   发布速度。它执行双向整圈旋转、前进、倒退、回环、多目标、1 m 绕杆窄通道和不可达
+   目标恢复，持续记录 map/scan/odom/正前方名称间隔、闭环误差以及核心进程 CPU/RSS。
+   输出 JSON 只代表 Gazebo 软件回归，不能作为真机安全认证。
 
 6. quadruped_description
    quadruped.urdf.xacro 只是 RViz 外形与 lidar_link、camera_link、camera_optical_frame、
@@ -118,7 +129,7 @@ Twist 适配和离线评估。
    CameraInfo 使用辅助桥；不再桥接算法未使用的 /scan/points，避免高带宽数据拖住导航。
    地图每 0.25 s（4 Hz）发布；扫描匹配最多约 10 Hz，倒退/转向达到 8 cm / 0.08 rad
    即可加入关键帧。RViz 视图跟随 base_link，但 Fixed Frame 仍保持 map。
-   点云在线以 6 Hz 处理最新帧并前视 2.5 m。这些优化不改变任何标准真机接口。
+   点云在线以 5 Hz 处理最新帧并前视 2.5 m。这些优化不改变任何标准真机接口。
    robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
    slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
    2D SLAM 的必要链路是 /scan、/odom、odom->base_link 和 base_link->lidar_link；RGB-D
@@ -152,7 +163,7 @@ Twist 适配和离线评估。
 2. 点云不足、NaN/Inf、TF 失败或消息超时都不得当作安全地面。
 3. WALK：允许 Nav2 速度；视觉可把速度降到 vision_speed_scale。
 4. STEP/CLIMB：只报告类别并停车，等待未来真机越障控制器或重新规划。
-5. PIT/WALL/BAR：停车并请求绕行/人工处理；POLE：允许 Nav2 低速绕行。
+5. PIT/WALL/BAR/POLE 与高台阶：远处先低速交给 Nav2 绕行，进入 0.75 m 近距区停车。
 6. 危险升级快，解除危险慢，避免阈值附近抖动。
 
 四、推荐调参顺序
@@ -166,6 +177,15 @@ Twist 适配和离线评估。
    必须包含黑场、白场、阴影、逆光、频闪、反光、运动模糊和局部遮挡；分别关闭
    dual_illumination_color_mask 与 suppress_specular_glare 做 A/B 对照。
 7. 只有离线指标和低速实测都通过后，才逐步放宽速度。
+
+当前无真机时的自动回归命令（仅允许在 Gazebo 使用）：
+
+  ros2 run quadruped_tools stack_regression --allow-motion --cycles 5 \
+    --report reports/stack_regression.json
+
+2026-08-13 基线：5 轮约 3 分 20 秒，最大闭环位置误差 0.0103 m、偏航误差
+0.0152 rad，scan/odom/导航健康未持续断流；多目标和 1 m 绕杆窄通道成功，高墙内部
+目标按预期失败。不同电脑应保留自己的 JSON 报告做版本对照。
 
 五、rosbag 标注与评估
 -------------------

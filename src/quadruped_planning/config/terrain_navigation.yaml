@@ -2,7 +2,9 @@
 terrain_safety_assessor:
   ros__parameters:
     # 高度分类只表示感知标签（单位 m），不是可直接执行的步态模式。
-    step_threshold: 0.08
+    # 与点云 warning_height 保持一致，保证 7～8 cm 低台阶不会在“识别层已报警、
+    # 决策层仍当平地”的缝隙中丢失；真机值仍必须用标定块和 rosbag 重调。
+    step_threshold: 0.07
     climb_threshold: 0.18
     stop_threshold: 0.32
     # 旧数组的坡度为 dz/dx，粗糙度为稳健地面残差（单位 m）。
@@ -26,6 +28,10 @@ terrain_safety_assessor:
     vision_min_confidence: 0.55
     vision_center_margin: 0.20
     vision_speed_scale: 0.35
+    # 已由点云确认且进入局部代价地图的远处实体障碍，先以低速交给 Nav2 绕行；进入
+    # 0.75 m 硬停车区才归零。坡面不使用该放行，避免没有腿控时直接驶上坡。
+    hard_stop_distance: 0.75
+    hazard_approach_speed: 0.25
     # 正前方类别变化立即打印；未变化时按该周期刷新，避免终端按感知帧率刷屏。
     status_log_period: 1.0
 

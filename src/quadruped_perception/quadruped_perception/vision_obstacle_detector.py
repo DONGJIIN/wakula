@@ -450,7 +450,10 @@ def apply_image_quality(
         return ObstacleEvidence()
     return ObstacleEvidence(
         hint=evidence.hint,
-        confidence=evidence.confidence * (0.60 + 0.40 * quality),
+        # 质量刚过门槛时要明显降低单帧权重；旧 0.60+0.40*q 对严重模糊帧惩罚过轻，
+        # 颜色轮廓仍完整时几乎保持原置信度。0.40+0.60*q 保留正常画面召回率，同时让
+        # 阴影、轻微模糊可参与但更难凭少数帧形成稳定高置信结果。
+        confidence=evidence.confidence * (0.40 + 0.60 * quality),
         center_x=evidence.center_x,
         center_y=evidence.center_y,
         width=evidence.width,
@@ -694,8 +697,9 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("publish_debug_mask", False)
         self.declare_parameter("annotated_image_topic", "/vision/annotated_image")
         self.declare_parameter("publish_annotated_image", True)
-        self.declare_parameter("processing_hz", 8.0)
-        self.declare_parameter("resize_width", 640)
+        # 与 vision.yaml 的 RK3588 在线档一致；直接 ros2 run 时也不会绕过限频/缩放。
+        self.declare_parameter("processing_hz", 5.0)
+        self.declare_parameter("resize_width", 576)
         self.declare_parameter("min_area_px", 300.0)
         self.declare_parameter("min_area_ratio", 0.0008)
         self.declare_parameter("morphology_size", 5)

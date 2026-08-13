@@ -41,10 +41,12 @@ controller_server:
       decel_lim_x: -0.5
       decel_lim_y: 0.0
       decel_lim_theta: -1.0
-      vx_samples: 20
+      # 16×18 候选比 20×20 少 28% 轨迹评分量；低速四足仍保留足够转向分辨率。
+      # 真机若能高速运动，应基于闭环日志提高采样，而不是盲目复制轮式底盘默认值。
+      vx_samples: 16
       vy_samples: 1
-      vtheta_samples: 20
-      sim_time: 1.7
+      vtheta_samples: 18
+      sim_time: 1.5
       # 采样轨迹的空间/角度步长；越小越精细，但计算量越高。
       linear_granularity: 0.05
       angular_granularity: 0.025
@@ -70,7 +72,9 @@ controller_server:
 planner_server:
   ros__parameters:
     use_sim_time: false
-    expected_planner_frequency: 5.0
+    # 行为树以 1 Hz 重规划；2 Hz 预期上限可及时响应新障碍，又不会在 RK3588 上让
+    # 全局搜索与 5 Hz 局部代价地图争抢 CPU。
+    expected_planner_frequency: 2.0
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
@@ -144,6 +148,8 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link
       rolling_window: true
+      update_frequency: 5.0
+      publish_frequency: 2.0
       width: 4
       height: 4
       resolution: 0.05
@@ -183,6 +189,8 @@ global_costmap:
       use_sim_time: false
       global_frame: map
       robot_base_frame: base_link
+      update_frequency: 1.0
+      publish_frequency: 1.0
       resolution: 0.05
       robot_radius: 0.30
       track_unknown_space: true

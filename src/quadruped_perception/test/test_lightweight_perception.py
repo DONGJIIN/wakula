@@ -10,10 +10,12 @@ from quadruped_perception.terrain_analyzer import (
     transform_xyz,
 )
 from quadruped_perception.terrain_geometry import (
+    _grid_samples,
     _largest_connected_region,
     BAR,
     CLEAR,
     PIT,
+    STEP,
     WALL,
     analyze_terrain_geometry,
     navigation_obstacle_points,
@@ -224,6 +226,91 @@ def test_image_quality_rejects_clipped_light_and_motion_blur():
     assert image_quality_score(blurred) < image_quality_score(sharp)
 
 
+def _full_visual_candidate(image):
+    """用在线节点同一预处理顺序生成单帧候选，供极端光照回归复用。"""
+    raw_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    quality = image_quality_score(raw_gray)
+    enhanced = enhance_illumination(image, 2.0, 8)
+    orange = combined_hsv_mask(
+        image,
+        enhanced,
+        np.asarray((5, 80, 70), dtype=np.uint8),
+        np.asarray((25, 255, 255), dtype=np.uint8),
+    )
+    blue = combined_hsv_mask(
+        image,
+        enhanced,
+        np.asarray((90, 70, 50), dtype=np.uint8),
+        np.asarray((135, 255, 255), dtype=np.uint8),
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    orange = cv2.morphologyEx(orange, cv2.MORPH_OPEN, kernel)
+    orange = cv2.morphologyEx(orange, cv2.MORPH_CLOSE, kernel)
+    blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN, kernel)
+    blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, kernel)
+    gray = cv2.GaussianBlur(cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    low, high = adaptive_canny_thresholds(gray, 60, 160, 0.33)
+    edges = cv2.dilate(
+        cv2.morphologyEx(cv2.Canny(gray, low, high), cv2.MORPH_CLOSE, kernel),
+        kernel,
+        iterations=1,
+    )
+    edges = suppress_specular_edges(edges, image, 25, 245, 7)
+    masks = [
+        apply_detection_roi(mask, 0.05, 0.95, 0.02)
+        for mask in (orange, blue, edges)
+    ]
+    evidence = detect_obstacle_evidence(*masks, max(300.0, image.size / 3 * 0.0008))
+    return apply_image_quality(evidence, quality, 0.35), quality
+
+
+def _textured_pole_scene():
+    """合成带真实纹理的橙色双杆，避免把纯色测试误当成真实清晰图像。"""
+    rows, columns = np.indices((240, 320))
+    background = (55 + ((rows // 8 + columns // 8) % 2) * 35).astype(np.uint8)
+    image = cv2.merge((background, background, background))
+    cv2.rectangle(image, (62, 55), (82, 215), (0, 117, 223), -1)
+    cv2.rectangle(image, (220, 50), (242, 215), (0, 117, 223), -1)
+    # 给实体添加细纹理，使运动模糊质量测试与真实相机边缘更接近。
+    for y in range(60, 210, 12):
+        cv2.line(image, (62, y), (82, y), (0, 90, 180), 1)
+        cv2.line(image, (220, y), (242, y), (0, 90, 180), 1)
+    return image
+
+
+def test_full_visual_pipeline_handles_brightness_and_local_shadow():
+    """正常、整体变暗和半幅阴影下，比赛色双杆仍应产生同类候选。"""
+    nominal = _textured_pole_scene()
+    dim = cv2.convertScaleAbs(nominal, alpha=0.62, beta=8)
+    shadow = nominal.copy()
+    shadow[:, :160] = cv2.convertScaleAbs(shadow[:, :160], alpha=0.55, beta=5)
+    for frame in (nominal, dim, shadow):
+        evidence, quality = _full_visual_candidate(frame)
+        assert quality >= 0.35
+        assert evidence.hint == "poles"
+
+
+def test_full_visual_pipeline_rejects_overexposure_and_downweights_motion_blur():
+    """过曝必须拒绝；仍保留颜色的运动模糊帧必须显著降低置信度。"""
+    overexposed = _textured_pole_scene()
+    overexposed[:, :] = 245
+    cv2.rectangle(overexposed, (70, 80), (250, 125), (255, 255, 255), -1)
+    evidence, quality = _full_visual_candidate(overexposed)
+    assert quality < 0.35
+    assert evidence.hint == "none"
+
+    nominal_evidence, nominal_quality = _full_visual_candidate(_textured_pole_scene())
+    kernel = np.zeros((1, 35), dtype=np.float32)
+    kernel[0, :] = 1.0 / kernel.shape[1]
+    blurred = cv2.filter2D(_textured_pole_scene(), -1, kernel)
+    evidence, quality = _full_visual_candidate(blurred)
+    assert quality < nominal_quality
+    # 若色块仍足够完整可以保留 poles 候选，但质量权重必须让它比清晰帧更难通过时序门。
+    assert evidence.hint in ("none", "poles")
+    if evidence.hint == "poles":
+        assert evidence.confidence < nominal_evidence.confidence
+
+
 def test_dual_illumination_mask_recovers_shadow_color_without_losing_original():
     """阴影色块可由增强分支补回，正常原图颜色仍保留。"""
     original = np.zeros((80, 120, 3), dtype=np.uint8)
@@ -379,6 +466,108 @@ def _dense_floor(z=0.0):
     return np.asarray(rows, dtype=np.float64)
 
 
+def test_vectorized_grid_statistics_match_linear_quantile_reference():
+    """RK3588 快速路径必须保持旧版格内低/中/高分位数含义。"""
+    rng = np.random.default_rng(23)
+    points = np.column_stack(
+        (
+            rng.uniform(0.1, 1.3, 4000),
+            rng.uniform(-0.4, 0.4, 4000),
+            rng.normal(-0.4, 0.03, 4000),
+        )
+    )
+    cells = _grid_samples(points, 0.05)
+    assert len(cells) > 100
+    # 抽查每个快速结果的原格；XY 用均值，Z 应与 NumPy linear quantile 完全一致。
+    for row in cells[:: max(1, len(cells) // 20)]:
+        coordinate = np.floor(row[:2] / 0.05).astype(np.int32)
+        point_coordinates = np.floor(points[:, :2] / 0.05).astype(np.int32)
+        selected = points[np.all(point_coordinates == coordinate, axis=1)]
+        assert len(selected) == int(row[5])
+        np.testing.assert_allclose(row[:2], np.mean(selected[:, :2], axis=0))
+        np.testing.assert_allclose(
+            row[2:5], np.quantile(selected[:, 2], (0.15, 0.50, 0.90))
+        )
+
+
+def test_competition_threshold_sweep_low_step_pit_slope_and_bar():
+    """按比赛尺寸和保守测量误差验证低台阶、坑、10/14°坡与限高杆阈值。"""
+    rng = np.random.default_rng(29)
+    floor = _dense_floor(z=-0.44)
+
+    low_step = np.asarray(
+        [
+            (x, y, -0.36 + noise)
+            for x in np.arange(0.55, 0.86, 0.035)
+            for y in np.arange(-0.20, 0.21, 0.035)
+            for noise in rng.normal(0.0, 0.003, 3)
+        ]
+    )
+    estimate = analyze_terrain_geometry(
+        np.vstack((floor, low_step)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert estimate.obstacle_type == STEP
+    assert 0.065 <= estimate.obstacle_height <= 0.10
+
+    pit = np.asarray(
+        [
+            (x, y, -0.53 + noise)
+            for x in np.arange(0.55, 0.86, 0.035)
+            for y in np.arange(-0.20, 0.21, 0.035)
+            for noise in rng.normal(0.0, 0.003, 3)
+        ]
+    )
+    estimate = analyze_terrain_geometry(
+        np.vstack((floor, pit)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert estimate.obstacle_type == PIT
+    assert estimate.pit_depth >= 0.075
+
+    for angle in (10.0, 14.0):
+        ramp = _dense_floor(z=-0.44)
+        ramp[:, 2] += np.tan(np.deg2rad(angle)) * ramp[:, 0]
+        estimate = analyze_terrain_geometry(
+            ramp,
+            step_height=0.07,
+            pit_depth=0.07,
+            wall_height=0.23,
+            min_region_cells=4,
+            min_region_points=16,
+        )
+        assert estimate.obstacle_type == CLEAR
+        assert abs(np.rad2deg(estimate.slope_pitch) - angle) < 1.5
+
+    bar = np.asarray(
+        [
+            (x, y, -0.14 + noise)
+            for x in (0.59, 0.61)
+            for y in np.arange(-0.40, 0.41, 0.03)
+            for noise in (-0.012, 0.0, 0.012)
+        ]
+    )
+    estimate = analyze_terrain_geometry(
+        np.vstack((floor, bar)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        bar_min_clearance=0.18,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert estimate.obstacle_type == BAR
+    assert 0.27 <= estimate.clearance_height <= 0.31
+
+
 def test_grid_ground_segmentation_detects_wall_without_biasing_plane():
     """墙面不能把稳健地面平面拉成斜坡。"""
     floor = _dense_floor()
@@ -430,6 +619,12 @@ def test_grid_ground_segmentation_requires_real_low_returns_for_pit():
     assert result.valid
     assert result.obstacle_type == PIT
     assert result.pit_depth >= 0.12
+    virtual = navigation_obstacle_points(
+        np.vstack((floor, pit)), result, minimum_height_above_ground=0.05
+    )
+    assert len(virtual) > 0
+    # 虚拟点位于拟合地面上方，能通过 Nav2 的绝对 z 过滤，不会把低回波静默漏掉。
+    assert np.quantile(virtual[:, 2], 0.5) > result.ground_height
 
 
 def test_disconnected_depth_speckles_do_not_form_an_obstacle():

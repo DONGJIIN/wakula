@@ -6,6 +6,7 @@ from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
 from quadruped_planning.cmd_vel_gate import gated_twist
 from quadruped_planning.terrain_safety_assessor import (
     ConservativeAssessmentFilter,
+    apply_distance_aware_constraint,
     apply_geometry_classification,
     apply_visual_assist,
     finite_or_zero,
@@ -230,6 +231,41 @@ def test_visual_assist_only_limits_clear_terrain():
     assert apply_visual_assist(walk, True, 0.35) == ("WALK", 0.35)
     assert apply_visual_assist(walk, False, 0.35) == walk
     assert apply_visual_assist(stopped_step, True, 0.35) == stopped_step
+
+
+def test_far_explicit_hazard_can_be_replanned_but_near_hazard_stops():
+    """远处实体交给代价地图绕行，进入硬停车区必须立即保持原危险等级。"""
+    stopped = ("STOP", 0.0)
+    assert apply_distance_aware_constraint(
+        stopped, FusedObstacle.WALL, 2.0, 0.75, 0.25
+    ) == ("WALK", 0.25)
+    assert apply_distance_aware_constraint(
+        stopped, FusedObstacle.WALL, 0.70, 0.75, 0.25
+    ) == stopped
+    # 限高杆常因单帧只看见支柱而归为 POLE，远处也应给局部规划器绕行窗口。
+    assert apply_distance_aware_constraint(
+        stopped, FusedObstacle.POLE, 1.47, 0.75, 0.25
+    ) == ("WALK", 0.25)
+    # CLEAR 上的坡度危险没有可信坡脚距离，不能使用实体障碍的远距放行规则。
+    assert apply_distance_aware_constraint(
+        ("CLIMB", 0.0), FusedObstacle.CLEAR, 2.5, 0.75, 0.25
+    ) == ("CLIMB", 0.0)
+    assert apply_distance_aware_constraint(
+        stopped, FusedObstacle.PIT, float("nan"), 0.75, 0.25
+    ) == stopped
+
+
+def test_fused_far_step_uses_low_speed_window_for_nav2_detour():
+    msg = FusedObstacle()
+    msg.geometry_confirmed = True
+    msg.confidence = 0.8
+    msg.obstacle_type = FusedObstacle.STEP
+    msg.obstacle_height = 0.12
+    msg.distance = 1.5
+    msg.valid_points = 100
+    assert select_fused_assessment(
+        msg, 0.25, 30, 0.08, 0.18, 0.32, 0.45, 0.06, 0.35, 0.75, 0.25
+    ) == ("WALK", 0.25)
 
 
 def test_fused_observation_is_atomic_and_fail_closed():
