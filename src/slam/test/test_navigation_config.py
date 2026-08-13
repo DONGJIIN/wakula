@@ -367,15 +367,17 @@ def test_simulation_entry_locks_clock_and_tf_ownership():
 
 
 def test_autonomous_entry_keeps_simulator_and_motion_controller_replaceable():
-    """自主任务属于 slam 主入口且默认关闭；兼容入口不能重复创建节点。"""
+    """核心入口不创建任务；自主功能必须通过独立入口显式启动。"""
     main = (PACKAGE_ROOT / "launch" / "slam.launch.py").read_text(encoding="utf-8")
     compatibility = (
         PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
     ).read_text(encoding="utf-8")
-    assert 'executable="autonomous_mission"' in main
-    assert '"autonomy_autostart"' in main
-    assert 'default_value="false"' in main
-    assert 'executable="autonomous_mission"' not in compatibility
+    assert 'executable="autonomous_mission"' not in main
+    assert '"autonomy_autostart"' not in main
+    assert '"mission_params_file"' not in main
+    assert 'executable="autonomous_mission"' in compatibility
+    assert '"autostart": True' in compatibility
+    assert "IncludeLaunchDescription" not in compatibility
     assert 'FindPackageShare("quadruped_gazebo")' not in main + compatibility
     assert "sim_traverse_obstacle" not in main + compatibility
 

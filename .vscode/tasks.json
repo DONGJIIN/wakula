@@ -27,33 +27,15 @@
       "problemMatcher": []
     },
     {
-      "label": "ROS: 一键开启或停止自动导航",
+      "label": "ROS: launch independent autonomous navigation",
       "type": "shell",
-      "command": "${workspaceFolder}/auto",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch slam autonomous_navigation.launch.py'",
       "problemMatcher": []
     },
     {
-      "label": "ROS: 自主导航键盘开关",
+      "label": "ROS: launch standalone Gazebo field and sensors",
       "type": "shell",
-      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run slam autonomy_keyboard'",
-      "problemMatcher": []
-    },
-    {
-      "label": "ROS: autonomous START",
-      "type": "shell",
-      "command": "${workspaceFolder}/scripts/autonomy.sh start",
-      "problemMatcher": []
-    },
-    {
-      "label": "ROS: autonomous STOP",
-      "type": "shell",
-      "command": "${workspaceFolder}/scripts/autonomy.sh stop",
-      "problemMatcher": []
-    },
-    {
-      "label": "ROS: launch standalone Gazebo field + test Action",
-      "type": "shell",
-      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_gazebo autonomous_field_test.launch.py'",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_gazebo robocon_field.launch.py'",
       "problemMatcher": []
     },
     {

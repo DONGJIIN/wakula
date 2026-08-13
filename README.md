@@ -130,12 +130,11 @@ wakula/
 │   ├── quadruped_planning/     # 地形决策、入口引导与自主探索任务
 │   ├── quadruped_teleop/       # Xbox /joy 到独立 /cmd_vel_joy 的安全适配
 │   ├── quadruped_tools/        # rosbag 准确率评估与全栈长时间回归
-│   └── slam/                   # SLAM、Nav2、OpenCV 组合与自主导航开关
+│   └── slam/                   # 核心算法入口与完全独立的自主导航 launch
 ├── scripts/
 │   ├── record_bag.sh           # 记录感知、导航与诊断数据
 │   ├── diagnose.sh             # 检查 ROS 话题和 TF
 │   ├── check_integration.sh    # 一键核验未来真机对接合同
-│   ├── autonomy.sh             # 运行中启动、停止或查看自主任务
 │   └── build.sh                # 统一编译
 ├── .colcon/defaults.yaml
 ├── .github/workflows/ros2-ci.yaml
@@ -150,14 +149,14 @@ wakula/
 | 包 | 主要职责 | 关键入口 |
 |---|---|---|
 | `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
-| `quadruped_gazebo` | 独立比赛障碍 world、仿真传感器桥与测试 Action 适配器，不启动算法 | `robocon_field.launch.py`、`autonomous_field_test.launch.py` |
+| `quadruped_gazebo` | 独立比赛障碍 world、测试载体与传感器数据源，不启动任何算法 | `robocon_field.launch.py` |
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
 | `quadruped_interfaces` | 带时间戳的感知、导航与越障交接合同 | 五个 `msg/` + `TraverseObstacle.action` |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
 | `quadruped_planning` | 地形风险分类、入口引导、速度安全门和未知地图自主任务 | 四个导航/任务节点 |
 | `quadruped_teleop` | Xbox 按键安全状态机和独立 Twist 候选 | `xbox_teleop` |
 | `quadruped_tools` | rosbag 标注评估、SLAM/Nav2 长测与资源报告 | `perception_bag_evaluator`、`stack_regression` |
-| `slam` | 建图、定位、全局/局部规划、OpenCV 与默认关闭的自主导航统一入口 | `slam.launch.py`、`autonomy_keyboard` |
+| `slam` | 核心 SLAM/Nav2/OpenCV 入口，以及需显式启动的独立自主导航入口 | 两个互不 include 的 launch |
 
 主要节点：
 
@@ -451,7 +450,7 @@ ros2 launch slam slam.launch.py
 
 这条命令会启动占位模型、SLAM Toolbox、Nav2、OpenCV、点云地形分析、保守决策、
 速度门和 RViz，但不会自动启动雷达/相机厂商驱动，也不会实现真实机器狗步态。
-自主导航节点也随该入口装载，但默认处于 `IDLE`，不会自行下发导航目标。
+该命令不会创建自主导航节点，也不会自行下发探索目标。
 
 常用参数都集中在同一入口：
 
@@ -463,8 +462,6 @@ ros2 launch slam slam.launch.py
 | `slam_enabled`、`nav2_enabled` | `true` | 分别启停 SLAM Toolbox 和 Nav2 |
 | `nav2_autostart` | `true` | 数据与 TF 就绪后是否自动激活 Nav2 |
 | `vision` | `true` | 是否启动 OpenCV 障碍识别 |
-| `autonomy` | `true` | 是否装载自主导航节点；默认只装载、不执行 |
-| `autonomy_autostart` | `false` | 是否启动即执行；安全起见保持默认关闭 |
 | `robot_model` | `auto` | 自动在 Gazebo 关闭占位 TF、真机开启；也可显式覆盖 |
 | `rviz` | `true` | 是否启动 RViz |
 | `use_sim_time` | `auto` | 重试检测 `/clock`；也可显式设为 `true/false` |
@@ -529,53 +526,35 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 
 ### 6.1 自主探索与逐障碍越障编排
 
-先启动统一算法入口：
+先启动核心算法入口：
 
 ```bash
 ros2 launch slam slam.launch.py
 ```
 
-自主导航已经是该入口中的独立功能，和 OpenCV 一样不依赖 Gazebo，并且默认保持关闭。
-另开终端后，每执行一次下面的命令就在开启与停止之间切换：
+此时系统中没有自主导航节点。需要探索时另开终端，只启动独立功能：
 
 ```bash
-cd ~/wakula
-./auto
+ros2 launch slam autonomous_navigation.launch.py
 ```
 
-`./auto` 是纯控制命令：它只调用 `/autonomy/toggle`，绝不会启动或关闭 SLAM、Gazebo、
-RViz。停止会取消当前目标并停车，地图继续保留；再次执行即可继续。
-
-也可以使用终端单键控制：
-
-```bash
-ros2 run slam autonomy_keyboard
-# 空格或 t：开启/停止；q：只退出键盘工具
-```
-
-请先点击该终端使其获得键盘焦点，再按空格或 `t`。工具会继续显示真实任务状态：
-`EXPLORING`/`ALIGNING_OBSTACLE` 表示已经执行；若仍为 `WAITING_FOR_INPUTS`，说明开关请求
-虽已接受但地图、Nav2 或传感器尚未就绪，不应把它当作“已经自动导航”。Gazebo 启动终端
-必须先出现 `Entity creation successful` 和 `Spawning Gazebo test quadruped: name=generic_quadruped`。
-若只有场地没有狗，应关闭残留 Gazebo 后重新启动完整 launch，不要单独保留 `gz sim server`。
-
-VS Code 的“终端 → 运行任务”中选择 `ROS: 一键开启或停止自动导航`，效果与 `./auto`
-相同。调试时仍可用 `./scripts/autonomy.sh start|stop|status|toggle`。
+启动该 launch 就立即执行，回到该终端按 `Ctrl-C` 就停止并取消任务；核心 SLAM、Nav2、
+OpenCV、RViz 和地图继续运行。它不 include `slam.launch.py`，也不读取 Gazebo world。
 
 运行逻辑为：选择未知地图前沿 → Nav2 探索 → 连续确认障碍 → 冻结障碍位置并导航至入口 →
 调用 `/traverse_obstacle` → 成功后登记该障碍并继续下一前沿。前沿目标来自 `/map`，代码不读
 比赛 world 坐标；正式坐标改变不需要修改任务算法。真机必须由运动控制团队实现
 `quadruped_interfaces/action/TraverseObstacle` 服务端，否则任务会保守等待/报告接口不可用。
 
-Gazebo 场地与算法完全分开。仿真时先独立启动场地和测试 Action：
+Gazebo 场地与算法完全分开。仿真时场地只提供测试模型和传感器数据：
 
 ```bash
-ros2 launch quadruped_gazebo autonomous_field_test.launch.py
+ros2 launch quadruped_gazebo robocon_field.launch.py
 ```
 
-然后在另一个终端运行 `ros2 launch slam slam.launch.py`，最后用 `./auto` 或空格键开启。
-Gazebo 入口只启动独立场地和 `sim_traverse_obstacle`，不加载 SLAM、Nav2、OpenCV 或
-`autonomous_mission`。测试适配器不是四足动力学或真实越障控制，也不会被算法入口隐式加载。
+然后分别运行核心 `slam.launch.py` 和可选 `autonomous_navigation.launch.py`。Gazebo 入口
+不加载 SLAM、Nav2、OpenCV、自主任务或越障 Action。需要验证越障接口时，才额外运行
+`ros2 launch quadruped_gazebo sim_traversal_controller.launch.py`；它也与场地独立。
 
 启动 `slam.launch.py` 后先看终端摘要。仿真联调必须显示
 `simulation_detected=true, use_sim_time=true, robot_model=false`；入口会对 `/clock` 做多次
@@ -976,7 +955,7 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 | `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
 | `quadruped_gazebo/worlds/robocon_obstacle_field.sdf` | 规则障碍尺寸、颜色和集中式参考布局 |
 | `quadruped_gazebo/launch/robocon_field.launch.py` | 独立 Gazebo/传感器桥入口，不加载算法 |
-| `quadruped_gazebo/launch/autonomous_field_test.launch.py` | 独立 Gazebo 场地 + 仿真 Action；不加载算法 |
+| `quadruped_gazebo/launch/sim_traversal_controller.launch.py` | 可选仿真 Action 替身；不启动场地或算法 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
 | `quadruped_planning/config/terrain_navigation.yaml` | 地形分类阈值、视觉辅助和速度门超时 |
@@ -987,9 +966,8 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 | `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
 | `slam/behavior_trees/navigate_to_pose_wakula.xml` | 清图、等待、小退和小角度旋转恢复树 |
 | `slam/config/sensor_profiles.yaml` | 常见雷达/相机话题 profile，可直接扩展 |
-| `slam/launch/slam.launch.py` | SLAM、Nav2、OpenCV、点云和默认 IDLE 的自主导航统一入口 |
-| `slam/slam/autonomy_keyboard.py` | 空格/t 切换自主任务，q 退出的独立键盘工具 |
-| `slam/launch/autonomous_navigation.launch.py` | 旧命令兼容别名；功能转发到 slam.launch.py |
+| `slam/launch/slam.launch.py` | 只启动 SLAM、Nav2、OpenCV、点云和 RViz，不创建自主任务 |
+| `slam/launch/autonomous_navigation.launch.py` | 独立自主探索/越障编排；启动即运行，Ctrl-C 即停止 |
 
 核心算法公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
 `slam/launch/slam.launch.py` 在其上增加 SLAM、Nav2 与 RViz，避免重复维护节点。

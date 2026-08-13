@@ -83,8 +83,9 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "quadruped_planning" / "autonomous_mission.py").read_text(encoding="utf-8")
-    assert '"/autonomy/set_enabled"' in source
     assert '"/traverse_obstacle"' in source
+    assert '"/autonomy/set_enabled"' not in source
+    assert '"/autonomy/toggle"' not in source
     assert "robocon_obstacle_field" not in source
     assert "layout_" not in source
     # lifecycle 启动窗口中的 Action reject 不能被当作真正的路径规划失败。
@@ -93,3 +94,9 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     )[0]
     assert "blocked_frontiers.append" not in rejected_branch
     assert "nav_retry_until" in rejected_branch
+    assert "minimum_approach_goal_distance" in source
+    assert "approach_within_tolerance" in source
+    assert "WAITING_FOR_TRAVERSAL_CONTROLLER" in source
+    assert "waiting for /traverse_obstacle controller" in source
+    # Nav2 成功回调和周期 READY 分支都必须检查执行器，不能存在假 HANDOFF 旁路。
+    assert source.count("not self.traverse_client.server_is_ready()") >= 3

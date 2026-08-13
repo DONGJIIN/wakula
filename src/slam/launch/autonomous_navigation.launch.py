@@ -1,9 +1,16 @@
-"""兼容入口：核心功能现已直接归入 slam.launch.py，本文件仅转发参数。"""
+"""单独启动自主探索与越障任务；不启动或 include 核心 SLAM 和仿真环境。
+
+这是 ``slam`` 包内的可选功能入口。运行前必须已有 ``slam.launch.py``（或等价真机
+SLAM/Nav2/OpenCV 数据链）；关闭本 launch 只停止自主任务，不影响地图、导航节点和传感器。
+"""
+
+import re
+import subprocess
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -11,34 +18,53 @@ def package_file(package, folder, filename):
     return PathJoinSubstitution([FindPackageShare(package), folder, filename])
 
 
+def _clock_is_available() -> bool:
+    """自动识别仿真时钟；真机没有 /clock 时保持系统时间。"""
+    try:
+        result = subprocess.run(
+            ["ros2", "topic", "info", "/clock", "--no-daemon", "--spin-time", "2.0"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    match = re.search(r"Publisher count:\s*(\d+)", result.stdout)
+    return bool(match and int(match.group(1)) > 0)
+
+
+def _launch_mission(context):
+    requested = LaunchConfiguration("use_sim_time").perform(context).lower()
+    if requested not in {"auto", "true", "false"}:
+        raise RuntimeError("use_sim_time must be auto, true or false")
+    use_sim_time = _clock_is_available() if requested == "auto" else requested == "true"
+    return [
+        Node(
+            package="quadruped_planning",
+            executable="autonomous_mission",
+            name="autonomous_mission",
+            output="screen",
+            parameters=[
+                LaunchConfiguration("mission_params_file"),
+                {"use_sim_time": use_sim_time, "autostart": True},
+            ],
+        )
+    ]
+
+
 def generate_launch_description():
-    core_arguments = {
-        "use_sim_time": LaunchConfiguration("use_sim_time"),
-        "robot_model": LaunchConfiguration("robot_model"),
-        "rviz": LaunchConfiguration("rviz"),
-        "sensor_profile": LaunchConfiguration("sensor_profile"),
-        "camera_topic": LaunchConfiguration("camera_topic"),
-        "point_cloud_topic": LaunchConfiguration("point_cloud_topic"),
-        "autonomy": "true",
-        "autonomy_autostart": LaunchConfiguration("autostart_mission"),
-        "mission_params_file": LaunchConfiguration("mission_params_file"),
-    }
     return LaunchDescription([
-        # 任务节点需要真正的 bool 参数；真机默认系统时钟，仿真包装入口显式传 true。
-        # slam.launch.py 自身支持 auto，但不能把字符串 "auto" 直接强制转换成 bool。
-        DeclareLaunchArgument("use_sim_time", default_value="false"),
-        DeclareLaunchArgument("robot_model", default_value="auto"),
-        DeclareLaunchArgument("rviz", default_value="true"),
-        DeclareLaunchArgument("sensor_profile", default_value="ros_default"),
-        DeclareLaunchArgument("camera_topic", default_value=""),
-        DeclareLaunchArgument("point_cloud_topic", default_value=""),
-        DeclareLaunchArgument("autostart_mission", default_value="false"),
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="auto",
+            description="auto detects /clock; true for simulation, false for hardware",
+        ),
         DeclareLaunchArgument(
             "mission_params_file",
-            default_value=package_file("quadruped_planning", "config", "autonomous_mission.yaml"),
+            default_value=package_file(
+                "quadruped_planning", "config", "autonomous_mission.yaml"
+            ),
         ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(package_file("slam", "launch", "slam.launch.py")),
-            launch_arguments=core_arguments.items(),
-        ),
+        OpaqueFunction(function=_launch_mission),
     ])

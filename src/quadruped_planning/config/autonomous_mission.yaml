@@ -7,6 +7,8 @@ autonomous_mission:
     frontier_minimum_distance: 0.55
     frontier_maximum_distance: 7.0
     frontier_exclusion_radius: 0.65
+    # 小于 Nav2 goal checker 容差的入口不再作为导航目标，避免“挪一下就成功”。
+    minimum_approach_goal_distance: 0.35
     # Nav2 lifecycle 尚未 ACTIVE 时 Action 会短暂拒绝目标；退避重试而非误记为不可达。
     nav_rejection_retry_delay: 1.0
     # 规划中止/取消后留给 costmap、行为树和 SLAM 地图边界的恢复时间，避免高频重发。

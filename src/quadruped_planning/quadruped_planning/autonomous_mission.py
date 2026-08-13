@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass
 from math import atan2, cos, floor, hypot, isfinite, pi, sin
 import time
+import signal
 from typing import List, Optional, Sequence, Tuple
 
 from geometry_msgs.msg import PoseStamped
@@ -20,6 +21,7 @@ from nav_msgs.msg import OccupancyGrid
 from quadruped_interfaces.action import TraverseObstacle
 from quadruped_interfaces.msg import TraversalGuidance
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
@@ -27,7 +29,6 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_msgs.msg import String
-from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -188,6 +189,9 @@ class AutonomousMission(Node):
             "autostart": False, "map_timeout": 2.0, "guidance_timeout": 1.0,
             "frontier_minimum_cells": 8, "frontier_minimum_distance": 0.55,
             "frontier_maximum_distance": 7.0, "frontier_exclusion_radius": 0.65,
+            # DWB 默认 goal checker 容差约 0.25 m。比它更近的入口目标会被立即判成功，
+            # 表现为机器人只挪一下就停；任务层直接进入受控交接，不发送伪 Nav2 目标。
+            "minimum_approach_goal_distance": 0.35,
             "nav_rejection_retry_delay": 1.0,
             "nav_failure_retry_delay": 1.0,
             "handoff_fallback_max_distance": 1.50,
@@ -209,10 +213,6 @@ class AutonomousMission(Node):
         self.create_subscription(TraversalGuidance, "/traversal/guidance", self._guidance_callback, 10)
         self.state_pub = self.create_publisher(String, "/autonomy/state", 10)
         self.event_pub = self.create_publisher(String, "/autonomy/event", 10)
-        self.create_service(SetBool, "/autonomy/set_enabled", self._set_enabled)
-        # Trigger 由操作员快捷入口使用。开关真值保存在本节点的 ``enabled`` 中，因此不需要
-        # shell 脚本根据易丢失的状态话题猜测当前状态，也不会因脚本重启而把开/关弄反。
-        self.create_service(Trigger, "/autonomy/toggle", self._toggle_enabled)
         self.nav_client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.traverse_client = ActionClient(self, TraverseObstacle, "/traverse_obstacle")
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -249,6 +249,7 @@ class AutonomousMission(Node):
         self.completed_obstacles = []
         self.blocked_frontiers = []
         self.empty_frontier_count = 0
+        self.controller_wait_reported = False
         self.cooldown_until = 0.0
         self.locked_obstacle_position = None
         self.create_timer(0.25, self._tick)
@@ -259,54 +260,6 @@ class AutonomousMission(Node):
         if event:
             self.event_pub.publish(String(data=event))
             self.get_logger().info(f"Autonomy {self.state}: {event}")
-
-    def _set_enabled(self, request, response):
-        if request.data and (
-            self.nav_handle is not None
-            or self.nav_send_pending
-            or self.traverse_send_pending
-            or self.traverse_cancel_pending
-            or self.traverse_handle is not None
-        ):
-            response.success = False
-            response.message = "previous goal is still cancelling; retry START"
-            return response
-        self.enabled = bool(request.data)
-        if self.enabled:
-            # STOP/START 是现场暂停与继续，必须保留已完成障碍；只有任务自然 COMPLETED 后
-            # 再次 START 才视为新一轮比赛，清除地图级任务记忆。
-            if self.state == "COMPLETED":
-                self.completed_obstacles.clear()
-                self.blocked_frontiers.clear()
-                self.empty_frontier_count = 0
-            self.state = "WAITING_FOR_INPUTS"
-            self._publish_state("START requested")
-        else:
-            self.state = "STOPPED"
-            self.pending_traverse = None
-            self.pending_traverse_position = None
-            self.locked_obstacle_position = None
-            self._cancel_nav("stop")
-            if self.traverse_handle is not None and not self.traverse_cancel_pending:
-                self.traverse_cancel_pending = True
-                self.traverse_handle.cancel_goal_async()
-            self._publish_state("STOP requested; goals cancelled")
-        response.success = True
-        response.message = self.state
-        return response
-
-    def _toggle_enabled(self, _request, response):
-        """原子地翻转任务使能状态，供键盘和 ``./auto`` 一键入口调用。"""
-        request = SetBool.Request()
-        request.data = not self.enabled
-        result = self._set_enabled(request, SetBool.Response())
-        response.success = result.success
-        if result.success:
-            action = "ENABLED" if self.enabled else "DISABLED"
-            response.message = f"{action}: {result.message}"
-        else:
-            response.message = result.message
-        return response
 
     def _map_callback(self, msg):
         self.map_msg = msg
@@ -494,13 +447,19 @@ class AutonomousMission(Node):
                 <= float(self.params["handoff_fallback_max_lateral"])
             )
             if same_entry:
-                self.pending_traverse = latest
-                self.pending_traverse_position = obstacle_position
-                self.pending_traverse_started = time.monotonic()
-                self.state = "HANDOFF"
-                self._publish_state(
-                    "Nav2 reached confirmed entry; guarded handoff fallback"
-                )
+                now = time.monotonic()
+                if not self.traverse_client.server_is_ready():
+                    self._hold_for_traversal_controller(
+                        latest, obstacle_position, now
+                    )
+                else:
+                    self.pending_traverse = latest
+                    self.pending_traverse_position = obstacle_position
+                    self.pending_traverse_started = now
+                    self.state = "HANDOFF"
+                    self._publish_state(
+                        "Nav2 reached confirmed entry; guarded handoff fallback"
+                    )
                 return
             # 到达旧入口后若最新证据已经属于另一个障碍，释放目标锁再探索，不能把新障碍
             # 的相对目标误套到旧入口，也不能永久锁死。
@@ -525,6 +484,23 @@ class AutonomousMission(Node):
         self._publish_state(f"handoff obstacle type={guidance.obstacle_type}")
         future = self.traverse_client.send_goal_async(goal)
         future.add_done_callback(self._traverse_goal_response)
+
+    def _hold_for_traversal_controller(self, target, position, now):
+        """入口已到达但执行器未接入时保持原地，不让 Nav2把赛道障碍当作绕行物。
+
+        Gazebo、真机 SDK 或未来运动控制器都只能通过同一个 Action 合同接入。任务管理器
+        不猜测腿部动作，也不会因服务缺失继续选择障碍背后的前沿目标。
+        """
+        self.pending_traverse = target
+        self.pending_traverse_position = position
+        self.pending_traverse_started = now
+        self.state = "WAITING_FOR_TRAVERSAL_CONTROLLER"
+        self._cancel_nav("waiting_for_traversal_controller")
+        if not self.controller_wait_reported:
+            self.controller_wait_reported = True
+            self._publish_state(
+                "entry reached; waiting for /traverse_obstacle controller"
+            )
 
     def _traverse_goal_response(self, future):
         self.traverse_send_pending = False
@@ -595,12 +571,20 @@ class AutonomousMission(Node):
         if now < self.nav_retry_until:
             return
         if self.pending_traverse is not None:
-            if now - self.pending_traverse_started > float(self.params["traversal_timeout"]):
+            if (
+                self.state != "WAITING_FOR_TRAVERSAL_CONTROLLER"
+                and now - self.pending_traverse_started
+                > float(self.params["traversal_timeout"])
+            ):
                 self.pending_traverse = None
                 self.pending_traverse_position = None
                 self.state = "RECOVERY"
                 self._publish_state("TraverseObstacle server unavailable/timeout")
                 return
+            if not self.traverse_client.server_is_ready():
+                self.state = "WAITING_FOR_TRAVERSAL_CONTROLLER"
+                return
+            self.controller_wait_reported = False
             if self.nav_handle is None and not self.nav_send_pending:
                 self._start_traverse(self.pending_traverse)
             return
@@ -613,22 +597,56 @@ class AutonomousMission(Node):
                     return
                 self.locked_obstacle_position = None
             if target.phase == TraversalGuidance.PHASE_READY and target.ready_for_handoff:
-                self.pending_traverse, self.state = target, "HANDOFF"
-                self.pending_traverse_position = (
+                obstacle_position = (
                     self.locked_obstacle_position or self._obstacle_position(target)
                 )
-                self.pending_traverse_started = now
-                self._cancel_nav("handoff")
-                self._publish_state("READY confirmed; cancelling Nav2 before handoff")
+                if not self.traverse_client.server_is_ready():
+                    self._hold_for_traversal_controller(
+                        target, obstacle_position, now
+                    )
+                else:
+                    self.pending_traverse, self.state = target, "HANDOFF"
+                    self.pending_traverse_position = obstacle_position
+                    self.pending_traverse_started = now
+                    self._cancel_nav("handoff")
+                    self._publish_state("READY confirmed; cancelling Nav2 before handoff")
                 return
             if target.phase in (TraversalGuidance.PHASE_APPROACH, TraversalGuidance.PHASE_ALIGN):
                 approach = self._relative_approach_pose(target)
                 if self.nav_handle is not None and self.nav_purpose == "frontier":
                     self._cancel_nav("approach")
                     return
+                if approach is not None:
+                    robot_to_goal = hypot(
+                        approach.pose.position.x - robot[0],
+                        approach.pose.position.y - robot[1],
+                    )
+                    if (
+                        robot_to_goal
+                        < float(self.params["minimum_approach_goal_distance"])
+                        and self.nav_handle is not None
+                        and self.nav_purpose == "approach"
+                    ):
+                        # 感知持续更新会让入口从“值得导航”缩短到 Nav2 容差以内；此时
+                        # 取消正在运行的旧入口目标，不能继续等到 goal_timeout。
+                        self._cancel_nav("approach_within_tolerance")
+                        return
                 if approach is not None and self.nav_handle is None and not self.nav_send_pending:
                     if self.locked_obstacle_position is None:
                         self.locked_obstacle_position = self._obstacle_position(target)
+                    if robot_to_goal < float(self.params["minimum_approach_goal_distance"]):
+                        # 已在入口容差内时不发一个必然被 Nav2 秒判成功的 8 cm 目标。
+                        if not self.traverse_client.server_is_ready():
+                            self._hold_for_traversal_controller(
+                                target, self.locked_obstacle_position, now
+                            )
+                        else:
+                            self.pending_traverse = target
+                            self.pending_traverse_position = self.locked_obstacle_position
+                            self.pending_traverse_started = now
+                            self.state = "HANDOFF"
+                            self._publish_state("entry already within approach tolerance")
+                        return
                     self.state = "ALIGNING_OBSTACLE"
                     self._send_nav_goal(approach, "approach", target)
                 return
@@ -654,17 +672,35 @@ class AutonomousMission(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    # 自主导航是独立进程，Ctrl-C/launch SIGTERM 必须先取消远端 Nav2 Action，不能让
+    # rclpy 默认 handler 先关闭 context，否则任务节点退出后机器人仍可能执行旧目标。
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = AutonomousMission()
+    stopping = False
+
+    def request_stop(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+
+    previous_sigint = signal.signal(signal.SIGINT, request_stop)
+    previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not stopping:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        # rclpy 自身安装 SIGINT/SIGTERM handler。context 已关闭时不能再发送 Action cancel，
-        # 否则正常 Ctrl-C 会在 Python 回调清理阶段被 Ubuntu 误报成节点崩溃。
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
         if rclpy.ok():
             node._cancel_nav("shutdown")
+            if node.traverse_handle is not None and not node.traverse_cancel_pending:
+                node.traverse_cancel_pending = True
+                node.traverse_handle.cancel_goal_async()
+            # 给 Action cancel 请求一个短暂 DDS 发送窗口；不等待远端控制器无限响应。
+            deadline = time.monotonic() + 0.75
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

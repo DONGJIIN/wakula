@@ -20,7 +20,6 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, SetRemap
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
@@ -151,25 +150,6 @@ def _launch_complete_stack(context):
         condition=IfCondition(LaunchConfiguration("rviz")),
         output="screen",
     )
-    # 自主探索/逐障碍任务属于算法层，与 OpenCV 一样随 slam.launch.py 装载，但默认仅
-    # 创建为 IDLE 节点。操作员必须通过 ./auto、键盘工具或 SetBool 服务显式使能；因此
-    # 启动 SLAM 不会让机器人自行运动。Gazebo launch 不创建这个节点。
-    autonomy = Node(
-        package="quadruped_planning",
-        executable="autonomous_mission",
-        name="autonomous_mission",
-        output="screen",
-        parameters=[
-            LaunchConfiguration("mission_params_file"),
-            {
-                "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
-                "autostart": ParameterValue(
-                    LaunchConfiguration("autonomy_autostart"), value_type=bool
-                ),
-            },
-        ],
-        condition=IfCondition(LaunchConfiguration("autonomy")),
-    )
     # 把时间源和模型 TF 选择直接打印在启动终端中。漏写仿真参数时，使用者无需翻查
     # launch 临时参数文件即可立即发现 use_sim_time=false / robot_model=true。
     summary = (
@@ -191,7 +171,6 @@ def _launch_complete_stack(context):
                 bringup,
                 slam_toolbox,
                 nav2,
-                autonomy,
                 rviz,
             ]
         ),
@@ -248,16 +227,6 @@ def generate_launch_description():
                 "vision", default_value="true", description="是否启动 OpenCV 与相机/点云融合节点"
             ),
             DeclareLaunchArgument(
-                "autonomy",
-                default_value="true",
-                description="是否装载自主探索/逐障碍任务节点；节点默认保持 IDLE",
-            ),
-            DeclareLaunchArgument(
-                "autonomy_autostart",
-                default_value="false",
-                description="是否启动即执行自主任务；安全起见默认 false",
-            ),
-            DeclareLaunchArgument(
                 "robot_model",
                 default_value="auto",
                 description="auto 在本项目 Gazebo 中关闭占位 TF，真机默认开启",
@@ -294,13 +263,6 @@ def generate_launch_description():
                     "quadruped_planning", "config", "terrain_navigation.yaml"
                 ),
                 description="地形安全决策和速度门参数 YAML",
-            ),
-            DeclareLaunchArgument(
-                "mission_params_file",
-                default_value=package_file(
-                    "quadruped_planning", "config", "autonomous_mission.yaml"
-                ),
-                description="自主探索、入口锁定和越障交接参数 YAML",
             ),
             DeclareLaunchArgument(
                 "rviz_config_file",

@@ -29,7 +29,6 @@ setup(
             "collision_monitor_supervisor = slam.collision_monitor_supervisor:main",
             "nav2_readiness_monitor = slam.nav2_readiness_monitor:main",
             "navigation_health_monitor = slam.navigation_health_monitor:main",
-            "autonomy_keyboard = slam.autonomy_keyboard:main",
         ],
     },
 )

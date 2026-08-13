@@ -52,22 +52,15 @@ def test_all_eight_rule_obstacles_exist():
     assert expected.issubset({item.attrib["name"] for item in WORLD.findall("model")})
 
 
-def test_autonomous_field_test_is_explicitly_simulation_only():
-    """Gazebo 入口只含场地和仿真 Action，不能反向装载核心算法。"""
-    launch = (PACKAGE_ROOT / "launch" / "autonomous_field_test.launch.py").read_text(
+def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
+    """唯一场地入口只提供环境/传感器，不能装载算法或越障执行器。"""
+    launch = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text(
         encoding="utf-8"
     )
-    adapter = (PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py").read_text(
-        encoding="utf-8"
-    )
-    assert "sim_traverse_obstacle" in launch
-    assert '"start_gazebo"' in launch
-    assert "IfCondition" in launch
+    assert "sim_traverse_obstacle" not in launch
     assert 'package_file("slam"' not in launch
     assert "autonomous_navigation.launch.py" not in launch
-    assert "autostart_mission" not in launch
-    assert "SIMULATION ONLY" in adapter
-    assert '"/cmd_vel_teleop"' in adapter
+    assert "autonomous_mission" not in launch
 
 
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
