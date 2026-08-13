@@ -20,6 +20,7 @@ float32 slope_pitch        # 前后坡角，rad
 float32 slope_roll         # 左右坡角，rad
 float32 roughness          # 地面拟合残差，m
 float32 distance           # 最近有效障碍前向距离，m
+float32 lateral_offset     # 障碍连通区域中心相对 base_link 的横向偏移，左正右负，m
 float32 width              # 障碍横向连通宽度，m
 float32 clearance_height   # 横杆下沿相对地面净空，m
 uint32 valid_points        # 当前 ROI 内参与判断的有效原始点数

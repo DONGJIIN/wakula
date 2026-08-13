@@ -30,6 +30,7 @@ float32 slope_pitch
 float32 slope_roll
 float32 roughness
 float32 distance
+float32 lateral_offset     # 障碍中心横向偏移，供入口对正使用，左正右负，m
 float32 width
 float32 clearance_height
 uint32 valid_points

@@ -20,6 +20,7 @@ float32 slope_pitch
 float32 slope_roll
 float32 roughness
 float32 distance
+float32 lateral_offset     # 障碍中心横向偏移，左正右负，m
 float32 width
 float32 clearance_height
 float32 time_skew          # 本次配对的图像/点云 Header 时间差，s

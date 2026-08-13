@@ -3,11 +3,12 @@ Wakula 算法说明
 
 一、范围
 ------
-当前只实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策、Xbox 手柄
-Twist 适配和离线评估。
+当前只实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策、越障入口
+引导、Xbox 手柄 Twist 适配和离线评估。
 没有实现硬件驱动、状态估计、运动学/动力学、站立步态、全身控制、真实越障 Action
 或比赛逻辑。Gazebo 仅实现独立的规则障碍参考场地和传感器测试载体，不属于算法启动，
-也不是机器狗动力学仿真。识别到需要抬腿/降低姿态的障碍时会停车，不会生成关节命令。
+也不是机器狗动力学仿真。识别到需要抬腿/降低姿态的障碍后，算法只让 Nav2 接近并对正
+入口，在交接区停车发布 READY；不会生成关节命令或声称已经完成越障。
 
 二、各部分作用
 ------------
@@ -40,7 +41,7 @@ Twist 适配和离线评估。
    原始候选和多帧确认框的 /vision/annotated_image，RViz 可直接查看算法实际看到的画面。
 
    terrain_analyzer.py：把 PointCloud2 按采样时间变换到 base_link，截取前方 ROI，估计
-   地面基准、俯仰/横滚坡度、粗糙度、障碍高度、距离、宽度、坑深和横杆净空；结果同时
+   地面基准、俯仰/横滚坡度、粗糙度、障碍高度、距离、横向偏移、宽度、坑深和横杆净空；结果同时
    提供给规划层和 Nav2 local costmap。进入 Nav2 的不是原始 ROI：算法按每帧拟合地面
    计算相对高度，只保留凸起，避免合法坡面封路，同时保留 base_link 下方的低台阶。
    几何无效时发布空障碍云并由安全层 STOP。只缓存最新帧；高分辨率点云在 TF 前先做
@@ -76,10 +77,16 @@ Twist 适配和离线评估。
    时会明确写“待结构确认”。视觉通用有色候选仍显示给操作员，但不覆盖已经确认的点云
    名称，也不伪装成参与限速的几何证据。
 
-   已确认的台阶、坑洞、墙、横杆和立柱若仍在 0.75 m 硬停车区以外，会暂时转换为
-   WALK/0.25 倍低速，让 Nav2 根据代价地图绕行；进入近距区仍停车。这个机制解决了
-   “两米外已经识别障碍，却因为速度先归零而永远无法转向”的联调死锁。坡面距离不是
-   坡脚距离，当前没有腿控时仍保持 CLIMB/STOP，不套用远距放行。
+   已确认的台阶、坑洞、墙和横杆若仍在 0.75 m 交接区以外，会暂时转换为 WALK/0.25
+   倍低速，让 Nav2 到达越障入口并对正；进入近距区停车。POLE 表示绕杆区立柱，仍由
+   Nav2 代价地图低速避碰，不交给越障动作。该机制解决“远处识别后立即归零而到不了
+   入口”的死锁，不再把比赛障碍统一当作应绕开的目标。
+
+   traversal_guidance.py：订阅 NavigationSafety，计算障碍中心横向偏移和对正角，发布
+   APPROACH、ALIGN、READY 三阶段以及 base_link 中的相对入口 PoseStamped。入口始终位于
+   障碍前方自由空间；节点不调用 NavigateToPose。未来任务管理器负责把入口位姿转换为
+   Nav2 goal，READY 后暂停 Nav2 并交给真实越障控制器，成功后恢复原导航目标。输入超时
+   会发布 INVALID，防止 READY 粘住。
 
    Nav2 仍采用标准双层规划：planner_server 的 NavFnPlanner 使用 SLAM 地图生成全局路径；
    controller_server 的 DWBLocalPlanner 使用实时局部代价地图跟踪路径和绕开临时障碍。
@@ -162,8 +169,9 @@ Twist 适配和离线评估。
 1. 点云几何决定是否可通行；OpenCV 只辅助提醒和减速。
 2. 点云不足、NaN/Inf、TF 失败或消息超时都不得当作安全地面。
 3. WALK：允许 Nav2 速度；视觉可把速度降到 vision_speed_scale。
-4. STEP/CLIMB：只报告类别并停车，等待未来真机越障控制器或重新规划。
-5. PIT/WALL/BAR/POLE 与高台阶：远处先低速交给 Nav2 绕行，进入 0.75 m 近距区停车。
+4. STEP/PIT/WALL/BAR 与坡面：远处由 Nav2 接近入口并对正，进入 0.75 m 交接区停车并
+   发布 READY，等待未来真机越障控制器。
+5. POLE：属于绕杆导航物体，Nav2 结合代价地图低速从旁通过，不触发越障控制交接。
 6. 危险升级快，解除危险慢，避免阈值附近抖动。
 
 四、推荐调参顺序
@@ -206,15 +214,17 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 5. 真机模型接管 TF 时设置 robot_model:=false，避免重复发布固定变换。
 6. 底盘稳定输出 /odom、odom->base_link 并消费最终 /cmd_vel 后，运行
    scripts/check_integration.sh 核验类型、TF 和消费者。
-7. 未来运动/越障模块优先读取 /terrain/navigation_safety，并检查 perception_valid、时间戳
-   和模式；这只是环境约束输入，动作执行、反馈、取消和硬件安全须由其独立实现。
+7. 未来运动/越障模块读取 /traversal/guidance，并用 /terrain/navigation_safety 复核
+   perception_valid、时间戳和几何；两者只是入口/环境合同，动作执行、反馈、取消和硬件
+   安全须由其独立实现。
 
 七、跨团队接口设计原则
 ------------------
 1. 核心算法只依赖标准 Image、PointCloud2、LaserScan、Odometry、TF 和 Twist，不导入厂家 SDK。
 2. 厂家话题差异只放进 sensor_profiles.yaml 或 launch 参数，不复制感知节点。
-3. /perception/fused_obstacle 是感知内部原子结果；/terrain/navigation_safety 是交给未来
-   导航/运动团队的稳定只读摘要；/cmd_vel 是 Nav2 给未来底盘的标准速度输出。
+3. /perception/fused_obstacle 是感知内部原子结果；/terrain/navigation_safety 是稳定环境
+   摘要；/traversal/guidance 是 Nav2 入口与运动接管合同；/cmd_vel 是 Nav2 给未来底盘的
+   标准速度输出。
 4. 接口消息中的 NaN/Inf 在发布边界归零；任何关键证据非法、点数不足或超时均按 STOP。
 5. 新硬件先录 rosbag 离线调参，再断开执行器运行全栈，最后才由硬件团队低速接入 /cmd_vel。
 6. 查节点作用、归属和关键输入输出时，以 connect.txt 第二节为速查入口；消息字段、类型和

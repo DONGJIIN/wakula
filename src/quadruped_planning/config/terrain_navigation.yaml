@@ -28,8 +28,8 @@ terrain_safety_assessor:
     vision_min_confidence: 0.55
     vision_center_margin: 0.20
     vision_speed_scale: 0.35
-    # 已由点云确认且进入局部代价地图的远处实体障碍，先以低速交给 Nav2 绕行；进入
-    # 0.75 m 硬停车区才归零。坡面不使用该放行，避免没有腿控时直接驶上坡。
+    # 已由点云确认的越障目标在远处保留低速，让 Nav2 到达并对正入口；进入 0.75 m
+    # 交接区后归零，等待未来运动控制器接管。该参数绝不表示让 Nav2 绕开比赛障碍。
     hard_stop_distance: 0.75
     hazard_approach_speed: 0.25
     # 正前方类别变化立即打印；未变化时按该周期刷新，避免终端按感知帧率刷屏。
@@ -45,3 +45,15 @@ navigation_speed_gate:
     navigation_health_timeout: 0.5
     require_navigation_health: true
     default_speed_limit: 0.0
+
+# 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。
+traversal_guidance:
+  ros__parameters:
+    input_timeout: 0.8
+    approach_start_distance: 1.50
+    handoff_distance: 0.75
+    alignment_tolerance: 0.10
+    max_lateral_target: 0.45
+    approach_speed_limit: 0.25
+    alignment_speed_limit: 0.12
+    minimum_slope_for_handoff: 0.12

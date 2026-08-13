@@ -25,6 +25,7 @@ setup(
             "terrain_safety_assessor = "
             "quadruped_planning.terrain_safety_assessor:main",
             "navigation_speed_gate = quadruped_planning.cmd_vel_gate:main",
+            "traversal_guidance = quadruped_planning.traversal_guidance:main",
         ],
     },
 )

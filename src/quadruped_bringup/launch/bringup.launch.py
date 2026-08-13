@@ -131,6 +131,14 @@ def generate_launch_description():
                     common_time,
                 ],
             ),
+            # 将已确认比赛障碍转换成“接近入口—对正—等待接管”状态。该节点只发布
+            # 相对入口位姿和 READY 信号，不调用 Nav2 Action，也不产生腿部控制命令。
+            Node(
+                package="quadruped_planning",
+                executable="traversal_guidance",
+                output="screen",
+                parameters=[terrain_navigation_params_file, common_time],
+            ),
             Node(
                 package="quadruped_planning",
                 executable="navigation_speed_gate",

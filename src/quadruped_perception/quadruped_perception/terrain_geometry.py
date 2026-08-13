@@ -34,6 +34,7 @@ class GeometryEstimate:
     slope_roll: float = 0.0
     roughness: float = 0.0
     distance: float = 0.0
+    lateral_offset: float = 0.0
     width: float = 0.0
     clearance_height: float = 0.0
     valid_points: int = 0
@@ -71,9 +72,9 @@ def navigation_obstacle_points(
     selected = points[relative_height >= threshold]
     if estimate.obstacle_type == PIT and estimate.pit_depth > 0.0:
         # 坑洞的真实回波低于地面，直接发布后可能落到 costmap 的绝对 z 下限以下；完全
-        # 不发布又会造成“上层知道有坑、局部规划器却看不到”的死锁。把已经由连通域确认
-        # 的低回波投影到局部地面稍上方，形成仅供 Nav2 绕行的虚拟障碍点。未知/无回波
-        # 区域仍不会被凭空当成坑，安全性前提与几何分类保持一致。
+        # 不发布又会造成“上层知道有坑、局部规划器却看不到”的危险。把已经由连通域确认
+        # 的低回波投影到局部地面稍上方，阻止 Nav2 在运动控制器接管前误驶入坑；Nav2
+        # 只负责到达坑区入口，越过坑区后再恢复导航。未知/无回波不会被凭空当成坑。
         pit_gate = max(threshold, min(float(estimate.pit_depth) * 0.60, 0.12))
         pit_mask = relative_height <= -pit_gate
         if np.any(pit_mask):
@@ -287,6 +288,7 @@ def analyze_terrain_geometry(
     confidence = min(1.0, np.count_nonzero(ground_mask) / max(1.0, min_cells * 2.0))
     distance = float(np.max(points[:, 0]))
     width = 0.0
+    lateral_offset = 0.0
     clearance = 0.0
 
     negative_region = _largest_connected_region(cells, negative, cell_size)
@@ -311,6 +313,9 @@ def analyze_terrain_geometry(
         )
         obstacle_type = PIT
         distance = float(np.quantile(selected[:, 0], 0.10))
+        # 使用整个连通区域的横向中位数而不是极值中心。中位数对边缘缺点、反光飞点
+        # 和只看到障碍一侧更稳定，后续可直接计算入口对正角。
+        lateral_offset = float(np.median(selected[:, 1]))
         width = float(np.ptp(selected[:, 1]) + cell_size)
         confidence = min(0.96, 0.42 + 0.07 * len(selected))
     elif positive_supported:
@@ -320,6 +325,7 @@ def analyze_terrain_geometry(
             0.0, float(np.quantile(high_relative[positive_region], 0.90))
         )
         distance = float(np.quantile(selected_cells[:, 0], 0.10))
+        lateral_offset = float(np.median(selected_cells[:, 1]))
         width = float(np.ptp(selected_cells[:, 1]) + cell_size)
         # 只看障碍前缘附近的原始点，利用垂直/横向跨度区分几何类别。
         front = points[
@@ -400,6 +406,7 @@ def analyze_terrain_geometry(
         slope_roll=slope_roll,
         roughness=roughness,
         distance=max(0.0, distance),
+        lateral_offset=lateral_offset,
         width=max(0.0, width),
         clearance_height=max(0.0, clearance),
         valid_points=len(points),

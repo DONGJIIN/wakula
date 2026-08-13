@@ -87,6 +87,7 @@ def terrain_observation_valid(terrain) -> bool:
         terrain.slope_roll,
         terrain.roughness,
         terrain.distance,
+        terrain.lateral_offset,
         terrain.width,
         terrain.clearance_height,
     )
@@ -196,6 +197,8 @@ def fuse_observations(
     result.slope_roll = _finite_or_zero(terrain.slope_roll)
     result.roughness = _nonnegative_finite_or_zero(terrain.roughness)
     result.distance = _nonnegative_finite_or_zero(terrain.distance)
+    # 横向偏移有方向，不能用 nonnegative 清洗；NaN/Inf 仍安全归零并由有效性校验拒绝。
+    result.lateral_offset = _finite_or_zero(terrain.lateral_offset)
     result.width = _nonnegative_finite_or_zero(terrain.width)
     result.clearance_height = _nonnegative_finite_or_zero(
         terrain.clearance_height

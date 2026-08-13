@@ -1,8 +1,8 @@
 # Wakula 四足机器人自主导航与越障
 
 Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试工作空间。
-当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示**
-构成轻量融合链路，不包含 YOLO、深度学习推理、硬件驱动或腿部运动控制。
+当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示 +
+越障入口引导**构成轻量融合链路，不包含 YOLO、深度学习推理、硬件驱动或腿部运动控制。
 
 现阶段只开发硬件无关的环境感知与自主导航底座，并提供一个与算法完全解耦的 Gazebo
 比赛障碍参考场地。仓库没有实现机器狗动力学仿真、厂家 SDK、`ros2_control`、状态估计、
@@ -45,7 +45,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和
-全栈长时间回归工具：9 个 ROS 2 包可编译，128 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+全栈长时间回归工具：9 个 ROS 2 包可编译，133 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -123,7 +123,7 @@ wakula/
 │   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
 │   ├── quadruped_gazebo/       # 独立规则场地、传感器测试载体与 Gazebo launch
 │   ├── quadruped_bringup/      # 感知、决策、速度门和占位 TF 统一入口
-│   ├── quadruped_interfaces/   # 带时间戳的感知与融合消息
+│   ├── quadruped_interfaces/   # 带时间戳的感知、融合与越障引导消息
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
 │   ├── quadruped_planning/     # 保守地形决策与 Nav2 速度门
 │   ├── quadruped_teleop/       # Xbox /joy 到独立 /cmd_vel_joy 的安全适配
@@ -149,9 +149,9 @@ wakula/
 | `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
 | `quadruped_gazebo` | 比赛障碍参考 world 与仿真传感器桥；不属于核心算法 | `robocon_field.launch.py` |
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
-| `quadruped_interfaces` | 带时间戳的感知与导航交接合同 | 四个 `msg/` 接口 |
+| `quadruped_interfaces` | 带时间戳的感知、导航与越障交接合同 | 五个 `msg/` 接口 |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
-| `quadruped_planning` | 地形风险分类、Nav2 速度上限和失效安全门 | 两个导航辅助节点 |
+| `quadruped_planning` | 地形风险分类、Nav2 入口引导、速度上限和失效安全门 | 三个导航辅助节点 |
 | `quadruped_teleop` | Xbox 按键安全状态机和独立 Twist 候选 | `xbox_teleop` |
 | `quadruped_tools` | rosbag 标注评估、SLAM/Nav2 长测与资源报告 | `perception_bag_evaluator`、`stack_regression` |
 | `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
@@ -171,6 +171,9 @@ wakula/
   高度和视觉介入状态，供调试及未来运动团队只读接入。名称优先采用点云量测：可显示
   主斜坡、木桥引坡、T 字形台阶、限高杆、直角绕杆区、坑区和高墙；仅有颜色证据时明确
   标注“点云待分类”，不会把笼统视觉结果冒充具体障碍。
+- `traversal_guidance`：把已确认的赛道障碍转换为 `APPROACH → ALIGN → READY`，发布
+  `base_link` 中位于障碍前方的相对入口位姿；它不调用 Nav2 Action，也不生成抬腿、关节
+  或足端命令。未来任务管理器据此向 Nav2 下发入口目标，READY 后再交给运动控制器。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、协方差
   和里程计突跳；跳变会锁存到连续稳定样本确认恢复。
 - `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2。
@@ -199,6 +202,9 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
                      /perception/fused_obstacle <───────────┘
                                       └─> terrain safety assessor + rosbag
                                            └─> /terrain/navigation_safety
+                                                └─> traversal guidance
+                                                     ├─> /traversal/guidance
+                                                     └─> /traversal/approach_pose
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
 
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
@@ -213,11 +219,12 @@ Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
 职责边界如下：
 
 1. **SLAM** 用 `/scan` 在陌生环境生成地图和定位，不负责跨越动作。
-2. **Nav2** 根据地图规划路线；激光和“高于局部拟合地面的深度点”共同写入局部代价地图，
-   避免把 10°/14° 合法坡面误当成墙，同时不漏掉位于 `base_link` 下方的低台阶。
+2. **Nav2** 根据地图规划自由空间路线。普通环境障碍继续正常避碰；赛道越障目标不把终点
+   直接设在实体后方，而是先使用 `/traversal/approach_pose` 到达并对正入口。激光和“高于
+   局部拟合地面的深度点”仍写入代价地图，防止运动控制器接管前误闯障碍。
 3. **OpenCV** 识别杆、限高横杆、墙面和大面积有色障碍，用于提前减速和提示。
-4. **深度点云** 测量障碍高度、坡度和粗糙度，是 `STEP/CLIMB/STOP` 的几何依据；
-   当前 STEP/CLIMB 只分类并停车。
+4. **深度点云** 测量障碍高度、坡度、横向偏移和粗糙度，是 `STEP/CLIMB/STOP` 及入口
+   对正的几何依据；当前只完成入口引导和交接停车，不执行真实跨越动作。
 5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
 6. **Xbox 手柄节点** 默认独立发布 `/cmd_vel_joy`，不加入主导航 launch，也不绕过
    Collision Monitor；真机阶段通过 `twist_mux` 与 Nav2 速度仲裁。
@@ -234,8 +241,9 @@ OpenCV 源码，只需完成以下合同：
    PointCloud2；非默认名称通过 `sensor_profile` 或 launch remap 对齐。
 2. 真机底盘或运动控制器订阅最终 `/cmd_vel`。速度含义遵循 ROS REP-103：线速度 m/s、
    角速度 rad/s，`base_link` 的 `+x` 向前、`+y` 向左、`+z` 向上。
-3. 运动/越障团队若需要上层环境摘要，应优先只读订阅
-   `/terrain/navigation_safety`，其中同一时间戳内包含模式、限速、感知有效性和障碍几何；
+3. 运动/越障团队读取 `/traversal/guidance` 判断是否 `READY`，并用
+   `/terrain/navigation_safety` 复核同一时间戳的模式、限速、有效性和障碍几何；两者都
+   是只读合同，不得在未完成动作仲裁和硬件安全的情况下直接转成关节命令。
    不要把该消息直接解释为抬腿、攀爬或关节控制命令。
 4. 真机自身发布 URDF/TF 时使用 `robot_model:=false`，避免两个
    `robot_state_publisher` 同时发布传感器固定 TF。
@@ -727,14 +735,15 @@ ros2 topic echo /perception/front_obstacle_name
 |---|---|---|
 | `WALK` | Nav2 速度上限为 1；视觉证据可将上限降至 0.35 | 否 |
 | `POLE` | 速度上限为 0.35，由 Nav2 代价地图规划绕行 | 否 |
-| `STEP` / `CLIMB` | 仅发布地形类别，速度上限为零 | 否 |
-| `PIT` / `WALL` / `BAR` | 发布 `STOP` 和零速度上限 | 否 |
+| `STEP` / `PIT` / `WALL` / `BAR` | 远处低速接近入口，随后对正；进入 0.75 m 交接区发布 `READY` 并停车 | 否 |
+| 可量测坡面 | 发布坡面越障候选及入口引导；交接区停车 | 否 |
 | 数据断流、TF 失败或字段非法 | 发布 `STOP` 和零速度上限 | 否 |
 
-当前接口没有动作建议或执行含义，只发布 `/terrain/navigation_mode`、
-`/terrain/speed_limit`、`/perception/front_obstacle_name` 和诊断信息。仓库没有
-`TraverseObstacle` Action、SDK 网关、
-关节轨迹或越障控制器；待真机运动控制稳定后再单独设计。
+新增 `/traversal/guidance`、`/traversal/phase` 和 `/traversal/approach_pose` 只表达
+`APPROACH/ALIGN/READY` 与相对入口建议，不自动发送 Nav2 goal，也没有动作执行含义。
+仓库仍没有 `TraverseObstacle` Action、SDK 网关、关节轨迹或越障控制器；待真机运动
+控制稳定后，由任务管理器完成“保存原目标→发送入口目标→READY 交接→越障反馈→恢复
+原 Nav2 目标”的闭环。
 
 ## 9. 点云地形与 Nav2 融合
 
@@ -746,6 +755,8 @@ ros2 topic echo /perception/front_obstacle_name
 /terrain/features_stamped      quadruped_interfaces/TerrainFeatures
 /perception/obstacle_points    sensor_msgs/PointCloud2
 /perception/fused_obstacle     quadruped_interfaces/FusedObstacle
+/traversal/guidance            quadruped_interfaces/TraversalGuidance
+/traversal/approach_pose       geometry_msgs/PoseStamped
 /diagnostics                   diagnostic_msgs/DiagnosticArray
 ```
 
@@ -846,9 +857,9 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 
 融合模式采用非对称防抖：紧急 STOP 立即生效；STEP/CLIMB 需要连续几帧几何证据；向
 更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
-已进入代价地图的台阶、坑洞、墙、横杆和立柱在 0.75 m 以外保留 0.25 倍低速窗口，
-让 Nav2 有机会转向和绕行；进入硬停车区仍立即归零。未实现真机坡面动作前，坡度危险
-不使用这条远距放行规则。
+已确认的台阶、坑洞、墙和横杆在 0.75 m 以外保留 0.25 倍低速窗口，让 Nav2 到达入口
+并对正；进入交接区立即归零并发布 READY。立柱属于绕杆导航物体，保持 0.35 倍速度由
+代价地图避碰。坡面会形成越障引导候选，但真机没有运动控制器时仍只能在交接处停车。
 视觉细分类也不能无条件覆盖点云：横杆必须同时具有米制离地净空，立柱必须满足点云窄宽度；
 视觉与几何冲突时保留几何类别并降低置信度，等待后续同步帧确认。
 高度、坡度、粗糙度、点数、消息采样时刻和超时等运行参数也在节点入口及纯决策函数处

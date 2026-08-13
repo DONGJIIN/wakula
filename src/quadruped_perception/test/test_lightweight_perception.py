@@ -513,6 +513,7 @@ def test_competition_threshold_sweep_low_step_pit_slope_and_bar():
     )
     assert estimate.obstacle_type == STEP
     assert 0.065 <= estimate.obstacle_height <= 0.10
+    assert abs(estimate.lateral_offset) <= 0.03
 
     pit = np.asarray(
         [

@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/VisionObstacle.msg"
   "msg/FusedObstacle.msg"
   "msg/NavigationSafety.msg"
+  "msg/TraversalGuidance.msg"
   DEPENDENCIES std_msgs
 )
 

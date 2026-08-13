@@ -233,8 +233,8 @@ def test_visual_assist_only_limits_clear_terrain():
     assert apply_visual_assist(stopped_step, True, 0.35) == stopped_step
 
 
-def test_far_explicit_hazard_can_be_replanned_but_near_hazard_stops():
-    """远处实体交给代价地图绕行，进入硬停车区必须立即保持原危险等级。"""
+def test_far_traversal_target_can_be_approached_but_near_target_stops():
+    """远处越障目标允许 Nav2 接近入口，进入交接区必须保持原危险等级。"""
     stopped = ("STOP", 0.0)
     assert apply_distance_aware_constraint(
         stopped, FusedObstacle.WALL, 2.0, 0.75, 0.25
@@ -242,10 +242,10 @@ def test_far_explicit_hazard_can_be_replanned_but_near_hazard_stops():
     assert apply_distance_aware_constraint(
         stopped, FusedObstacle.WALL, 0.70, 0.75, 0.25
     ) == stopped
-    # 限高杆常因单帧只看见支柱而归为 POLE，远处也应给局部规划器绕行窗口。
+    # POLE 是 Nav2 绕杆物体，不是越障控制器交接目标，距离放行函数不应改写它。
     assert apply_distance_aware_constraint(
         stopped, FusedObstacle.POLE, 1.47, 0.75, 0.25
-    ) == ("WALK", 0.25)
+    ) == stopped
     # CLEAR 上的坡度危险没有可信坡脚距离，不能使用实体障碍的远距放行规则。
     assert apply_distance_aware_constraint(
         ("CLIMB", 0.0), FusedObstacle.CLEAR, 2.5, 0.75, 0.25
@@ -255,7 +255,7 @@ def test_far_explicit_hazard_can_be_replanned_but_near_hazard_stops():
     ) == stopped
 
 
-def test_fused_far_step_uses_low_speed_window_for_nav2_detour():
+def test_fused_far_step_uses_low_speed_window_for_nav2_approach():
     msg = FusedObstacle()
     msg.geometry_confirmed = True
     msg.confidence = 0.8

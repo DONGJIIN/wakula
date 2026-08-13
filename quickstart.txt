@@ -5,16 +5,18 @@ Wakula 后续开发快速上手
 ----------
 已完成：SLAM Toolbox、Nav2、带图像质量/IoU 多帧门控的 OpenCV 障碍证据、稳健平面与
 连通域点云分类、支持乱序回调的时间同步融合、保守速度门、传感器 profile、rosbag
-离线评估、强弱光/高光/模糊防御、强类型 NavigationSafety 对接合同、一键接口检查、
+离线评估、强弱光/高光/模糊防御、强类型 NavigationSafety/TraversalGuidance 对接合同、
+Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 Xbox 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。自主算法只输出环境类别
 与导航依据；手柄节点只输出独立机身速度候选，Gazebo 载体只模拟标准传感器接口，三者都
 不生成机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、128 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测及 Nav2
+当前基线：9 个 ROS 2 包、133 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测及 Nav2
 多目标/1 m 窄通道/不可达目标恢复通过。这里只代表 Gazebo 软件链，不代表真机验收。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
-站立步态、关节控制、真正越障 Action、比赛流程。STEP/CLIMB 只识别并停车。当前 Gazebo
+站立步态、关节控制、真正越障 Action、比赛流程。当前只完成 Nav2 到障碍入口的接近、
+对正与 READY 交接，READY 后仍停车，不会抬腿或完成真实跨越。当前 Gazebo
 仅用于 SLAM/Nav2/OpenCV 的场景与接口测试，不能代表四足越障能力。
 
 二、新电脑完整复现
@@ -219,6 +221,8 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
   ros2 topic echo /terrain/navigation_mode
   ros2 topic echo /terrain/speed_limit
   ros2 topic echo /terrain/navigation_safety
+  ros2 topic echo /traversal/guidance
+  ros2 topic echo /traversal/phase
   ros2 run tf2_ros tf2_echo base_link <点云frame>
   ros2 run tf2_ros tf2_echo map base_link
   ./scripts/diagnose.sh
@@ -231,8 +235,9 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
 
 正常现象：vision=true 时相机短暂缺帧会先等待同步，超过 0.25 s 后自动使用纯点云结果；
 点云也缺失或无效才保持 speed_limit=0。识别 CLEAR 且数据持续新鲜后为 1；
-STEP/CLIMB/PIT/WALL/BAR 为 0；相机证据只能在 WALK 时减速，
-不能触发腿部动作。`/navigation/healthy` 为 false 或断流时速度门也保持零。只有点云时
+越障目标在远处先低速 APPROACH/ALIGN，进入 0.75 m 交接区后为 READY 且速度归零；
+POLE 由 Nav2 低速绕杆。相机证据不能触发腿部动作。`/navigation/healthy` 为 false 或
+断流时速度门也保持零。只有点云时
 使用 vision:=false，决策会自动采用兼容路径。
 
 六、录包与离线评估
@@ -269,14 +274,16 @@ STEP/CLIMB/PIT/WALL/BAR 为 0；相机证据只能在 WALK 时减速，
 4. 录真实 bag，重调点云与 OpenCV，完成准确率统计。
 5. 单独开发硬件驱动、状态估计、运动学、步态和安全层，并在台架验证。
 6. 底盘能安全消费 `/cmd_vel` 后低速接入 Nav2。
-7. 最后才设计真机越障控制与 Nav2 切换；不得把当前文字 action 当作控制命令。
+7. 在现有 /traversal/guidance 上实现真机越障 Action 与 Nav2 控制权切换；不得把 READY
+   当作动作完成，也不得直接转换为关节命令。
 
 九、其他团队一键对齐
 ------------------
 硬件/状态估计组交付以下标准接口即可：/scan（LaserScan）、/odom（Odometry）、
 odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组订阅最终 /cmd_vel
-（Twist）；需要环境信息时只读订阅 /terrain/navigation_safety，不要直接把其 STEP/CLIMB
-转换成关节动作。该消息把时间戳、有效性、模式、限速和几何量放在同一帧中。
+（Twist）；需要越障交接时读取 /traversal/guidance，并以 /terrain/navigation_safety 复核
+环境有效性。不要把 STEP/CLIMB 或 READY 直接转换成关节动作；READY 只表示入口距离和
+对正条件满足。
 
 真机发布自身 URDF/TF 时这样启动：
 

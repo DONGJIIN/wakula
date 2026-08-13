@@ -48,8 +48,15 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   注意：终端约每秒打印一次正前方障碍名称、置信度、距离和高度；名称优先来自点云几何，
         可显示主斜坡、木桥引坡、T 字形台阶、限高杆、直角绕杆区、坑区和高墙。仅视觉命中
         会标明“点云未确认/待分类”，且不能覆盖已确认名称。无法由局部数据区分木桥 A/B 时
-        明确写“待结构确认”。实体障碍在 0.75 m 外保留低速绕行窗口，进入近距区停车。
+        明确写“待结构确认”。越障目标在 0.75 m 外保留低速入口接近窗口，进入交接区停车。
         当前只提供导航约束，不发送抬腿、关节或越障动作命令。
+
+/traversal_guidance（quadruped_planning / traversal_guidance）
+  作用：把障碍几何转换为 Nav2 越障入口的接近、对正和 READY 交接状态。
+  输入：/terrain/navigation_safety。
+  输出：/traversal/guidance、/traversal/phase、/traversal/approach_pose。
+  注意：入口位姿位于输入 frame（通常 base_link）的障碍前方；本节点不发送 Nav2 goal，
+        不生成关节动作。POLE 由 Nav2 绕杆，不触发运动控制交接；输入断流输出 INVALID。
 
 /navigation_speed_gate（quadruped_planning / navigation_speed_gate）
   作用：依据地形限制和导航健康状态缩放 Nav2 速度；数据异常或超时立即输出零速度。
@@ -218,7 +225,7 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 /terrain/features_stamped
   类型：quadruped_interfaces/msg/TerrainFeatures
   字段：header、valid、obstacle_type、confidence、ground_height、obstacle_height、pit_depth、
-  slope_pitch、slope_roll、roughness、distance、width、clearance_height、valid_points。
+  slope_pitch、slope_roll、roughness、distance、lateral_offset、width、clearance_height、valid_points。
 
 /vision/obstacle_evidence
   类型：std_msgs/msg/Float32MultiArray
@@ -233,7 +240,7 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   类型：quadruped_interfaces/msg/FusedObstacle
   类别码：0 UNKNOWN，1 CLEAR，2 STEP，3 PIT，4 WALL，5 BAR，6 POLE。
   字段：header、obstacle_type、confidence、geometry_confirmed、vision_confirmed、
-  obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、width、
+  obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、lateral_offset、width、
   clearance_height、time_skew、valid_points。
   融合约束：点云提供米制尺度；视觉 BAR 需点云 clearance_height 支持，POLE 需点云窄宽度
   支持。视觉/几何冲突时类别保持点云结果并降低 confidence。所有类别、连续字段、视觉框
@@ -271,9 +278,25 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   模式：MODE_UNKNOWN=0、MODE_WALK=1、MODE_STEP=2、MODE_CLIMB=3、MODE_STOP=4。
   有效性：perception_valid、visual_assist_active；无效或断流时 mode=STOP、speed_limit=0。
   几何：obstacle_type、confidence、obstacle_height、pit_depth、slope_pitch、slope_roll、
-  roughness、distance、width、clearance_height、valid_points。障碍码与 FusedObstacle 一致。
+  roughness、distance、lateral_offset、width、clearance_height、valid_points。障碍码与
+  FusedObstacle 一致；lateral_offset 在 base_link 中左正右负，用于入口对正。
   语义：同一条消息给出一个原子只读快照，供未来运动/越障模块做输入校验；它不是动作、
   关节、足端或控制器切换命令。消费者必须检查 perception_valid、Header 新鲜度和 mode。
+
+/traversal/guidance，quadruped_interfaces/msg/TraversalGuidance（越障交接首选）
+  阶段：INVALID、CLEAR、APPROACH、ALIGN、READY。
+  关键字段：header、phase、obstacle_type、perception_valid、traversal_required、
+  ready_for_handoff、confidence、distance、lateral_offset、heading_error、approach_x、
+  approach_y、approach_yaw、speed_limit。
+  语义：APPROACH/ALIGN 表示 Nav2 应到达障碍前方入口并对正；READY 表示可以由未来运动
+  控制器申请接管。它不是“越障已经完成”，也不是关节命令。
+
+/traversal/approach_pose，geometry_msgs/msg/PoseStamped
+  相对入口建议，frame 通常为 base_link；未来任务管理器在接收时转换到 map 后再发送
+  NavigateToPose。不得把 pose 直接放到实体障碍后方。
+
+/traversal/phase，std_msgs/msg/String
+  人类调试速查，值为 INVALID/CLEAR/APPROACH/ALIGN/READY；程序应优先使用强类型 guidance。
 
 六、设备替换合同
 ------------

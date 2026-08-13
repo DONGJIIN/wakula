@@ -545,6 +545,7 @@ class TerrainAnalyzer(Node):
         typed.distance = float(
             geometry.distance if geometry.valid else features[FEATURE_LOOKAHEAD]
         )
+        typed.lateral_offset = float(geometry.lateral_offset)
         typed.width = float(geometry.width)
         typed.clearance_height = float(geometry.clearance_height)
         typed.valid_points = int(valid_points)

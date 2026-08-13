@@ -23,6 +23,7 @@ def terrain(obstacle_type=TerrainFeatures.STEP):
     msg.confidence = 0.70
     msg.obstacle_height = 0.16
     msg.distance = 0.6
+    msg.lateral_offset = 0.12
     msg.roughness = 0.02
     msg.width = 0.4
     msg.valid_points = 120
@@ -52,6 +53,7 @@ def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
     assert result.vision_confirmed
     assert result.valid_points == cloud.valid_points
     assert result.roughness == cloud.roughness
+    assert result.lateral_offset == cloud.lateral_offset
 
 
 def test_visual_bar_only_refines_existing_positive_geometry():

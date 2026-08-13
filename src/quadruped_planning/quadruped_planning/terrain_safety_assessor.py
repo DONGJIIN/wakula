@@ -380,15 +380,18 @@ def apply_geometry_classification(
 ) -> Assessment:
     """将显式几何类别叠加到连续量阈值结果。
 
-    坑洞、墙和横杆不可由当前导航栈跨越，因此速度上限为零；立柱仍可交给 Nav2 代价
-    地图绕行，但采用保守低速。这里仍只输出导航约束，不发出任何动作指令。
+    坑洞、墙和横杆需要未来越障控制器接管，因此在交接区速度上限为零。立柱本身不是
+    要踩过的表面：比赛绕杆区仍由 Nav2 在立柱之间规划，采用保守低速。这里仍只输出
+    导航约束，不发出任何动作指令。
     """
     if obstacle_type == GEOMETRY_PIT and pit_depth > 0.0:
         return "STOP", 0.0
     if obstacle_type in (GEOMETRY_WALL, GEOMETRY_BAR):
         return "STOP", 0.0
-    if obstacle_type == GEOMETRY_POLE and assessment[0] == "WALK":
-        return "WALK", min(assessment[1], 0.35)
+    if obstacle_type == GEOMETRY_POLE:
+        # 高立柱可能先被高度阈值评成 STOP。显式 POLE 类别优先：保留低速 Nav2 绕杆，
+        # 具体碰撞边界仍由 scan/costmap 保证，而不是在两米外冻结整机。
+        return "WALK", 0.35
     return assessment
 
 
@@ -399,26 +402,22 @@ def apply_distance_aware_constraint(
     hard_stop_distance: float,
     approach_speed: float,
 ) -> Assessment:
-    """让远处、已进入代价地图的实体障碍先由 Nav2 绕行。
+    """让 Nav2 低速接近越障入口，并在交接距离内停住。
 
-    旧策略只要在 2.5 m ROI 内看到台阶、坑、墙或横杆就立刻输出零速度。机器人因而连
-    原地转向和沿全局路径绕行都做不到，最终触发 Nav2 的无进展恢复。对已经有明确几何
-    类别的实体障碍，距离大于硬停车区时保留一个低速 ``WALK`` 窗口，让局部代价地图
-    选择绕行轨迹；进入硬停车区仍立即归零。
+    旧策略只要在 2.5 m ROI 内看到台阶、坑、墙或横杆就立刻输出零速度，Nav2 无法到达
+    入口。对需要越障接管的明确几何类别，距离大于交接区时保留低速 ``WALK`` 窗口，
+    让 Nav2 执行入口目标和姿态对正；进入交接区后恢复 STEP/CLIMB/STOP，等待未来运动
+    控制器。这里不会让 Nav2 把终点直接规划到实体障碍后方。
 
     ``CLEAR`` 坡面不使用这条放行规则：坡度估计的 distance 不是坡脚距离，贸然放行会
     让尚无腿部控制器的机器人直接驶上坡。无效、零或负距离也继续 fail-closed。
     """
     mode, speed = assessment
-    # POLE 也必须采用同一距离策略。比赛限高杆的横梁很细，深度云经常只看见
-    # 一侧支柱并把它归为 POLE；若让 POLE 在两米外就硬停车，Nav2 虽然已经把
-    # 支柱写入代价地图，却没有速度执行绕行，最终会触发“无进展”恢复循环。
     explicit_hazards = (
         GEOMETRY_STEP,
         GEOMETRY_PIT,
         GEOMETRY_WALL,
         GEOMETRY_BAR,
-        GEOMETRY_POLE,
     )
     values = (distance, hard_stop_distance, approach_speed)
     if (
@@ -448,6 +447,7 @@ def fused_observation_valid(
         msg.slope_roll,
         msg.roughness,
         msg.distance,
+        msg.lateral_offset,
         msg.width,
         msg.clearance_height,
     )
@@ -893,6 +893,7 @@ class TerrainSafetyAssessor(Node):
             safety.distance = nonnegative_finite_or_zero(
                 observation.distance
             )
+            safety.lateral_offset = finite_or_zero(observation.lateral_offset)
             safety.width = nonnegative_finite_or_zero(observation.width)
             safety.clearance_height = nonnegative_finite_or_zero(
                 observation.clearance_height
