@@ -71,7 +71,7 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
         记录该障碍并继续寻找下一个。它负责任务编排，不生成腿部或关节命令。
   输入：/map、/traversal/guidance、map -> base_link TF，以及 Nav2/越障 Action 结果。
   输出：调用 /navigate_to_pose 和 /traverse_obstacle；发布 /autonomy/state、/autonomy/event。
-  控制：/autonomy/set_enabled（SetBool）可在运行中 START/STOP；STOP 会取消当前目标并停车。
+  控制：/autonomy/set_enabled（SetBool）显式 START/STOP；/autonomy/toggle（Trigger）原子切换。
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
         /traverse_obstacle 服务端。
 
@@ -328,8 +328,10 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /autonomy/set_enabled，std_srvs/srv/SetBool
   true 开始或继续探索；false 取消 Nav2/越障目标并停车，但不关闭 SLAM、传感器或 RViz。
-  操作员无需直接调用服务：在项目根目录重复执行 ./auto 即可自动切换 true/false；VS Code
-  对应任务名为“ROS: 一键开启或停止自动导航”。
+
+/autonomy/toggle，std_srvs/srv/Trigger
+  由节点按内部真实使能状态原子切换，不需要客户端猜测当前状态。根目录 ./auto 和
+  ros2 run slam autonomy_keyboard 均调用此服务；前者重复执行切换，后者使用空格/t 切换。
 
 六、设备替换合同
 ------------

@@ -27,7 +27,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_msgs.msg import String
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -210,6 +210,9 @@ class AutonomousMission(Node):
         self.state_pub = self.create_publisher(String, "/autonomy/state", 10)
         self.event_pub = self.create_publisher(String, "/autonomy/event", 10)
         self.create_service(SetBool, "/autonomy/set_enabled", self._set_enabled)
+        # Trigger 由操作员快捷入口使用。开关真值保存在本节点的 ``enabled`` 中，因此不需要
+        # shell 脚本根据易丢失的状态话题猜测当前状态，也不会因脚本重启而把开/关弄反。
+        self.create_service(Trigger, "/autonomy/toggle", self._toggle_enabled)
         self.nav_client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.traverse_client = ActionClient(self, TraverseObstacle, "/traverse_obstacle")
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -290,6 +293,19 @@ class AutonomousMission(Node):
             self._publish_state("STOP requested; goals cancelled")
         response.success = True
         response.message = self.state
+        return response
+
+    def _toggle_enabled(self, _request, response):
+        """原子地翻转任务使能状态，供键盘和 ``./auto`` 一键入口调用。"""
+        request = SetBool.Request()
+        request.data = not self.enabled
+        result = self._set_enabled(request, SetBool.Response())
+        response.success = result.success
+        if result.success:
+            action = "ENABLED" if self.enabled else "DISABLED"
+            response.message = f"{action}: {result.message}"
+        else:
+            response.message = result.message
         return response
 
     def _map_callback(self, msg):

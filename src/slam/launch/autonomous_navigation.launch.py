@@ -1,11 +1,9 @@
-"""一键启动核心 SLAM/Nav2/OpenCV 与自主探索任务（不包含 Gazebo/运动控制器）。"""
+"""兼容入口：核心功能现已直接归入 slam.launch.py，本文件仅转发参数。"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -14,14 +12,16 @@ def package_file(package, folder, filename):
 
 
 def generate_launch_description():
-    use_sim_time = LaunchConfiguration("use_sim_time")
     core_arguments = {
-        "use_sim_time": use_sim_time,
+        "use_sim_time": LaunchConfiguration("use_sim_time"),
         "robot_model": LaunchConfiguration("robot_model"),
         "rviz": LaunchConfiguration("rviz"),
         "sensor_profile": LaunchConfiguration("sensor_profile"),
         "camera_topic": LaunchConfiguration("camera_topic"),
         "point_cloud_topic": LaunchConfiguration("point_cloud_topic"),
+        "autonomy": "true",
+        "autonomy_autostart": LaunchConfiguration("autostart_mission"),
+        "mission_params_file": LaunchConfiguration("mission_params_file"),
     }
     return LaunchDescription([
         # 任务节点需要真正的 bool 参数；真机默认系统时钟，仿真包装入口显式传 true。
@@ -40,20 +40,5 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(package_file("slam", "launch", "slam.launch.py")),
             launch_arguments=core_arguments.items(),
-        ),
-        Node(
-            package="quadruped_planning",
-            executable="autonomous_mission",
-            name="autonomous_mission",
-            output="screen",
-            parameters=[
-                LaunchConfiguration("mission_params_file"),
-                {
-                    "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
-                    "autostart": ParameterValue(
-                        LaunchConfiguration("autostart_mission"), value_type=bool
-                    ),
-                },
-            ],
         ),
     ])

@@ -339,13 +339,17 @@ def test_simulation_entry_locks_clock_and_tf_ownership():
 
 
 def test_autonomous_entry_keeps_simulator_and_motion_controller_replaceable():
-    """核心一键入口只能编排算法；Gazebo 与仿真越障器必须留在独立包。"""
-    path = PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
-    source = path.read_text(encoding="utf-8")
-    assert 'executable="autonomous_mission"' in source
-    assert 'FindPackageShare("quadruped_gazebo")' not in source
-    assert "sim_traverse_obstacle" not in source
-    assert '"autostart_mission"' in source
+    """自主任务属于 slam 主入口且默认关闭；兼容入口不能重复创建节点。"""
+    main = (PACKAGE_ROOT / "launch" / "slam.launch.py").read_text(encoding="utf-8")
+    compatibility = (
+        PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'executable="autonomous_mission"' in main
+    assert '"autonomy_autostart"' in main
+    assert 'default_value="false"' in main
+    assert 'executable="autonomous_mission"' not in compatibility
+    assert 'FindPackageShare("quadruped_gazebo")' not in main + compatibility
+    assert "sim_traverse_obstacle" not in main + compatibility
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

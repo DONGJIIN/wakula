@@ -1,4 +1,4 @@
-"""一键启动独立比赛场地、核心算法、自主探索和仿真越障适配器。"""
+"""独立启动比赛场地与仿真越障适配器；不装载任何 SLAM/导航算法。"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -16,8 +16,6 @@ def package_file(package, folder, filename):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("gui", default_value="true"),
-        DeclareLaunchArgument("rviz", default_value="true"),
-        DeclareLaunchArgument("autostart_mission", default_value="true"),
         DeclareLaunchArgument(
             "start_gazebo",
             default_value="true",
@@ -30,19 +28,8 @@ def generate_launch_description():
             launch_arguments={"gui": LaunchConfiguration("gui")}.items(),
             condition=IfCondition(LaunchConfiguration("start_gazebo")),
         ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                package_file("slam", "launch", "autonomous_navigation.launch.py")
-            ),
-            launch_arguments={
-                "use_sim_time": "true",
-                "robot_model": "false",
-                "rviz": LaunchConfiguration("rviz"),
-                "autostart_mission": LaunchConfiguration("autostart_mission"),
-            }.items(),
-        ),
-        # 仿真替身只验证 Action 编排。真机启动 autonomous_navigation.launch.py 时不会
-        # 自动包含它，必须由真实运动控制团队提供 /traverse_obstacle。
+        # 仿真替身只验证 Action 合同，属于 Gazebo 测试设施而非算法。SLAM 需在另一个
+        # 终端启动；真机则必须由运动控制团队提供真实 /traverse_obstacle 服务端。
         Node(
             package="quadruped_gazebo",
             executable="sim_traverse_obstacle",

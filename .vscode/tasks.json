@@ -33,9 +33,9 @@
       "problemMatcher": []
     },
     {
-      "label": "ROS: launch autonomous navigation",
+      "label": "ROS: 自主导航键盘开关",
       "type": "shell",
-      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch slam autonomous_navigation.launch.py'",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run slam autonomy_keyboard'",
       "problemMatcher": []
     },
     {
@@ -51,7 +51,7 @@
       "problemMatcher": []
     },
     {
-      "label": "ROS: launch autonomous Gazebo test",
+      "label": "ROS: launch standalone Gazebo field + test Action",
       "type": "shell",
       "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_gazebo autonomous_field_test.launch.py'",
       "problemMatcher": []

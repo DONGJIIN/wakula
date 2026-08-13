@@ -72,42 +72,41 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
 四、常用启动命令
 --------------
-最简单的一键方式（只需记这一条；重复执行即在开启/停止之间切换）：
-
-  cd ~/wakula
-  ./auto
-
-第一次运行时，检测到本项目 Gazebo 的 /clock+/cmd_vel_gazebo 就复用当前场地；有
-/scan+/odom 就启动真机/外部传感器核心栈，否则自动启动 Gazebo 联调栈，不会在同一
-ROS 域重复启动 Gazebo。STOP 只停车并取消任务，不关地图和 RViz；再次 ./auto 会从已有地图继续。运行日志位于
-~/wakula/.runtime/autonomous_launch.log。VS Code 可选择任务“ROS: 一键开启或停止自动导航”。
-
-完整栈：
+先启动算法。自主导航节点会被装载，但默认 IDLE、不自行运动：
 
   cd ~/wakula
   source /opt/ros/jazzy/setup.bash
   source install/setup.bash
   ros2 launch slam slam.launch.py
 
-自主探索核心栈（真机/外部传感器；默认不自动运动）：
+另开终端，重复执行同一条命令即可在开启/停止之间切换：
 
-  ros2 launch slam autonomous_navigation.launch.py
+  cd ~/wakula
+  ./auto
 
-另开终端一键启停；STOP 不关闭 SLAM/RViz，之后可再次 START：
+./auto 只控制已运行的自主任务，不会启动 Gazebo 或 SLAM。STOP 只取消任务并停车，不关
+地图和 RViz。VS Code 可选择任务“ROS: 一键开启或停止自动导航”。
+
+终端单键方式：
+
+  ros2 run slam autonomy_keyboard
+  # 空格/t：开启或停止；q：退出键盘工具（不会自动改变当前任务状态）
+
+调试用显式控制：
 
   ./scripts/autonomy.sh start
   ./scripts/autonomy.sh stop
   ./scripts/autonomy.sh status
+  ./scripts/autonomy.sh toggle
 
 下面的 launch 和 start/stop 命令属于分步调试方式；普通使用直接执行 ./auto 即可。
 
-该入口要求运动组提供 /traverse_obstacle Action 服务端。只有仿真流程测试时使用下面的
-独立全栈入口，它会额外启动场地与 sim_traverse_obstacle，并默认自动探索：
+该功能要求运动组提供 /traverse_obstacle Action 服务端。仿真时先独立启动场地和
+sim_traverse_obstacle（不包含任何算法）：
 
   ros2 launch quadruped_gazebo autonomous_field_test.launch.py
 
-  # 若希望先观察再手动开始：
-  ros2 launch quadruped_gazebo autonomous_field_test.launch.py autostart_mission:=false
+再另开终端启动 slam.launch.py，最后执行 ./auto。
 
 无相机：
 

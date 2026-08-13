@@ -15,11 +15,14 @@ case "${1:-status}" in
   stop)
     ros2 service call /autonomy/set_enabled std_srvs/srv/SetBool "{data: false}"
     ;;
+  toggle)
+    ros2 service call /autonomy/toggle std_srvs/srv/Trigger "{}"
+    ;;
   status)
     ros2 topic echo --once /autonomy/state
     ;;
   *)
-    echo "用法: $0 {start|stop|status}" >&2
+    echo "用法: $0 {toggle|start|stop|status}" >&2
     exit 2
     ;;
 esac

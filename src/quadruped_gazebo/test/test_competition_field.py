@@ -53,7 +53,7 @@ def test_all_eight_rule_obstacles_exist():
 
 
 def test_autonomous_field_test_is_explicitly_simulation_only():
-    """整场一键联调可包含仿真 Action，但核心算法入口不能反向依赖它。"""
+    """Gazebo 入口只含场地和仿真 Action，不能反向装载核心算法。"""
     launch = (PACKAGE_ROOT / "launch" / "autonomous_field_test.launch.py").read_text(
         encoding="utf-8"
     )
@@ -63,6 +63,9 @@ def test_autonomous_field_test_is_explicitly_simulation_only():
     assert "sim_traverse_obstacle" in launch
     assert '"start_gazebo"' in launch
     assert "IfCondition" in launch
+    assert 'package_file("slam"' not in launch
+    assert "autonomous_navigation.launch.py" not in launch
+    assert "autostart_mission" not in launch
     assert "SIMULATION ONLY" in adapter
     assert '"/cmd_vel_teleop"' in adapter
 

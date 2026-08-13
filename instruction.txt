@@ -28,11 +28,11 @@ Action 成功也不能声称真机已经具备越障能力。
    退出时先排空上游，再结束独立会话中的无状态子进程，由内核回收资源，不再发送会触发
    Jazzy 1.3.12 Publisher 清理竞态的 SIGINT/SIGTERM。节点名和话题完全不变。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
-   autonomous_navigation.launch.py：组合核心 slam.launch.py 与 autonomous_mission；不启动
-   Gazebo，也不提供越障服务端。默认 autostart_mission=false，必须显式一键 START。
-   根目录 auto：面向操作员的唯一切换入口。任务服务存在时按当前状态自动 START/STOP；
-   不存在时检测 /scan+/odom，自动选择真机核心入口或 Gazebo 联调入口，并由 systemd
-   用户服务托管后台进程和保存日志。该脚本不杀死 SLAM/RViz，STOP 后保留地图以便再次继续。
+   slam.launch.py：除 SLAM/Nav2/OpenCV 外直接装载 autonomous_mission，但
+   autonomy_autostart=false，启动后保持 IDLE，不会自行运动。autonomous_navigation.launch.py
+   仅为旧命令兼容转发，不重复创建节点。
+   根目录 auto：纯控制入口，只原子调用 /autonomy/toggle；不会启动 Gazebo、SLAM 或后台
+   服务。autonomy_keyboard.py 提供空格/t 切换、q 退出的终端单键入口。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
@@ -182,9 +182,9 @@ Action 成功也不能声称真机已经具备越障能力。
    “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。
    TF 诊断统一使用 scripts/diagnose.sh。tf2_echo 是持续输出程序，不要直接接 head 等会
    提前关闭读取管道的命令；否则 ros2run 可能产生与算法无关的 BrokenPipeError 弹窗。
-   autonomous_field_test.launch.py：仅供完整软件流程回归，一次启动场地、核心算法、
-   autonomous_mission 和 sim_traverse_obstacle。仿真适配器接收相同 Action，但只按障碍类别
-   用受限速度和规则长度估算时长驱动无碰撞平面载体；它不进入真机入口、不模拟落脚/接触。
+   autonomous_field_test.launch.py：只启动独立场地和 sim_traverse_obstacle，不再启动
+   SLAM/Nav2/OpenCV/autonomous_mission。仿真适配器接收相同 Action，但只按障碍类别用受限
+   速度和规则长度估算时长驱动测试载体；它不进入真机入口、不模拟落脚/接触。
 
 三、决策原则
 ----------
