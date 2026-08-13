@@ -328,6 +328,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /autonomy/set_enabled，std_srvs/srv/SetBool
   true 开始或继续探索；false 取消 Nav2/越障目标并停车，但不关闭 SLAM、传感器或 RViz。
+  操作员无需直接调用服务：在项目根目录重复执行 ./auto 即可自动切换 true/false；VS Code
+  对应任务名为“ROS: 一键开启或停止自动导航”。
 
 六、设备替换合同
 ------------

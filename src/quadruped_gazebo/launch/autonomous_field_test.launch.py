@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -17,11 +18,17 @@ def generate_launch_description():
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("autostart_mission", default_value="true"),
+        DeclareLaunchArgument(
+            "start_gazebo",
+            default_value="true",
+            description="false 时复用当前 ROS 域中已经运行的 Gazebo 场地",
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 package_file("quadruped_gazebo", "launch", "robocon_field.launch.py")
             ),
             launch_arguments={"gui": LaunchConfiguration("gui")}.items(),
+            condition=IfCondition(LaunchConfiguration("start_gazebo")),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(

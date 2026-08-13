@@ -72,6 +72,16 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
 四、常用启动命令
 --------------
+最简单的一键方式（只需记这一条；重复执行即在开启/停止之间切换）：
+
+  cd ~/wakula
+  ./auto
+
+第一次运行时，检测到本项目 Gazebo 的 /clock+/cmd_vel_gazebo 就复用当前场地；有
+/scan+/odom 就启动真机/外部传感器核心栈，否则自动启动 Gazebo 联调栈，不会在同一
+ROS 域重复启动 Gazebo。STOP 只停车并取消任务，不关地图和 RViz；再次 ./auto 会从已有地图继续。运行日志位于
+~/wakula/.runtime/autonomous_launch.log。VS Code 可选择任务“ROS: 一键开启或停止自动导航”。
+
 完整栈：
 
   cd ~/wakula
@@ -89,8 +99,7 @@ SLAM 产生 map -> odom。启用地形感知还需：
   ./scripts/autonomy.sh stop
   ./scripts/autonomy.sh status
 
-VS Code 命令面板也可运行 ROS: launch autonomous navigation、ROS: autonomous START、
-ROS: autonomous STOP，无需手敲服务命令。
+下面的 launch 和 start/stop 命令属于分步调试方式；普通使用直接执行 ./auto 即可。
 
 该入口要求运动组提供 /traverse_obstacle Action 服务端。只有仿真流程测试时使用下面的
 独立全栈入口，它会额外启动场地与 sim_traverse_obstacle，并默认自动探索：

@@ -61,6 +61,8 @@ def test_autonomous_field_test_is_explicitly_simulation_only():
         encoding="utf-8"
     )
     assert "sim_traverse_obstacle" in launch
+    assert '"start_gazebo"' in launch
+    assert "IfCondition" in launch
     assert "SIMULATION ONLY" in adapter
     assert '"/cmd_vel_teleop"' in adapter
 

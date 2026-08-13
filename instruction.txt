@@ -30,6 +30,9 @@ Action 成功也不能声称真机已经具备越障能力。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
    autonomous_navigation.launch.py：组合核心 slam.launch.py 与 autonomous_mission；不启动
    Gazebo，也不提供越障服务端。默认 autostart_mission=false，必须显式一键 START。
+   根目录 auto：面向操作员的唯一切换入口。任务服务存在时按当前状态自动 START/STOP；
+   不存在时检测 /scan+/odom，自动选择真机核心入口或 Gazebo 联调入口，并由 systemd
+   用户服务托管后台进程和保存日志。该脚本不杀死 SLAM/RViz，STOP 后保留地图以便再次继续。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、

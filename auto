@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+# Wakula 自主导航唯一快捷入口：重复执行同一条命令即可“开/关”自动任务。
+#
+# 1. 若任务节点已经运行：读取 /autonomy/state，自动在 START 与 STOP 之间切换。
+# 2. 若整套系统尚未运行：有 /scan+/odom 时启动真机核心栈，否则启动 Gazebo 联调栈。
+# 3. STOP 只取消自主目标并停车，保留地图、传感器、RViz 和 Gazebo，方便再次开启。
+# 4. 首次启动交给 systemd 用户服务托管，关闭终端后进程仍受控，不会遗留孤立 Gazebo。
+
+workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source /opt/ros/jazzy/setup.bash
+
+if [[ ! -f "${workspace_dir}/install/setup.bash" ]]; then
+  echo "尚未编译工作空间，请先运行：cd ${workspace_dir} && ./scripts/build.sh" >&2
+  exit 1
+fi
+source "${workspace_dir}/install/setup.bash"
+
+runtime_dir="${workspace_dir}/.runtime"
+mkdir -p "${runtime_dir}"
+log_file="${runtime_dir}/autonomous_launch.log"
+mission_state_file="${runtime_dir}/autonomy_enabled"
+
+service_ready() {
+  # 不使用 ROS daemon 的缓存，避免上一轮异常退出后把已经消失的服务误判为在线。
+  # 全栈启动时 CPU 瞬时负载较高，DDS 发现可能超过 1 秒，因此留出 2 秒窗口。
+  # 此处不能使用 grep -q：脚本启用了 pipefail，grep 提前关闭管道会令 ros2 CLI 收到
+  # BrokenPipeError，反而把真实存在的服务误判为离线。
+  ros2 service list --no-daemon --spin-time 2.0 -t 2>/dev/null \
+    | grep -E '^/autonomy/set_enabled[[:space:]]+\[std_srvs/srv/SetBool\]$' >/dev/null
+}
+
+set_mission() {
+  local requested="$1"
+  local label="$2"
+  local response
+
+  echo "${label}"
+  # 直接等待并调用唯一控制服务，比先依赖 DDS 图枚举、再调用服务更可靠。timeout 防止
+  # 真正的节点故障让一键命令无限等待；响应 success=True 才更新本地开关状态。
+  if ! response="$(timeout 30 ros2 service call \
+      /autonomy/set_enabled std_srvs/srv/SetBool "{data: ${requested}}" 2>&1)"; then
+    echo "${response}" >&2
+    echo "自动导航服务在 30 秒内没有响应；未改变开关状态。" >&2
+    return 1
+  fi
+  echo "${response}"
+  if ! grep -F 'success=True' <<<"${response}" >/dev/null; then
+    echo "自动导航节点拒绝了本次切换；未改变开关状态。" >&2
+    return 1
+  fi
+  if [[ "${requested}" == "true" ]]; then
+    echo enabled >"${mission_state_file}"
+  else
+    echo disabled >"${mission_state_file}"
+  fi
+}
+
+toggle_managed_mission() {
+  if [[ -f "${mission_state_file}" ]] && [[ "$(<"${mission_state_file}")" == "enabled" ]]; then
+    set_mission false "■ 停止自动导航"
+  else
+    set_mission true "▶ 开启自动导航"
+  fi
+}
+
+read_state() {
+  timeout 4 ros2 topic echo --once --timeout 3 \
+    /autonomy/state std_msgs/msg/String --field data 2>/dev/null \
+    | sed -e '/^---$/d' -e '/^[[:space:]]*$/d' \
+    | head -n 1 \
+    | tr -d '\r'
+}
+
+toggle_running_mission() {
+  local current_state
+  current_state="$(read_state || true)"
+  case "${current_state}" in
+    IDLE|STOPPED|COMPLETED)
+      set_mission true "▶ 开启自动导航（当前：${current_state}）"
+      ;;
+    *)
+      # WAITING/EXPLORING/ALIGNING/HANDOFF/TRAVERSING/RECOVERY 均表示任务已使能。
+      set_mission false "■ 停止自动导航（当前：${current_state:-未知}）"
+      ;;
+  esac
+}
+
+# 本脚本托管的进程仍在运行时，本地状态文件就是开关真值；无需等待 ROS 图枚举。
+if systemctl --user is-active --quiet wakula-autonomy.service 2>/dev/null; then
+  toggle_managed_mission
+  exit 0
+fi
+
+if service_ready; then
+  toggle_running_mission
+  exit 0
+fi
+
+# 启动判断同样绕过 ros2 daemon 缓存；上一套 Gazebo 刚关闭时，缓存中可能仍残留 /clock。
+topic_list="$(ros2 topic list --no-daemon --spin-time 2 2>/dev/null || true)"
+
+if grep -qx '/clock' <<<"${topic_list}" && grep -qx '/cmd_vel_gazebo' <<<"${topic_list}"; then
+  # 用户可能已经手动打开了独立比赛场地。/cmd_vel_gazebo 是本项目仿真适配层的明确
+  # 标志；仅凭 /clock 无法区分 Gazebo 与 rosbag。复用场地可避免两个 /clock 相互干扰。
+  launch_command="ros2 launch quadruped_gazebo autonomous_field_test.launch.py start_gazebo:=false autostart_mission:=false"
+  launch_name="现有 Gazebo 场地上的自主导航"
+elif grep -qx '/scan' <<<"${topic_list}" && grep -qx '/odom' <<<"${topic_list}"; then
+  if grep -qx '/clock' <<<"${topic_list}"; then
+    launch_command="ros2 launch slam autonomous_navigation.launch.py use_sim_time:=true autostart_mission:=false"
+  else
+    launch_command="ros2 launch slam autonomous_navigation.launch.py autostart_mission:=false"
+  fi
+  launch_name="真机/外部传感器自主导航"
+else
+  launch_command="ros2 launch quadruped_gazebo autonomous_field_test.launch.py autostart_mission:=false"
+  launch_name="Gazebo 自主导航联调"
+fi
+
+echo "▶ 未发现运行中的任务节点，正在一键启动${launch_name}……"
+workspace_setup="$(printf '%q' "${workspace_dir}/install/setup.bash")"
+quoted_log="$(printf '%q' "${log_file}")"
+service_command="source /opt/ros/jazzy/setup.bash && source ${workspace_setup} && exec ${launch_command} >>${quoted_log} 2>&1"
+
+# Ubuntu 桌面默认具有用户级 systemd。由它监管整个 launch 进程组后，即使启动命令所在的
+# 终端关闭，ROS/Gazebo 也不会变成孤儿进程；将来排障可用 journalctl --user 查看服务状态。
+if systemctl --user is-system-running >/dev/null 2>&1; then
+  systemctl --user stop wakula-autonomy.service >/dev/null 2>&1 || true
+  systemctl --user reset-failed wakula-autonomy.service >/dev/null 2>&1 || true
+  : >"${log_file}"
+  systemd-run --user --quiet --collect \
+    --unit=wakula-autonomy \
+    --property=Description="Wakula autonomous navigation" \
+    --property=KillMode=control-group \
+    --property=TimeoutStopSec=15 \
+    /bin/bash -lc "${service_command}"
+else
+  # 非 systemd 环境（例如精简容器）的兼容路径。setsid 创建独立会话，nohup 防止终端
+  # 的 SIGHUP 传播；PID 仅用于诊断，不参与日常 START/STOP 切换。
+  nohup setsid /bin/bash -lc "${service_command}" </dev/null >/dev/null 2>&1 &
+  echo "$!" >"${runtime_dir}/autonomous_launch.pid"
+fi
+
+if set_mission true "正在等待节点就绪并开启自动导航……"; then
+  echo "✓ 自动导航已开启。以后仍执行 ./auto，即可停止或再次开启。"
+  echo "  日志：${log_file}"
+  exit 0
+fi
+
+echo "启动失败，请检查日志：${log_file}" >&2
+exit 1

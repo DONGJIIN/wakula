@@ -27,6 +27,12 @@
       "problemMatcher": []
     },
     {
+      "label": "ROS: 一键开启或停止自动导航",
+      "type": "shell",
+      "command": "${workspaceFolder}/auto",
+      "problemMatcher": []
+    },
+    {
       "label": "ROS: launch autonomous navigation",
       "type": "shell",
       "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch slam autonomous_navigation.launch.py'",

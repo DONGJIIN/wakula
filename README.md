@@ -526,6 +526,19 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 
 ### 6.1 自主探索与逐障碍越障编排
 
+日常使用只需记住根目录下这一条命令：
+
+```bash
+cd ~/wakula
+./auto
+```
+
+第一次执行会自动选择环境并启动自动导航：检测到本项目 Gazebo 的 `/clock` 和
+`/cmd_vel_gazebo` 时复用当前场地（不会重复启动），已有 `/scan` 和 `/odom` 时使用
+真机/外部传感器入口，否则启动 Gazebo 联调入口。以后每执行一次同样的 `./auto`，就在
+“开启自动导航”和“停止自动导航”之间切换。停止只取消目标并停车，保留 SLAM、RViz 和 Gazebo；
+无需重新建图即可再次执行 `./auto` 继续。
+
 真机/外部传感器环境的一键入口如下。它包含原 `slam.launch.py` 的 SLAM、Nav2、OpenCV、
 点云和 RViz，并额外启动 `autonomous_mission`；默认保持 `IDLE`，避免启动即运动：
 
@@ -536,8 +549,8 @@ ros2 launch slam autonomous_navigation.launch.py
 ./scripts/autonomy.sh status   # 查看 IDLE/EXPLORING/APPROACHING/TRAVERSING 等状态
 ```
 
-VS Code 的“终端 → 运行任务”也提供 `ROS: launch autonomous navigation`、
-`ROS: autonomous START`、`ROS: autonomous STOP` 三个按钮式任务。
+VS Code 的“终端 → 运行任务”中选择 `ROS: 一键开启或停止自动导航`，效果与 `./auto`
+相同；原 START/STOP 任务仍保留给调试人员。
 
 运行逻辑为：选择未知地图前沿 → Nav2 探索 → 连续确认障碍 → 冻结障碍位置并导航至入口 →
 调用 `/traverse_obstacle` → 成功后登记该障碍并继续下一前沿。前沿目标来自 `/map`，代码不读
