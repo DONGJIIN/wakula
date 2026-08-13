@@ -59,7 +59,7 @@ def generate_launch_description():
                     robot_name,
                     ", sdf=",
                     robot_sdf,
-                    ". Wait for 'Created entity' before starting SLAM.",
+                    ". Wait for 'Entity creation successful' before starting SLAM.",
                 ]
             ),
             Node(

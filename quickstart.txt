@@ -94,7 +94,7 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
   点击这个终端使其获得焦点后按空格或 t。看到 EXPLORING/ALIGNING_OBSTACLE 才表示任务
   已实际执行；WAITING_FOR_INPUTS 表示开关已打开但地图、Nav2、/scan 或 /odom 尚未就绪。
-  Gazebo 启动终端还必须出现 Created entity 和 generic_quadruped 生成提示；若只有场地没有狗，
+  Gazebo 启动终端还必须出现 Entity creation successful 和 generic_quadruped 生成提示；若只有场地没有狗，
   关闭残留 Gazebo 进程并重新运行完整 launch，不要单独运行 gz sim server。
 
 调试用显式控制：
