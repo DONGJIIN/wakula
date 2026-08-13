@@ -1,0 +1,24 @@
+# 越障控制器的硬件无关 Action 合同。
+# 任务层只在 TraversalGuidance 连续确认 READY 后发送；本接口不规定关节或足端轨迹。
+uint8 OBSTACLE_UNKNOWN=0
+uint8 OBSTACLE_STEP=2
+uint8 OBSTACLE_PIT=3
+uint8 OBSTACLE_WALL=4
+uint8 OBSTACLE_BAR=5
+uint8 OBSTACLE_SLOPE=7
+uint8 obstacle_type
+float32 confidence
+float32 distance
+float32 lateral_offset
+float32 heading_error
+---
+# success=true 仅表示底层控制器确认完成本次跨越，不代表整个探索任务完成。
+bool success
+string message
+---
+uint8 STATE_PREPARING=1
+uint8 STATE_TRAVERSING=2
+uint8 STATE_STABILIZING=3
+uint8 state
+float32 progress
+string message

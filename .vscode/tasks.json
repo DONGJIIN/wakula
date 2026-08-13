@@ -27,6 +27,30 @@
       "problemMatcher": []
     },
     {
+      "label": "ROS: launch autonomous navigation",
+      "type": "shell",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch slam autonomous_navigation.launch.py'",
+      "problemMatcher": []
+    },
+    {
+      "label": "ROS: autonomous START",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/autonomy.sh start",
+      "problemMatcher": []
+    },
+    {
+      "label": "ROS: autonomous STOP",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/autonomy.sh stop",
+      "problemMatcher": []
+    },
+    {
+      "label": "ROS: launch autonomous Gazebo test",
+      "type": "shell",
+      "command": "bash -lc 'source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch quadruped_gazebo autonomous_field_test.launch.py'",
+      "problemMatcher": []
+    },
+    {
       "label": "ROS: record debug bag",
       "type": "shell",
       "command": "${workspaceFolder}/scripts/record_bag.sh",

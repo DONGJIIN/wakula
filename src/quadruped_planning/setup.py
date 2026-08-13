@@ -11,7 +11,10 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/config", ["config/terrain_navigation.yaml"]),
+        ("share/" + package_name + "/config", [
+            "config/terrain_navigation.yaml",
+            "config/autonomous_mission.yaml",
+        ]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -26,6 +29,7 @@ setup(
             "quadruped_planning.terrain_safety_assessor:main",
             "navigation_speed_gate = quadruped_planning.cmd_vel_gate:main",
             "traversal_guidance = quadruped_planning.traversal_guidance:main",
+            "autonomous_mission = quadruped_planning.autonomous_mission:main",
         ],
     },
 )

@@ -37,6 +37,7 @@ def stabilizer():
         distance_hysteresis=0.05,
         angle_hysteresis=0.035,
         ready_confirmation_frames=3,
+        type_confirmation_frames=3,
         approach_speed_limit=PARAMETERS["approach_speed_limit"],
         alignment_speed_limit=PARAMETERS["alignment_speed_limit"],
     )
@@ -151,3 +152,20 @@ def test_target_low_pass_rejects_single_frame_lateral_jump():
     )
     output = filter_.update(jump)
     assert 0.0 < output.approach_y < 0.40
+
+
+def test_geometry_type_flicker_does_not_reset_same_entry():
+    """同一障碍边缘的单帧类别跳变不得撤销入口连续性。"""
+    filter_ = stabilizer()
+    step = compute_guidance(
+        safety(NavigationSafety.OBSTACLE_STEP, 0.70, 0.01), **PARAMETERS
+    )
+    pit = compute_guidance(
+        safety(NavigationSafety.OBSTACLE_PIT, 0.71, 0.02), **PARAMETERS
+    )
+    first = filter_.update(step)
+    second = filter_.update(pit)
+    third = filter_.update(step)
+    assert first.obstacle_type == NavigationSafety.OBSTACLE_STEP
+    assert second.obstacle_type == NavigationSafety.OBSTACLE_STEP
+    assert third.phase == TraversalGuidance.PHASE_READY

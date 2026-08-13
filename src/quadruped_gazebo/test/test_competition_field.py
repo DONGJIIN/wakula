@@ -52,6 +52,19 @@ def test_all_eight_rule_obstacles_exist():
     assert expected.issubset({item.attrib["name"] for item in WORLD.findall("model")})
 
 
+def test_autonomous_field_test_is_explicitly_simulation_only():
+    """整场一键联调可包含仿真 Action，但核心算法入口不能反向依赖它。"""
+    launch = (PACKAGE_ROOT / "launch" / "autonomous_field_test.launch.py").read_text(
+        encoding="utf-8"
+    )
+    adapter = (PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "sim_traverse_obstacle" in launch
+    assert "SIMULATION ONLY" in adapter
+    assert '"/cmd_vel_teleop"' in adapter
+
+
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
     """纯算法联调无需 1 kHz 物理时钟，避免每个仿真时钟节点被过度唤醒。"""
     step_size = float(WORLD.findtext("physics/max_step_size"))

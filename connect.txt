@@ -66,6 +66,15 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：/cmd_vel_terrain_safe。
   注意：它只限制已有速度，不自行生成运动指令。
 
+/autonomous_mission（quadruped_planning / autonomous_mission）
+  作用：在未知地图中选择探索前沿；确认障碍后让 Nav2 到达入口、调用越障 Action，成功后
+        记录该障碍并继续寻找下一个。它负责任务编排，不生成腿部或关节命令。
+  输入：/map、/traversal/guidance、map -> base_link TF，以及 Nav2/越障 Action 结果。
+  输出：调用 /navigate_to_pose 和 /traverse_obstacle；发布 /autonomy/state、/autonomy/event。
+  控制：/autonomy/set_enabled（SetBool）可在运行中 START/STOP；STOP 会取消当前目标并停车。
+  注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
+        /traverse_obstacle 服务端。
+
 2.3 SLAM 与导航监控节点
 
 /slam_toolbox（slam_toolbox / async_slam_toolbox_node）
@@ -161,6 +170,12 @@ stack_regression（测试工具，不随一键启动运行）
 /sim_cmd_vel_mux（quadruped_gazebo）
   作用：仅在仿真中仲裁算法 /cmd_vel 与高优先级键盘 /cmd_vel_teleop，输出
         /cmd_vel_gazebo；两路断流时自动停车，避免 j/l 被 Collision Monitor 零速度覆盖。
+
+/sim_traverse_obstacle（仅随 autonomous_field_test.launch.py 启动）
+  作用：在无动力学测试载体上实现 /traverse_obstacle，验证任务交接与继续探索流程。
+  输入：TraverseObstacle goal；输出：Action feedback/result 和受限仿真速度。运行时长按障碍
+        类别和规则长度给出可重复估计，不使用 Gazebo 模型坐标。
+  注意：不随 robocon_field.launch.py、slam.launch.py 或真机入口启动；不能代表真实越障。
 
 /robocon_aux_sensor_bridge（ros_gz_bridge / parameter_bridge）
   作用：桥接 /imu/data 和 /camera/camera_info；辅助数据异常不影响导航桥。
@@ -295,11 +310,24 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   控制器申请接管。它不是“越障已经完成”，也不是关节命令。
 
 /traversal/approach_pose，geometry_msgs/msg/PoseStamped
-  相对入口建议，frame 通常为 base_link；未来任务管理器在接收时转换到 map 后再发送
+  相对入口建议，frame 通常为 base_link；autonomous_mission 在接收时转换到 map 后再发送
   NavigateToPose。不得把 pose 直接放到实体障碍后方。
 
 /traversal/phase，std_msgs/msg/String
   人类调试速查，值为 INVALID/CLEAR/APPROACH/ALIGN/READY；程序应优先使用强类型 guidance。
+
+/traverse_obstacle，quadruped_interfaces/action/TraverseObstacle（运动组实现的交接合同）
+  Goal：obstacle_type（STEP=2、PIT=3、WALL=4、BAR=5、SLOPE=7）、confidence、distance、
+  lateral_offset、heading_error；坡面不会与 CLEAR 共用动作编码。
+  Feedback：PREPARING/TRAVERSING/STABILIZING、progress、message。
+  Result：success、message；只有真实控制器确认稳定完成跨越后才能令 success=true。
+
+/autonomy/state、/autonomy/event，std_msgs/msg/String
+  state 是当前 IDLE/WAITING_FOR_INPUTS/WAITING_FOR_MAP/EXPLORING/ALIGNING_OBSTACLE/HANDOFF/TRAVERSING/
+  RECOVERY/STOPPED；event 是低频状态原因，供终端和日志查看。
+
+/autonomy/set_enabled，std_srvs/srv/SetBool
+  true 开始或继续探索；false 取消 Nav2/越障目标并停车，但不关闭 SLAM、传感器或 RViz。
 
 六、设备替换合同
 ------------
@@ -327,6 +355,7 @@ LaserScan。相机和点云最好使用同一时间源；硬件同步优先，�
 
 七、明确不存在的接口
 ----------------
-当前没有 TraverseObstacle Action、CrossingCommand/CrossingStatus、hardware/status、
-joint trajectory、ros2_control controller、模拟 SDK、比赛状态机或故障注入控制接口。
-未来真机模块应单独设计，不能让感知话题直接驱动关节。
+当前已有 TraverseObstacle Action 定义、客户端和独立仿真流程服务端，但没有真实运动服务端、
+CrossingCommand/CrossingStatus、hardware/status、joint trajectory、ros2_control controller、
+模拟 SDK、正式比赛状态机或故障注入控制接口。未来真机模块应单独实现 Action 服务端，
+不能让感知话题直接驱动关节。

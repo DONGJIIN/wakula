@@ -14,6 +14,10 @@ install(PROGRAMS scripts/sim_cmd_vel_mux.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME sim_cmd_vel_mux
 )
+install(PROGRAMS scripts/sim_traverse_obstacle.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME sim_traverse_obstacle
+)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)

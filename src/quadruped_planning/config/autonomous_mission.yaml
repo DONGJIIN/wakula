@@ -1,0 +1,30 @@
+autonomous_mission:
+  ros__parameters:
+    autostart: false
+    map_timeout: 2.0
+    guidance_timeout: 1.0
+    frontier_minimum_cells: 8
+    frontier_minimum_distance: 0.55
+    frontier_maximum_distance: 7.0
+    frontier_exclusion_radius: 0.65
+    # Nav2 lifecycle 尚未 ACTIVE 时 Action 会短暂拒绝目标；退避重试而非误记为不可达。
+    nav_rejection_retry_delay: 1.0
+    # 规划中止/取消后留给 costmap、行为树和 SLAM 地图边界的恢复时间，避免高频重发。
+    nav_failure_retry_delay: 1.0
+    # 严格 READY 被点云前缘抖动漏掉时的三重守卫：Nav2 已到入口、最新障碍仍是同一
+    # map 位置、且距离/横偏均受限。不是“看见障碍就越”的宽松触发器。
+    handoff_fallback_max_distance: 1.50
+    handoff_fallback_max_lateral: 0.50
+    handoff_fallback_spatial_tolerance: 0.90
+    # 宽视场同时看到台阶、坑沿和横杆时锁定已确认入口；只有同一 map 邻域的更新才允许
+    # 刷新目标，避免 Nav2 每两秒在多个障碍之间取消/重发。
+    obstacle_lock_radius: 0.75
+    goal_timeout: 45.0
+    # 包含较长坡/桥的保守上限；真机控制器仍应自行实现更短的内部超时。
+    traversal_timeout: 25.0
+    minimum_obstacle_confidence: 0.55
+    obstacle_confirmation_frames: 3
+    completed_obstacle_radius: 1.0
+    post_traversal_cooldown: 3.0
+    # 连续 5 秒找不到前沿才结束，避免 SLAM 刚启动或回环更新期间误判任务完成。
+    empty_frontier_confirmations: 20

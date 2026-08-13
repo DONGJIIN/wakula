@@ -74,6 +74,7 @@ class GuidanceStabilizer:
         distance_hysteresis: float,
         angle_hysteresis: float,
         ready_confirmation_frames: int,
+        type_confirmation_frames: int,
         approach_speed_limit: float,
         alignment_speed_limit: float,
     ):
@@ -88,15 +89,20 @@ class GuidanceStabilizer:
         self.distance_hysteresis = max(0.0, float(distance_hysteresis))
         self.angle_hysteresis = max(0.0, float(angle_hysteresis))
         self.ready_frames = max(1, int(ready_confirmation_frames))
+        self.type_frames = max(1, int(type_confirmation_frames))
         self.approach_speed = max(0.0, min(1.0, approach_speed_limit))
         self.alignment_speed = max(0.0, min(1.0, alignment_speed_limit))
         self.current = GuidanceDecision()
         self.ready_count = 0
+        self.pending_type = None
+        self.pending_type_count = 0
 
     def reset(self, decision: GuidanceDecision) -> GuidanceDecision:
         """清除历史并以当前明确状态重新起步。"""
         self.current = decision
         self.ready_count = 0
+        self.pending_type = None
+        self.pending_type_count = 0
         return decision
 
     def _smooth(self, previous: float, current: float) -> float:
@@ -110,7 +116,10 @@ class GuidanceStabilizer:
         same_target = (
             self.current.perception_valid
             and self.current.traversal_required
-            and self.current.obstacle_type == candidate.obstacle_type
+            # 同一入口的点云可能在台阶、坑沿、墙面之间抖动。距离/横偏连续时先保持
+            # 当前类别，只有新类别连续出现才切换，避免 READY 计数被每帧清零。
+            and abs(self.current.distance - candidate.distance) <= 0.65
+            and abs(self.current.lateral_offset - candidate.lateral_offset) <= 0.55
         )
         if not same_target:
             # 新障碍第一帧可立即 APPROACH/ALIGN，但 READY 必须重新累计，避免单帧误交接。
@@ -126,6 +135,21 @@ class GuidanceStabilizer:
                         speed_limit=self.alignment_speed,
                     )
             return self.current
+
+        if candidate.obstacle_type != self.current.obstacle_type:
+            if self.pending_type == candidate.obstacle_type:
+                self.pending_type_count += 1
+            else:
+                self.pending_type = candidate.obstacle_type
+                self.pending_type_count = 1
+            if self.pending_type_count < self.type_frames:
+                candidate = replace(candidate, obstacle_type=self.current.obstacle_type)
+            else:
+                self.pending_type = None
+                self.pending_type_count = 0
+        else:
+            self.pending_type = None
+            self.pending_type_count = 0
 
         smoothed = replace(
             candidate,
@@ -310,6 +334,7 @@ class TraversalGuidanceNode(Node):
             ("distance_hysteresis", 0.05),
             ("angle_hysteresis", 0.035),
             ("ready_confirmation_frames", 3),
+            ("type_confirmation_frames", 3),
         )
         for name, default in defaults:
             self.declare_parameter(name, default)
@@ -325,6 +350,9 @@ class TraversalGuidanceNode(Node):
             angle_hysteresis=self.parameters["angle_hysteresis"],
             ready_confirmation_frames=int(
                 self.parameters["ready_confirmation_frames"]
+            ),
+            type_confirmation_frames=int(
+                self.parameters["type_confirmation_frames"]
             ),
             approach_speed_limit=self.parameters["approach_speed_limit"],
             alignment_speed_limit=self.parameters["alignment_speed_limit"],
@@ -367,6 +395,7 @@ class TraversalGuidanceNode(Node):
                 and key != "distance_hysteresis"
                 and key != "angle_hysteresis"
                 and key != "ready_confirmation_frames"
+                and key != "type_confirmation_frames"
             },
         )
         decision = self.stabilizer.update(decision)

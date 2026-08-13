@@ -3,12 +3,12 @@ Wakula 算法说明
 
 一、范围
 ------
-当前只实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策、越障入口
-引导、Xbox 手柄 Twist 适配和离线评估。
-没有实现硬件驱动、状态估计、运动学/动力学、站立步态、全身控制、真实越障 Action
-或比赛逻辑。Gazebo 仅实现独立的规则障碍参考场地和传感器测试载体，不属于算法启动，
-也不是机器狗动力学仿真。识别到需要抬腿/降低姿态的障碍后，算法只让 Nav2 接近并对正
-入口，在交接区停车发布 READY；不会生成关节命令或声称已经完成越障。
+当前实现 SLAM、Nav2、OpenCV、点云地形感知、相机/点云融合、保守决策、越障入口
+引导、未知地图前沿探索、TraverseObstacle Action 编排、Xbox 手柄 Twist 适配和离线评估。
+没有实现硬件驱动、状态估计、运动学/动力学、站立步态、全身控制、真实越障控制器或完整
+比赛逻辑。Gazebo 仅实现独立规则场地、传感器测试载体和流程适配器，不是机器狗动力学
+仿真。任务节点可以完成“探索—入口—Action—继续探索”，但不会生成关节命令；仿真
+Action 成功也不能声称真机已经具备越障能力。
 
 二、各部分作用
 ------------
@@ -28,6 +28,8 @@ Wakula 算法说明
    退出时先排空上游，再结束独立会话中的无状态子进程，由内核回收资源，不再发送会触发
    Jazzy 1.3.12 Publisher 清理竞态的 SIGINT/SIGTERM。节点名和话题完全不变。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
+   autonomous_navigation.launch.py：组合核心 slam.launch.py 与 autonomous_mission；不启动
+   Gazebo，也不提供越障服务端。默认 autostart_mission=false，必须显式一键 START。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
@@ -84,12 +86,22 @@ Wakula 算法说明
 
    traversal_guidance.py：订阅 NavigationSafety，计算障碍中心横向偏移和对正角，发布
    APPROACH、ALIGN、READY 三阶段以及 base_link 中的相对入口 PoseStamped。入口始终位于
-   障碍前方自由空间；节点不调用 NavigateToPose。未来任务管理器负责把入口位姿转换为
+   障碍前方自由空间；节点不调用 NavigateToPose。autonomous_mission 负责把入口位姿转换为
    Nav2 goal，READY 后暂停 Nav2 并交给真实越障控制器，成功后恢复原导航目标。输入超时
    会发布 INVALID 并清除历史，防止 READY 粘住。同一障碍的距离、横向中心和对正角采用
    一阶低通；READY 要求连续 3 帧满足条件，并以 0.05 m 距离、0.035 rad 角度迟滞退出，
    防止停在交接边界时 ALIGN/READY 闪烁。没有有效越障目标时不发布 approach_pose，消费端
    仍必须用同时间戳 guidance 验证有效性，不能使用 RViz 中残留的旧箭头。
+
+   autonomous_mission.py：订阅 /map 与 TraversalGuidance，从占据栅格中寻找“已知自由格
+   紧邻未知格”的前沿，并按信息增益、距离和失败黑名单选择 Nav2 目标。闭合前沿先按机器人
+   方位切分，再从每个扇区选择真实自由格，不能把整圈平均到已经探索过的地图中心。
+   识别到越障目标后连续多帧确认并冻结其 map 坐标；在宽视场同时出现多个障碍时只接受
+   同一邻域更新，避免入口目标取消抖动。到达入口且最新几何仍与冻结位置一致后才调用
+   /traverse_obstacle。Action 成功后登记完成位置、冷却并继续找下一前沿；Nav2 拒绝、超时、
+   Action 拒绝/取消以及运行中 STOP 都有独立处理。算法不读取 Gazebo 模型名、障碍 world
+   坐标或固定航点，因此更换正式场地布局不改源码。感知层以 CLEAR+traversal_required
+   表示可量测坡面，任务层在 Action 边界显式映射成 SLOPE=7，避免运动控制器误判为平地。
 
    Nav2 仍采用标准双层规划：planner_server 的 NavFnPlanner 使用 SLAM 地图生成全局路径；
    controller_server 的 DWBLocalPlanner 使用实时局部代价地图跟踪路径和绕开临时障碍。
@@ -167,14 +179,17 @@ Wakula 算法说明
    “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。
    TF 诊断统一使用 scripts/diagnose.sh。tf2_echo 是持续输出程序，不要直接接 head 等会
    提前关闭读取管道的命令；否则 ros2run 可能产生与算法无关的 BrokenPipeError 弹窗。
+   autonomous_field_test.launch.py：仅供完整软件流程回归，一次启动场地、核心算法、
+   autonomous_mission 和 sim_traverse_obstacle。仿真适配器接收相同 Action，但只按障碍类别
+   用受限速度和规则长度估算时长驱动无碰撞平面载体；它不进入真机入口、不模拟落脚/接触。
 
 三、决策原则
 ----------
 1. 点云几何决定是否可通行；OpenCV 只辅助提醒和减速。
 2. 点云不足、NaN/Inf、TF 失败或消息超时都不得当作安全地面。
 3. WALK：允许 Nav2 速度；视觉可把速度降到 vision_speed_scale。
-4. STEP/PIT/WALL/BAR 与坡面：远处由 Nav2 接近入口并对正，进入 0.75 m 交接区停车并
-   发布 READY，等待未来真机越障控制器。
+4. STEP/PIT/WALL/BAR 与坡面：远处由 Nav2 接近入口并对正，进入交接区后由任务节点调用
+   TraverseObstacle；服务端不存在、拒绝或超时时保持安全状态，不得假定跨越成功。
 5. POLE：属于绕杆导航物体，Nav2 结合代价地图低速从旁通过，不触发越障控制交接。
 6. 危险升级快，解除危险慢，避免阈值附近抖动。
 

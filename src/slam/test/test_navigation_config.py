@@ -139,6 +139,8 @@ def test_custom_tree_selects_configured_goal_and_progress_checkers():
     assert controller["progress_checker_plugins"] == ["progress_checker"]
     assert 'goal_checker_id="goal_checker"' in tree
     assert 'progress_checker_id="progress_checker"' in tree
+    assert controller["goal_checker"]["xy_goal_tolerance"] <= 0.10
+    assert controller["goal_checker"]["yaw_goal_tolerance"] <= 0.12
 
 
 def test_slam_scan_queue_absorbs_short_tf_jitter_without_large_backlog():
@@ -334,6 +336,16 @@ def test_simulation_entry_locks_clock_and_tf_ownership():
     # 文档字符串可以说明场地入口，但可执行代码不能解析或 include 仿真包。
     assert 'FindPackageShare("quadruped_gazebo")' not in source
     assert 'package="quadruped_gazebo"' not in source
+
+
+def test_autonomous_entry_keeps_simulator_and_motion_controller_replaceable():
+    """核心一键入口只能编排算法；Gazebo 与仿真越障器必须留在独立包。"""
+    path = PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
+    source = path.read_text(encoding="utf-8")
+    assert 'executable="autonomous_mission"' in source
+    assert 'FindPackageShare("quadruped_gazebo")' not in source
+    assert "sim_traverse_obstacle" not in source
+    assert '"autostart_mission"' in source
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

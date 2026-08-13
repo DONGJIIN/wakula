@@ -7,16 +7,17 @@ Wakula 后续开发快速上手
 连通域点云分类、支持乱序回调的时间同步融合、保守速度门、传感器 profile、rosbag
 离线评估、强弱光/高光/模糊防御、强类型 NavigationSafety/TraversalGuidance 对接合同、
 Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
-Xbox 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。自主算法只输出环境类别
-与导航依据；手柄节点只输出独立机身速度候选，Gazebo 载体只模拟标准传感器接口，三者都
-不生成机器狗腿部或关节动作。
+未知地图前沿探索、Nav2 入口接近、TraverseObstacle Action 编排、运行中一键启停、Xbox
+手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
+决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、137 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测及 Nav2
-多目标/1 m 窄通道/不可达目标恢复通过。这里只代表 Gazebo 软件链，不代表真机验收。
+当前基线：9 个 ROS 2 包、146 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+多目标/1 m 窄通道/不可达目标恢复，以及一次“探索→入口→Action→继续探索”在线联调通过。
+这里只代表 Gazebo 软件链，不代表真机验收。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
-站立步态、关节控制、真正越障 Action、比赛流程。当前只完成 Nav2 到障碍入口的接近、
-对正与 READY 交接，READY 后仍停车，不会抬腿或完成真实跨越。当前 Gazebo
+站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
+入口、Action 客户端/合同和后续探索；没有真实服务端时不会抬腿或完成真实跨越。当前 Gazebo
 仅用于 SLAM/Nav2/OpenCV 的场景与接口测试，不能代表四足越障能力。
 
 二、新电脑完整复现
@@ -77,6 +78,27 @@ SLAM 产生 map -> odom。启用地形感知还需：
   source /opt/ros/jazzy/setup.bash
   source install/setup.bash
   ros2 launch slam slam.launch.py
+
+自主探索核心栈（真机/外部传感器；默认不自动运动）：
+
+  ros2 launch slam autonomous_navigation.launch.py
+
+另开终端一键启停；STOP 不关闭 SLAM/RViz，之后可再次 START：
+
+  ./scripts/autonomy.sh start
+  ./scripts/autonomy.sh stop
+  ./scripts/autonomy.sh status
+
+VS Code 命令面板也可运行 ROS: launch autonomous navigation、ROS: autonomous START、
+ROS: autonomous STOP，无需手敲服务命令。
+
+该入口要求运动组提供 /traverse_obstacle Action 服务端。只有仿真流程测试时使用下面的
+独立全栈入口，它会额外启动场地与 sim_traverse_obstacle，并默认自动探索：
+
+  ros2 launch quadruped_gazebo autonomous_field_test.launch.py
+
+  # 若希望先观察再手动开始：
+  ros2 launch quadruped_gazebo autonomous_field_test.launch.py autostart_mission:=false
 
 无相机：
 
@@ -276,16 +298,16 @@ POLE 由 Nav2 低速绕杆。相机证据不能触发腿部动作。`/navigation
 4. 录真实 bag，重调点云与 OpenCV，完成准确率统计。
 5. 单独开发硬件驱动、状态估计、运动学、步态和安全层，并在台架验证。
 6. 底盘能安全消费 `/cmd_vel` 后低速接入 Nav2。
-7. 在现有 /traversal/guidance 上实现真机越障 Action 与 Nav2 控制权切换；不得把 READY
-   当作动作完成，也不得直接转换为关节命令。
+7. 实现现有 /traverse_obstacle Action 的真机服务端与安全控制权切换；不得把收到 Goal
+   当作动作完成，只有姿态/接触闭环确认落地后才能返回 success=true。
 
 九、其他团队一键对齐
 ------------------
 硬件/状态估计组交付以下标准接口即可：/scan（LaserScan）、/odom（Odometry）、
 odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组订阅最终 /cmd_vel
-（Twist）；需要越障交接时读取 /traversal/guidance，并以 /terrain/navigation_safety 复核
-环境有效性。不要把 STEP/CLIMB 或 READY 直接转换成关节动作；READY 只表示入口距离和
-对正条件满足。
+（Twist）；越障控制组实现 /traverse_obstacle 服务端，并以 /terrain/navigation_safety
+复核环境有效性。不要把 STEP/CLIMB 或 READY 直接转换成关节动作；READY 只表示入口距离
+和对正条件满足，Action Result 才向任务层表达完成/失败。
 
 真机发布自身 URDF/TF 时这样启动：
 

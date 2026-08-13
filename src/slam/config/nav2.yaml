@@ -21,8 +21,10 @@ controller_server:
       movement_time_allowance: 15.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.20
-      yaw_goal_tolerance: 0.25
+      # 越障入口交接距离为 0.75 m；20 cm 默认容差会让 Nav2 在约 0.90 m 处提前成功，
+      # 随后任务层只能反复提交同一入口。10 cm 仍给未标定真机留余量，同时能进入 READY。
+      xy_goal_tolerance: 0.10
+      yaw_goal_tolerance: 0.12
       stateful: true
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -51,7 +53,7 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.20
+      xy_goal_tolerance: 0.10
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true

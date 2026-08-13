@@ -2,7 +2,8 @@
 
 Wakula 是面向 Ubuntu 24.04、ROS 2 Jazzy 和 RK3588 的四足机器人调试工作空间。
 当前版本以 **2D 雷达 SLAM + Nav2 路径规划 + 深度点云地形分析 + OpenCV 障碍提示 +
-越障入口引导**构成轻量融合链路，不包含 YOLO、深度学习推理、硬件驱动或腿部运动控制。
+自主前沿探索 + 越障任务编排**构成轻量融合链路，不包含 YOLO、深度学习推理、硬件驱动
+或腿部运动控制。
 
 现阶段只开发硬件无关的环境感知与自主导航底座，并提供一个与算法完全解耦的 Gazebo
 比赛障碍参考场地。仓库没有实现机器狗动力学仿真、厂家 SDK、`ros2_control`、状态估计、
@@ -38,14 +39,15 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 | 复杂地形运动控制 | ⬜ 未实现，等待真机 | 通过地形随机化和扰动训练，使强化学习策略适应平地、斜坡、台阶、坑洼、连续障碍及非结构化地形，实现速度跟踪、姿态稳定和足端协调 |
 | 环境感知 | 🟡 软件雏形完成 | 真机标定雷达/相机，完成 RGB-深度同步、障碍跟踪、高程图、坡面和可落脚区域识别 |
 | SLAM 与自主导航 | 🟡 软件雏形完成 | 使用真实 `/scan`、`/odom` 和 TF 调参，验证重定位、动态避障、狭窄通道及失效恢复 |
-| 任务与比赛逻辑 | ⬜ 暂未实现 | 测量正式场地坐标，联动真实越障反馈，完成失败重试、计时、计分和任务恢复 |
+| 任务与比赛逻辑 | 🟡 自主探索雏形完成 | 已能从未知地图选择前沿、逐个接近确认障碍并经 Action 交接后继续探索；仍需接入真实越障反馈、正式障碍顺序、失败重试、计时、计分、返回起点和裁判接口 |
 | 整机安全 | ⬜ 仅有导航速度超时门 | 实现并验证硬件急停、驱动失能、过流/过温/欠压及真实姿态/关节保护 |
 | 仿真与测试 | 🟡 已有独立 Gazebo 参考场地 | 已复现规则 V1.0 已公布尺寸/颜色并提供传感器测试载体；正式坐标、真机动力学、Isaac、SIL/HIL 仍待后续完成 |
 | 真机联调与工程化 | 🟡 CI 与 rosbag 评估工具已有 | 架空→保护绳→低速→单障碍→整场测试，完成部署服务、日志策略和维护流程 |
 
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
-决策、速度超时门、Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和
-全栈长时间回归工具：9 个 ROS 2 包可编译，137 项测试通过，并提供一键启动、对接检查和 CI。URDF 只用于 RViz 外形与
+决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
+Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
+9 个 ROS 2 包可编译，146 项测试通过，并提供一键启动、运行中启停、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -123,9 +125,9 @@ wakula/
 │   ├── quadruped_description/  # 12 自由度 URDF/Xacro、RViz、传感器 TF
 │   ├── quadruped_gazebo/       # 独立规则场地、传感器测试载体与 Gazebo launch
 │   ├── quadruped_bringup/      # 感知、决策、速度门和占位 TF 统一入口
-│   ├── quadruped_interfaces/   # 带时间戳的感知、融合与越障引导消息
+│   ├── quadruped_interfaces/   # 感知消息与 TraverseObstacle Action 合同
 │   ├── quadruped_perception/   # OpenCV 视觉及 PointCloud2 地形分析
-│   ├── quadruped_planning/     # 保守地形决策与 Nav2 速度门
+│   ├── quadruped_planning/     # 地形决策、入口引导与自主探索任务
 │   ├── quadruped_teleop/       # Xbox /joy 到独立 /cmd_vel_joy 的安全适配
 │   ├── quadruped_tools/        # rosbag 准确率评估与全栈长时间回归
 │   └── slam/                   # SLAM Toolbox、Nav2 参数与自主启动
@@ -133,6 +135,7 @@ wakula/
 │   ├── record_bag.sh           # 记录感知、导航与诊断数据
 │   ├── diagnose.sh             # 检查 ROS 话题和 TF
 │   ├── check_integration.sh    # 一键核验未来真机对接合同
+│   ├── autonomy.sh             # 运行中启动、停止或查看自主任务
 │   └── build.sh                # 统一编译
 ├── .colcon/defaults.yaml
 ├── .github/workflows/ros2-ci.yaml
@@ -147,14 +150,14 @@ wakula/
 | 包 | 主要职责 | 关键入口 |
 |---|---|---|
 | `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
-| `quadruped_gazebo` | 比赛障碍参考 world 与仿真传感器桥；不属于核心算法 | `robocon_field.launch.py` |
+| `quadruped_gazebo` | 比赛障碍参考 world、仿真传感器桥与仅供流程联调的 Action 适配器 | `robocon_field.launch.py`、`autonomous_field_test.launch.py` |
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
-| `quadruped_interfaces` | 带时间戳的感知、导航与越障交接合同 | 五个 `msg/` 接口 |
+| `quadruped_interfaces` | 带时间戳的感知、导航与越障交接合同 | 五个 `msg/` + `TraverseObstacle.action` |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
-| `quadruped_planning` | 地形风险分类、Nav2 入口引导、速度上限和失效安全门 | 三个导航辅助节点 |
+| `quadruped_planning` | 地形风险分类、入口引导、速度安全门和未知地图自主任务 | 四个导航/任务节点 |
 | `quadruped_teleop` | Xbox 按键安全状态机和独立 Twist 候选 | `xbox_teleop` |
 | `quadruped_tools` | rosbag 标注评估、SLAM/Nav2 长测与资源报告 | `perception_bag_evaluator`、`stack_regression` |
-| `slam` | 建图、定位、全局/局部规划、碰撞监控 | `slam.launch.py` |
+| `slam` | 建图、定位、全局/局部规划、碰撞监控与自主任务组合入口 | `slam.launch.py`、`autonomous_navigation.launch.py` |
 
 主要节点：
 
@@ -174,8 +177,12 @@ wakula/
 - `traversal_guidance`：把已确认的赛道障碍转换为 `APPROACH → ALIGN → READY`，发布
   `base_link` 中位于障碍前方的相对入口位姿；它不调用 Nav2 Action，也不生成抬腿、关节
   或足端命令。同类目标的距离和横向中心经过低通，READY 需要连续 3 帧确认并具有独立的
-  距离/角度退出迟滞；输入失效立即撤销历史。未来任务管理器据此向 Nav2 下发入口目标，
-  READY 后再交给运动控制器。
+  距离/角度退出迟滞；输入失效立即撤销历史。`autonomous_mission` 据此向 Nav2 下发入口
+  目标，READY 后再交给运动控制器。
+- `autonomous_mission`：从 `/map` 的已知—未知边界提取真实自由前沿，在 Nav2 处于活动状态
+  后逐个探索；连续确认比赛障碍时冻结其 `map` 坐标，先到达入口，再调用
+  `/traverse_obstacle`。Action 成功后记录已完成障碍并选择下一前沿；Action 拒绝、超时、
+  Nav2 取消及运行中 STOP 均有显式状态，不读取 Gazebo 模型名或 world 坐标。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、协方差
   和里程计突跳；跳变会锁存到连续稳定样本确认恢复。
 - `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2。
@@ -208,6 +215,10 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
                                                 └─> traversal guidance
                                                      ├─> /traversal/guidance
                                                      └─> /traversal/approach_pose
+                                                             │
+/map + map→base_link ─> autonomous mission <─────────────────┘
+                         ├─> Nav2 /navigate_to_pose
+                         └─> /traverse_obstacle ─> 未来真机越障控制器
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
 
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
@@ -227,10 +238,12 @@ Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
    局部拟合地面的深度点”仍写入代价地图，防止运动控制器接管前误闯障碍。
 3. **OpenCV** 识别杆、限高横杆、墙面和大面积有色障碍，用于提前减速和提示。
 4. **深度点云** 测量障碍高度、坡度、横向偏移和粗糙度，是 `STEP/CLIMB/STOP` 及入口
-   对正的几何依据；当前只完成入口引导和交接停车，不执行真实跨越动作。
+   对正的几何依据；当前任务层会完成入口导航和 Action 交接，但不生成真实跨越动作。
 5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
 6. **Xbox 手柄节点** 默认独立发布 `/cmd_vel_joy`，不加入主导航 launch，也不绕过
    Collision Monitor；真机阶段通过 `twist_mux` 与 Nav2 速度仲裁。
+7. **自主任务节点** 只使用 `/map`、TF 和感知输出决定“去哪里、何时交接”，不包含步态；
+   停止服务会取消当前 Nav2/越障目标并发布零速，之后可以继续启动。
 
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
 点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
@@ -244,10 +257,10 @@ OpenCV 源码，只需完成以下合同：
    PointCloud2；非默认名称通过 `sensor_profile` 或 launch remap 对齐。
 2. 真机底盘或运动控制器订阅最终 `/cmd_vel`。速度含义遵循 ROS REP-103：线速度 m/s、
    角速度 rad/s，`base_link` 的 `+x` 向前、`+y` 向左、`+z` 向上。
-3. 运动/越障团队读取 `/traversal/guidance` 判断是否 `READY`，并用
+3. 运动/越障团队实现 `/traverse_obstacle` Action 服务端，并用
    `/terrain/navigation_safety` 复核同一时间戳的模式、限速、有效性和障碍几何；两者都
-   是只读合同，不得在未完成动作仲裁和硬件安全的情况下直接转成关节命令。
-   不要把该消息直接解释为抬腿、攀爬或关节控制命令。
+   是输入合同，不得在未完成动作仲裁和硬件安全的情况下直接转成关节命令。服务端只有
+   在真实姿态/接触闭环确认稳定落地后才能返回 `success=true`。
 4. 真机自身发布 URDF/TF 时使用 `robot_model:=false`，避免两个
    `robot_state_publisher` 同时发布传感器固定 TF。
 5. 全栈启动后执行 `./scripts/check_integration.sh`；若相机/点云名称不同，可将实际话题
@@ -511,7 +524,38 @@ Nav2 节点启动后先保持未激活。就绪监视器收到 `/scan`、`/odom`
 ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 ```
 
-### 6.1 比赛障碍参考场地（独立启动，不属于 slam.launch.py）
+### 6.1 自主探索与逐障碍越障编排
+
+真机/外部传感器环境的一键入口如下。它包含原 `slam.launch.py` 的 SLAM、Nav2、OpenCV、
+点云和 RViz，并额外启动 `autonomous_mission`；默认保持 `IDLE`，避免启动即运动：
+
+```bash
+ros2 launch slam autonomous_navigation.launch.py
+./scripts/autonomy.sh start    # 开始/继续自主探索
+./scripts/autonomy.sh stop     # 取消当前目标并停车，SLAM/RViz 保持运行
+./scripts/autonomy.sh status   # 查看 IDLE/EXPLORING/APPROACHING/TRAVERSING 等状态
+```
+
+VS Code 的“终端 → 运行任务”也提供 `ROS: launch autonomous navigation`、
+`ROS: autonomous START`、`ROS: autonomous STOP` 三个按钮式任务。
+
+运行逻辑为：选择未知地图前沿 → Nav2 探索 → 连续确认障碍 → 冻结障碍位置并导航至入口 →
+调用 `/traverse_obstacle` → 成功后登记该障碍并继续下一前沿。前沿目标来自 `/map`，代码不读
+比赛 world 坐标；正式坐标改变不需要修改任务算法。真机必须由运动控制团队实现
+`quadruped_interfaces/action/TraverseObstacle` 服务端，否则任务会保守等待/报告接口不可用。
+
+完整 Gazebo 流程回归可以单独一键运行：
+
+```bash
+ros2 launch quadruped_gazebo autonomous_field_test.launch.py
+```
+
+此入口才会同时启动独立场地和 `sim_traverse_obstacle`。后者只以平面测试载体模拟 Action
+完成，用于验证探索—交接—继续流程，不是四足动力学或真实越障控制；它不会被
+`slam.launch.py` 或真机入口隐式加载。仿真入口默认自动开始，可用
+`autostart_mission:=false` 改成手动 START。
+
+### 6.2 比赛障碍参考场地（独立启动，不属于 slam.launch.py）
 
 规则 V1.0 已公布的 14 m × 6 m 场地、8 类障碍尺寸和规定颜色位于
 `src/quadruped_gazebo/worlds/robocon_obstacle_field.sdf`。规则明确说明障碍排列和安装位置
@@ -634,7 +678,7 @@ Ubuntu 的崩溃报告窗口可能延迟显示上一次关闭留下的报告；�
 诊断 TF 请运行 `./scripts/diagnose.sh`；不要将持续输出的 `tf2_echo` 直接连接到 `head`，
 否则读取端提前关闭可能让 ROS 2 Jazzy 报 `BrokenPipeError`，但这不代表算法节点崩溃。
 
-### 6.2 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
+### 6.3 Xbox 手柄节点（独立启动，不属于 slam.launch.py）
 
 先连接手柄并确认系统识别：
 
@@ -748,11 +792,11 @@ ros2 topic echo /perception/front_obstacle_name
 | 可量测坡面 | 发布坡面越障候选及入口引导；交接区停车 | 否 |
 | 数据断流、TF 失败或字段非法 | 发布 `STOP` 和零速度上限 | 否 |
 
-新增 `/traversal/guidance`、`/traversal/phase` 和 `/traversal/approach_pose` 只表达
-`APPROACH/ALIGN/READY` 与相对入口建议，不自动发送 Nav2 goal，也没有动作执行含义。
-仓库仍没有 `TraverseObstacle` Action、SDK 网关、关节轨迹或越障控制器；待真机运动
-控制稳定后，由任务管理器完成“保存原目标→发送入口目标→READY 交接→越障反馈→恢复
-原 Nav2 目标”的闭环。
+`/traversal/guidance`、`/traversal/phase` 和 `/traversal/approach_pose` 仍只表达
+`APPROACH/ALIGN/READY` 与相对入口建议；`autonomous_mission` 消费这些消息并负责
+“选择前沿→发送入口目标→READY 交接→等待 Action 结果→继续探索”。仓库已定义
+`TraverseObstacle` Action 合同，但没有 SDK 网关、关节轨迹或真实越障服务端；仿真服务端
+只用于验证编排，不等价于机器狗跨越能力。
 
 ## 9. 点云地形与 Nav2 融合
 
@@ -884,7 +928,7 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 `/terrain/features` 的下标已集中为具名常量。维护时不要为逐行翻译代码而增加注释，应优先
 记录数据流、坐标系、单位、算法假设、安全边界以及更换传感器后必须重新标定的内容。
 
-## 11. Robocon 比赛逻辑（待真机阶段）
+## 11. Robocon 比赛逻辑
 
 | 待实现内容 | 前置条件 |
 |---|---|
@@ -893,26 +937,30 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 | 足端接触限制和台阶计分 | 真实足端力/接触检测完成 |
 | Nav2 与越障控制切换 | 基础步态、急停和全身控制通过台架验收 |
 
-当前仓库不发布 `/competition/*` 话题，也没有比赛状态机、Waypoint Follower 或调试航点，避免在缺少真机反馈
-时把计时流程误认为完整任务能力。
+当前已完成不依赖场地坐标的自主前沿探索、入口接近、Action 交接、完成障碍去重和继续探索。
+仓库仍不发布 `/competition/*` 话题，也没有正式顺序、计时、计分、返回起点或裁判状态机，
+避免在缺少真机反馈时把通用探索流程误认为完整比赛能力。
 
 ## 12. 配置文件索引
 
 | 配置 | 内容 |
 |---|---|
-| `quadruped_interfaces/msg/` | 地形、视觉和相机/点云融合强类型消息 |
+| `quadruped_interfaces/msg/`、`action/` | 地形、视觉、融合消息与越障 Action 合同 |
 | `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
 | `quadruped_gazebo/worlds/robocon_obstacle_field.sdf` | 规则障碍尺寸、颜色和集中式参考布局 |
 | `quadruped_gazebo/launch/robocon_field.launch.py` | 独立 Gazebo/传感器桥入口，不加载算法 |
+| `quadruped_gazebo/launch/autonomous_field_test.launch.py` | Gazebo + 核心算法 + 仿真 Action 的完整流程回归 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
 | `quadruped_planning/config/terrain_navigation.yaml` | 地形分类阈值、视觉辅助和速度门超时 |
+| `quadruped_planning/config/autonomous_mission.yaml` | 前沿选择、入口锁定、Action 超时和完成去重参数 |
 | `quadruped_tools/perception_bag_evaluator.py` | rosbag 标签、指标和参数搜索 |
 | `.github/workflows/ros2-ci.yaml` | Ubuntu 24.04 + ROS 2 Jazzy 自动构建测试 |
 | `slam/config/slam.yaml` | SLAM Toolbox |
 | `slam/config/nav2.yaml` | Nav2、代价地图、速度平滑和碰撞监控 |
 | `slam/behavior_trees/navigate_to_pose_wakula.xml` | 清图、等待、小退和小角度旋转恢复树 |
 | `slam/config/sensor_profiles.yaml` | 常见雷达/相机话题 profile，可直接扩展 |
+| `slam/launch/autonomous_navigation.launch.py` | 核心算法与自主任务组合入口；不加载 Gazebo/控制器 |
 
 核心算法公共启动只有一份：`quadruped_bringup/launch/bringup.launch.py`；
 `slam/launch/slam.launch.py` 在其上增加 SLAM、Nav2 与 RViz，避免重复维护节点。
