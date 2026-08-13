@@ -57,3 +57,9 @@ traversal_guidance:
     approach_speed_limit: 0.25
     alignment_speed_limit: 0.12
     minimum_slope_for_handoff: 0.12
+    # 同一障碍的距离/横向中心做低通；READY 需连续 3 帧，退出另设距离/角度迟滞。
+    target_smoothing_alpha: 0.35
+    # 进入 READY 后允许 5 cm / 约 2° 的退出迟滞，避免阈值附近阶段闪烁。
+    distance_hysteresis: 0.05
+    angle_hysteresis: 0.035
+    ready_confirmation_frames: 3

@@ -56,7 +56,9 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输入：/terrain/navigation_safety。
   输出：/traversal/guidance、/traversal/phase、/traversal/approach_pose。
   注意：入口位姿位于输入 frame（通常 base_link）的障碍前方；本节点不发送 Nav2 goal，
-        不生成关节动作。POLE 由 Nav2 绕杆，不触发运动控制交接；输入断流输出 INVALID。
+        不生成关节动作。POLE 由 Nav2 绕杆，不触发运动控制交接；READY 需连续 3 帧，
+        具有距离/角度迟滞；输入断流输出 INVALID 并清除历史。approach_pose 仅在当前确有
+        有效越障目标时发布，程序必须以 guidance 为权威有效性来源。
 
 /navigation_speed_gate（quadruped_planning / navigation_speed_gate）
   作用：依据地形限制和导航健康状态缩放 Nav2 速度；数据异常或超时立即输出零速度。
@@ -143,7 +145,8 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
 stack_regression（测试工具，不随一键启动运行）
   作用：在 Gazebo 中验证旋转/倒退回环、多目标、1 m 窄通道、恢复行为和资源占用。
   接口：显式 --allow-motion 后发布 /cmd_vel_teleop；订阅 /map、/scan、/odom、
-        /navigation/healthy、/perception/front_obstacle_name，并调用 Nav2 Action。
+        /navigation/healthy、/perception/front_obstacle_name、/traversal/guidance，并调用
+        Nav2 Action；额外检查错误 READY 和 ALIGN/READY 快速往返。
   输出：reports/*.json；真机禁止运行运动阶段。
 
 2.7 独立 Gazebo 节点（只随 robocon_field.launch.py 启动）

@@ -4,7 +4,14 @@ import math
 from pathlib import Path
 import time
 
-from quadruped_tools.stack_regression import ResourceStats, StreamStats, _angle_error, parse_args
+from quadruped_interfaces.msg import TraversalGuidance
+from quadruped_tools.stack_regression import (
+    ResourceStats,
+    StackRegression,
+    StreamStats,
+    _angle_error,
+    parse_args,
+)
 
 
 def test_angle_error_wraps_at_pi_boundary():
@@ -48,3 +55,31 @@ def test_nav2_regression_keeps_narrow_passage_and_cancel_handshake():
     assert '"narrow_pole_passage"' in source
     assert "cancel_goal_async" in source
     assert "cancel_acknowledged" in source
+
+
+def test_guidance_monitor_detects_only_inconsistent_ready_contract():
+    """回归工具必须捕获“无有效感知却请求控制交接”的危险消息。"""
+    node = object.__new__(StackRegression)
+    node.streams = {"traversal_guidance": StreamStats()}
+    node.guidance_phase_samples = {}
+    node.guidance_phase_transitions = 0
+    node.guidance_ready_boundary_transitions = 0
+    node.guidance_rapid_ready_boundary_transitions = 0
+    node.guidance_contract_violations = 0
+    node._last_guidance_phase = None
+    node._last_guidance_transition_time = None
+
+    valid = TraversalGuidance()
+    valid.phase = TraversalGuidance.PHASE_READY
+    valid.perception_valid = True
+    valid.traversal_required = True
+    valid.ready_for_handoff = True
+    node._guidance_callback(valid)
+    assert node.guidance_contract_violations == 0
+
+    invalid = TraversalGuidance()
+    invalid.phase = TraversalGuidance.PHASE_READY
+    invalid.ready_for_handoff = True
+    node._guidance_callback(invalid)
+    assert node.guidance_contract_violations == 1
+    assert node.streams["traversal_guidance"].count == 2

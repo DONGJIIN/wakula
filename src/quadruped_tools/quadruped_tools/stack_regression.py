@@ -25,6 +25,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry
+from quadruped_interfaces.msg import TraversalGuidance
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -77,6 +78,7 @@ class ResourceStats:
             "vision_obstacle_detector",
             "perception_fusion",
             "terrain_safety_assessor",
+            "traversal_guidance",
             "navigation_speed_gate",
             "collision_monitor",
         )
@@ -141,13 +143,20 @@ class StackRegression(Node):
         map_qos.reliability = ReliabilityPolicy.RELIABLE
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.streams: Dict[str, StreamStats] = {
-            name: StreamStats() for name in ("map", "scan", "odom", "front_name")
+            name: StreamStats()
+            for name in ("map", "scan", "odom", "front_name", "traversal_guidance")
         }
         self.create_subscription(OccupancyGrid, "/map", self._map_callback, map_qos)
         self.create_subscription(LaserScan, "/scan", self._scan_callback, qos_profile_sensor_data)
         self.create_subscription(Odometry, "/odom", self._odom_callback, qos_profile_sensor_data)
         self.create_subscription(Bool, "/navigation/healthy", self._health_callback, 10)
         self.create_subscription(String, "/perception/front_obstacle_name", self._name_callback, 10)
+        self.create_subscription(
+            TraversalGuidance,
+            "/traversal/guidance",
+            self._guidance_callback,
+            10,
+        )
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.through_client = ActionClient(self, NavigateThroughPoses, "navigate_through_poses")
@@ -157,6 +166,13 @@ class StackRegression(Node):
         self.health_true = 0
         self.health_false = 0
         self.obstacle_names = set()
+        self.guidance_phase_samples: Dict[str, int] = {}
+        self.guidance_phase_transitions = 0
+        self.guidance_ready_boundary_transitions = 0
+        self.guidance_rapid_ready_boundary_transitions = 0
+        self.guidance_contract_violations = 0
+        self._last_guidance_phase: Optional[int] = None
+        self._last_guidance_transition_time: Optional[float] = None
         self.resource = ResourceStats()
         self.loop_errors: List[dict] = []
         self._last_resource_sample = 0.0
@@ -183,6 +199,53 @@ class StackRegression(Node):
         self.streams["front_name"].update()
         if msg.data:
             self.obstacle_names.add(msg.data)
+
+    def _guidance_callback(self, msg: TraversalGuidance) -> None:
+        """检查越障交接消息的持续性及最重要的安全不变量。
+
+        ``ready_for_handoff`` 只有在感知有效、确认需要越障且阶段为 READY 时才允许为真。
+        这条约束比“是否识别到某个固定障碍”更适合作为通用回归条件，因为机器人路线和
+        比赛 world 坐标都可以独立更换。
+        """
+        self.streams["traversal_guidance"].update()
+        phase_names = {
+            TraversalGuidance.PHASE_INVALID: "INVALID",
+            TraversalGuidance.PHASE_CLEAR: "CLEAR",
+            TraversalGuidance.PHASE_APPROACH: "APPROACH",
+            TraversalGuidance.PHASE_ALIGN: "ALIGN",
+            TraversalGuidance.PHASE_READY: "READY",
+        }
+        name = phase_names.get(int(msg.phase), f"UNKNOWN_{int(msg.phase)}")
+        self.guidance_phase_samples[name] = self.guidance_phase_samples.get(name, 0) + 1
+        if msg.ready_for_handoff and (
+            not msg.perception_valid
+            or not msg.traversal_required
+            or msg.phase != TraversalGuidance.PHASE_READY
+        ):
+            self.guidance_contract_violations += 1
+
+        if self._last_guidance_phase is not None and msg.phase != self._last_guidance_phase:
+            now = time.monotonic()
+            self.guidance_phase_transitions += 1
+            # 机器人主动旋转时 APPROACH/CLEAR 频繁切换通常只是视场依次扫过多个障碍，
+            # 并非交接抖动。真正危险的是 ALIGN 与 READY 在阈值边缘快速往返，因此只对
+            # 这一对状态单独计数，避免用错误指标“优化”掉正常环境变化。
+            ready_pair = {
+                int(self._last_guidance_phase),
+                int(msg.phase),
+            } == {
+                int(TraversalGuidance.PHASE_ALIGN),
+                int(TraversalGuidance.PHASE_READY),
+            }
+            if ready_pair:
+                self.guidance_ready_boundary_transitions += 1
+                if (
+                    self._last_guidance_transition_time is not None
+                    and now - self._last_guidance_transition_time < 0.35
+                ):
+                    self.guidance_rapid_ready_boundary_transitions += 1
+                self._last_guidance_transition_time = now
+        self._last_guidance_phase = int(msg.phase)
 
     def spin_for(self, seconds: float, command: Optional[Twist] = None) -> None:
         """在墙钟期限内处理回调，并以 20 Hz 重发速度防止仿真 mux 超时。"""
@@ -216,12 +279,15 @@ class StackRegression(Node):
         )
 
     def wait_ready(self, timeout: float) -> bool:
-        """等待地图、雷达、里程计、定位 TF 和健康状态全部出现。"""
+        """等待地图、传感器、越障引导、定位 TF 和健康状态全部出现。"""
         deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
             self.spin_for(0.1)
             if (
-                all(self.streams[name].count for name in ("map", "scan", "odom"))
+                all(
+                    self.streams[name].count
+                    for name in ("map", "scan", "odom", "traversal_guidance")
+                )
                 and self.pose() is not None
                 and self.health_true > 0
             ):
@@ -398,9 +464,11 @@ class StackRegression(Node):
             self.streams["map"].count > 0
             and self.streams["scan"].count > 0
             and self.streams["odom"].count > 0
+            and self.streams["traversal_guidance"].count > 0
             and self.streams["map"].max_gap_seconds < 2.0
             and self.streams["scan"].max_gap_seconds < 1.0
             and self.streams["odom"].max_gap_seconds < 1.0
+            and self.streams["traversal_guidance"].max_gap_seconds < 2.0
         )
         mapping_ok = bool(self.loop_errors) and max_position_error < 0.35 and max_yaw_error < 0.50
         nav2_ok = all(
@@ -414,7 +482,13 @@ class StackRegression(Node):
         ) if nav2_results else True
         return {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "passed": bool(streams_ok and mapping_ok and nav2_ok and self.health_true > 0),
+            "passed": bool(
+                streams_ok
+                and mapping_ok
+                and nav2_ok
+                and self.health_true > 0
+                and self.guidance_contract_violations == 0
+            ),
             "streams": {name: stats.public() for name, stats in self.streams.items()},
             "navigation_health": {"true_samples": self.health_true, "false_samples": self.health_false},
             "map": {
@@ -427,6 +501,15 @@ class StackRegression(Node):
                 "max_yaw_error_rad": None if not self.loop_errors else max_yaw_error,
             },
             "front_obstacle_names_seen": sorted(self.obstacle_names),
+            "traversal_guidance": {
+                "phase_samples": dict(sorted(self.guidance_phase_samples.items())),
+                "phase_transitions": self.guidance_phase_transitions,
+                "ready_boundary_transitions": self.guidance_ready_boundary_transitions,
+                "rapid_ready_boundary_transitions_under_0_35s": (
+                    self.guidance_rapid_ready_boundary_transitions
+                ),
+                "contract_violations": self.guidance_contract_violations,
+            },
             "nav2": list(nav2_results),
             "resources": self.resource.public(),
             "scope": "Gazebo software regression only; not a real-quadruped safety certification",
