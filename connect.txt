@@ -72,6 +72,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输入：/map、/traversal/guidance、map -> base_link TF，以及 Nav2/越障 Action 结果。
   输出：调用 /navigate_to_pose 和 /traverse_obstacle；发布 /autonomy/state、/autonomy/event。
   生命周期：仅随 autonomous_navigation.launch.py 存在；启动 launch 即执行，Ctrl-C 即取消退出。
+  安全输出：/navigation/autonomy_stop（std_msgs/Bool，可靠 + transient_local）。启动发布
+  false；退出先发布 true。速度门及底盘适配器收到 true 后必须立即输出零速度。
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
         /traverse_obstacle 服务端。
 

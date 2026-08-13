@@ -11,6 +11,7 @@ import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32
 
 
@@ -21,6 +22,7 @@ def gated_twist(
     decision_fresh: bool,
     navigation_healthy: bool = True,
     health_fresh: bool = True,
+    external_stop: bool = False,
 ) -> Twist:
     """仅在命令、地形评估和导航健康状态均有效时缩放 Twist。"""
     output = Twist()
@@ -30,6 +32,7 @@ def gated_twist(
         or not decision_fresh
         or not navigation_healthy
         or not health_fresh
+        or external_stop
         or not isfinite(limit)
         or limit <= 0.0
     ):
@@ -100,6 +103,7 @@ class NavigationSpeedGate(Node):
             else 0.0
         )
         self.latest_cmd = Twist()
+        self.external_stop = False
         self.last_cmd_time = self.get_clock().now()
         self.last_assessment_time = self.get_clock().now()
         self.navigation_healthy = not self.require_navigation_health
@@ -112,6 +116,15 @@ class NavigationSpeedGate(Node):
         )
         self.create_subscription(
             Bool, "/navigation/healthy", self.health_callback, 10
+        )
+        stop_qos = QoSProfile(depth=1)
+        stop_qos.reliability = ReliabilityPolicy.RELIABLE
+        stop_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(
+            Bool,
+            "/navigation/autonomy_stop",
+            self.autonomy_stop_callback,
+            stop_qos,
         )
         self.timer = self.create_timer(0.05, self.publish_safe_command)
         self.get_logger().info(f"Velocity gate: {input_topic} -> {output_topic}")
@@ -132,6 +145,10 @@ class NavigationSpeedGate(Node):
         self.navigation_healthy = bool(msg.data)
         self.last_health_time = self.get_clock().now()
 
+    def autonomy_stop_callback(self, msg: Bool) -> None:
+        """接收独立自主进程的锁止状态；true 后持续停车直到下一次启动发 false。"""
+        self.external_stop = bool(msg.data)
+
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
@@ -151,6 +168,7 @@ class NavigationSpeedGate(Node):
             self.navigation_healthy,
             not self.require_navigation_health
             or health_age <= self.health_timeout,
+            self.external_stop,
         )
         self.pub.publish(output)
 

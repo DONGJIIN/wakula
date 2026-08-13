@@ -526,20 +526,22 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 
 ### 6.1 自主探索与逐障碍越障编排
 
-先启动核心算法入口：
+正常联调只运行下面三个命令，每个终端一个命令，职责互不包含：
 
 ```bash
+ros2 launch quadruped_gazebo robocon_field.launch.py
 ros2 launch slam slam.launch.py
-```
-
-此时系统中没有自主导航节点。需要探索时另开终端，只启动独立功能：
-
-```bash
 ros2 launch slam autonomous_navigation.launch.py
 ```
 
+第一条只提供独立 Gazebo 场地、测试载体和标准传感器/运动接口；第二条只运行核心
+SLAM、Nav2、OpenCV、点云和 RViz，且默认没有自主任务；第三条才启动自主探索与越障编排。
+真机联调时用真实驱动替换第一条，后两条保持不变。
+
 启动该 launch 就立即执行，回到该终端按 `Ctrl-C` 就停止并取消任务；核心 SLAM、Nav2、
-OpenCV、RViz 和地图继续运行。它不 include `slam.launch.py`，也不读取 Gazebo world。
+OpenCV、RViz 和地图继续运行。退出时先通过 `/navigation/autonomy_stop` 锁住速度输出，再
+取消 Nav2/越障 Action，因此机械狗立即停车。它不 include `slam.launch.py`，也不读取
+Gazebo world。真机底盘适配器必须遵守该布尔停车接口，与 `/cmd_vel` 一起作为对接合同。
 
 运行逻辑为：选择未知地图前沿 → Nav2 探索 → 连续确认障碍 → 冻结障碍位置并导航至入口 →
 调用 `/traverse_obstacle` → 成功后登记该障碍并继续下一前沿。前沿目标来自 `/map`，代码不读
@@ -553,8 +555,9 @@ ros2 launch quadruped_gazebo robocon_field.launch.py
 ```
 
 然后分别运行核心 `slam.launch.py` 和可选 `autonomous_navigation.launch.py`。Gazebo 入口
-不加载 SLAM、Nav2、OpenCV、自主任务或越障 Action。需要验证越障接口时，才额外运行
-`ros2 launch quadruped_gazebo sim_traversal_controller.launch.py`；它也与场地独立。
+不加载 SLAM、Nav2、OpenCV、自主任务或越障 Action。仓库中的
+`sim_traversal_controller.launch.py` 仅供运动组开发者单独验证 Action 合同，不属于上述三条
+常规运行命令，也不代表真实越障控制器。
 
 启动 `slam.launch.py` 后先看终端摘要。仿真联调必须显示
 `simulation_detected=true, use_sim_time=true, robot_model=false`；入口会对 `/clock` 做多次

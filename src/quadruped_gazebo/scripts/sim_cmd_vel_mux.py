@@ -16,6 +16,8 @@ from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
 
 
 def _positive(value: float, fallback: float) -> float:
@@ -31,8 +33,11 @@ def select_command(
     autonomous_stamp: float | None,
     manual_timeout: float,
     autonomous_timeout: float,
+    emergency_stop: bool = False,
 ) -> Twist:
     """按“新鲜手动 > 新鲜自主 > 零速度”选择输出，不修改原消息内容。"""
+    if emergency_stop:
+        return Twist()
     if manual_stamp is not None and 0.0 <= now - manual_stamp <= manual_timeout:
         return manual
     if (
@@ -67,6 +72,7 @@ class SimCmdVelMux(Node):
         self.autonomous = Twist()
         self.manual_stamp = None
         self.autonomous_stamp = None
+        self.emergency_stop = False
         output_topic = str(self.get_parameter("output_topic").value)
         self.publisher = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(
@@ -80,6 +86,15 @@ class SimCmdVelMux(Node):
             str(self.get_parameter("autonomous_topic").value),
             self._autonomous_callback,
             10,
+        )
+        stop_qos = QoSProfile(depth=1)
+        stop_qos.reliability = ReliabilityPolicy.RELIABLE
+        stop_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(
+            Bool,
+            "/navigation/autonomy_stop",
+            self._stop_callback,
+            stop_qos,
         )
         # 节点刻意使用系统时间而不是 /clock：仿真暂停/退出后仍能发布零速度并清除旧命令。
         self.timer = self.create_timer(1.0 / publish_rate, self._publish)
@@ -98,6 +113,10 @@ class SimCmdVelMux(Node):
         self.autonomous = msg
         self.autonomous_stamp = time.monotonic()
 
+    def _stop_callback(self, msg: Bool) -> None:
+        """自主任务退出时最高优先级停车；新任务启动发布 false 后才解除。"""
+        self.emergency_stop = bool(msg.data)
+
     def _publish(self) -> None:
         """按优先级发布一个唯一 Gazebo 速度源，输入断流则持续输出零速度。"""
         self.publisher.publish(
@@ -109,6 +128,7 @@ class SimCmdVelMux(Node):
                 self.autonomous_stamp,
                 self.manual_timeout,
                 self.autonomous_timeout,
+                self.emergency_stop,
             )
         )
 

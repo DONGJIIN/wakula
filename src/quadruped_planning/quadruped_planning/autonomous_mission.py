@@ -28,7 +28,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -213,6 +213,16 @@ class AutonomousMission(Node):
         self.create_subscription(TraversalGuidance, "/traversal/guidance", self._guidance_callback, 10)
         self.state_pub = self.create_publisher(String, "/autonomy/state", 10)
         self.event_pub = self.create_publisher(String, "/autonomy/event", 10)
+        # 独立任务进程拥有自己的运动许可。TRANSIENT_LOCAL 让核心速度门记住最后状态：
+        # 启动时解除自主停车，Ctrl-C 时先锁止，再取消异步 Action。核心 SLAM 不需要启动
+        # 或管理本节点；它只把这一标准布尔量作为额外的失效安全输入。
+        stop_qos = QoSProfile(depth=1)
+        stop_qos.reliability = ReliabilityPolicy.RELIABLE
+        stop_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.autonomy_stop_pub = self.create_publisher(
+            Bool, "/navigation/autonomy_stop", stop_qos
+        )
+        self.autonomy_stop_pub.publish(Bool(data=False))
         self.nav_client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.traverse_client = ActionClient(self, TraverseObstacle, "/traverse_obstacle")
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -260,6 +270,10 @@ class AutonomousMission(Node):
         if event:
             self.event_pub.publish(String(data=event))
             self.get_logger().info(f"Autonomy {self.state}: {event}")
+
+    def _publish_immediate_stop(self) -> None:
+        """锁住核心速度门；用于独立 launch 退出时确定性停车。"""
+        self.autonomy_stop_pub.publish(Bool(data=True))
 
     def _map_callback(self, msg):
         self.map_msg = msg
@@ -693,6 +707,9 @@ def main(args=None):
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
         if rclpy.ok():
+            # 必须先锁速度再取消 Action。取消是跨进程异步 RPC，而停车布尔量可在一个
+            # 速度门周期内生效，避免 Ctrl-C 后继续滑行到 cancel result 返回。
+            node._publish_immediate_stop()
             node._cancel_nav("shutdown")
             if node.traverse_handle is not None and not node.traverse_cancel_pending:
                 node.traverse_cancel_pending = True
@@ -700,6 +717,7 @@ def main(args=None):
             # 给 Action cancel 请求一个短暂 DDS 发送窗口；不等待远端控制器无限响应。
             deadline = time.monotonic() + 0.75
             while rclpy.ok() and time.monotonic() < deadline:
+                node._publish_immediate_stop()
                 rclpy.spin_once(node, timeout_sec=0.05)
         node.destroy_node()
         if rclpy.ok():

@@ -30,7 +30,11 @@ Action 成功也不能声称真机已经具备越障能力。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
    slam.launch.py：只启动核心 SLAM/Nav2/OpenCV/点云/RViz，不创建 autonomous_mission。
    autonomous_navigation.launch.py：完全独立的可选任务入口，不 include 核心 launch；启动
-   即探索，Ctrl-C 即取消并退出，核心地图和感知继续运行。
+   即探索；Ctrl-C 先发布 /navigation/autonomy_stop=true，再取消所有 Action 并退出，核心
+   地图和感知继续运行。下一次启动会发布 false 解锁自主速度。
+   正常联调固定为三个独立进程：robocon_field.launch.py（Gazebo 数据源）、slam.launch.py
+   （核心算法）、autonomous_navigation.launch.py（自主任务）。只启动前两项不会自主运动；
+   真机只需用真实传感器/底盘替换第一项，核心算法和任务入口不变。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、

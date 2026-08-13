@@ -7,11 +7,11 @@ Wakula 后续开发快速上手
 连通域点云分类、支持乱序回调的时间同步融合、保守速度门、传感器 profile、rosbag
 离线评估、强弱光/高光/模糊防御、强类型 NavigationSafety/TraversalGuidance 对接合同、
 Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
-未知地图前沿探索、Nav2 入口接近、TraverseObstacle Action 编排、运行中一键启停、Xbox
+未知地图前沿探索、Nav2 入口接近、TraverseObstacle Action 编排、独立任务进程启停、Xbox
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、146 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、147 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及一次“探索→入口→Action→继续探索”在线联调通过。
 这里只代表 Gazebo 软件链，不代表真机验收。
 
@@ -72,29 +72,30 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
 四、常用启动命令
 --------------
-先启动核心算法；该命令不创建自主导航节点：
+正常联调只需三个运行终端、三个命令：
 
   cd ~/wakula
   source /opt/ros/jazzy/setup.bash
   source install/setup.bash
+  # 终端 1：仅 Gazebo 场地、测试载体、传感器和运动接口
+  ros2 launch quadruped_gazebo robocon_field.launch.py
+  # 终端 2：仅核心 SLAM、Nav2、OpenCV、点云和 RViz
   ros2 launch slam slam.launch.py
-
-需要自动探索时另开终端，独立启动；启动即运行，Ctrl-C 即停止：
-
+  # 终端 3：独立自主探索与越障任务；启动即运行
   ros2 launch slam autonomous_navigation.launch.py
 
-它不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo；现实传感器和 Gazebo 传感器接口一致。
+第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo；现实传感器和 Gazebo 传感器接口
+一致。在第三个终端按 Ctrl-C，会先锁住所有自主速度并立即停车，再取消 Action；第一、二条
+进程继续运行。只启动前两条时系统不会自主运动。
 
 该功能要求运动组提供 /traverse_obstacle Action 服务端。仿真时先独立启动场地和
 sim_traverse_obstacle（不包含任何算法）：
 
   ros2 launch quadruped_gazebo robocon_field.launch.py
 
-需要临时模拟运动组的越障 Action 时再另开终端：
+以下命令只供运动控制开发者单独验证 Action 合同，不是常规运行所需的第四个命令：
 
   ros2 launch quadruped_gazebo sim_traversal_controller.launch.py
-
-再另开终端启动 slam.launch.py，最后按需启动 autonomous_navigation.launch.py。
 
 仿真中 slam.launch.py 的启动摘要必须包含：
   simulation_detected=true, use_sim_time=true, robot_model=false

@@ -328,6 +328,7 @@ def test_velocity_gate_requires_fresh_command_and_assessment():
     assert gated_twist(command, 1.0, True, True, False, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
     assert gated_twist(command, float("nan"), True, True).linear.x == 0.0
+    assert gated_twist(command, 1.0, True, True, True, True, True).linear.x == 0.0
 
 
 def test_filter_confirms_hazard_and_clearance_but_stops_immediately():

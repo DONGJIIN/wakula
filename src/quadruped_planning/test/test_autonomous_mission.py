@@ -100,3 +100,5 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert "waiting for /traverse_obstacle controller" in source
     # Nav2 成功回调和周期 READY 分支都必须检查执行器，不能存在假 HANDOFF 旁路。
     assert source.count("not self.traverse_client.server_is_ready()") >= 3
+    assert '"/navigation/autonomy_stop"' in source
+    assert "_publish_immediate_stop()" in source

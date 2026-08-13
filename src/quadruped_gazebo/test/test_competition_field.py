@@ -61,6 +61,9 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     assert 'package_file("slam"' not in launch
     assert "autonomous_navigation.launch.py" not in launch
     assert "autonomous_mission" not in launch
+    mux = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(encoding="utf-8")
+    assert '"/navigation/autonomy_stop"' in mux
+    assert "if emergency_stop:" in mux
 
 
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
