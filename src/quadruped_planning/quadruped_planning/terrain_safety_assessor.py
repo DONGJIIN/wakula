@@ -202,8 +202,16 @@ def front_obstacle_name_zh(
             and float(safety.width) >= 0.40
         ):
             return "砂砾与碎木坑（入口/填料区）"
-        # 高墙已有独立 WALL 分支；宽且接近 0.40 m 的阶梯结构与规则 T 台顶部相符。
-        if float(safety.obstacle_height) >= 0.32 and float(safety.width) >= 0.60:
+        # 高墙已有独立 WALL 分支。正对 T 台时，近场平面会穿过多级踏面，使“相对平面
+        # 高度”小于总高；但它仍表现为宽障碍、7～15° 的阶梯总体趋势和明显离散残差。
+        # 同时支持直接看到 0.40 m 顶部与只看到多级踏面的两种距离，避免再误叫坑区。
+        stepped_profile = (
+            7.0 <= abs(degrees(float(safety.slope_pitch))) <= 15.0
+            and float(safety.roughness) >= 0.02
+        )
+        if float(safety.width) >= 0.60 and (
+            float(safety.obstacle_height) >= 0.32 or stepped_profile
+        ):
             return "T 字形台阶"
         return "台阶或木桥踏板（待结构确认）"
 

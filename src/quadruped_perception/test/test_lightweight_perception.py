@@ -17,6 +17,7 @@ from quadruped_perception.terrain_geometry import (
     BAR,
     CLEAR,
     PIT,
+    POLE,
     STEP,
     WALL,
     analyze_terrain_geometry,
@@ -92,6 +93,21 @@ def test_detects_simple_poles_and_height_bar():
     assert evidence.hint == "height_bar"
 
 
+def test_detects_blue_white_segmented_competition_height_bar():
+    """蓝白交替横杆在 HSV 中断成多段，仍应合并成一个限高杆目标。"""
+    empty = np.zeros((240, 320), dtype=np.uint8)
+    blue = np.zeros_like(empty)
+    # 每个蓝段故意小于通用 300 px 面积门，复现远距离规则横杆。
+    # 横杆低于相机安装高度，接近时会落在画面下部，不能沿用“地平线以上”假设。
+    for left in (62, 104, 146, 188, 230):
+        cv2.rectangle(blue, (left, 198), (left + 20, 205), 255, -1)
+    evidence = detect_obstacle_evidence(empty, blue, empty, 300.0)
+    assert evidence.hint == "height_bar"
+    assert evidence.confidence >= 0.75
+    assert 0.48 <= evidence.center_x <= 0.51
+    assert evidence.center_y >= 0.80
+
+
 def test_height_bar_rejects_scene_spanning_floor_or_horizon_region():
     """贴近左右边界的宽高色块是场地/地平线，不应长期触发横杆限速。"""
     empty = np.zeros((240, 320), dtype=np.uint8)
@@ -135,8 +151,8 @@ def test_grayscale_geometry_and_temporal_confirmation():
     assert stabilize_evidence(history[:2], 3).hint == "none"
 
 
-def test_wall_detector_rejects_full_frame_scene_boundary():
-    """地面/天空分界形成的超大轮廓不能持续误报为正前方墙面。"""
+def test_edge_only_rectangles_cannot_claim_wall_semantics():
+    """单目边缘框无法区分墙、台阶和场地边界，墙类别必须等待点云确认。"""
     mask = np.zeros((240, 320), dtype=np.uint8)
     cv2.rectangle(mask, (20, 45), (300, 220), 255, 4)
     evidence = detect_obstacle_evidence(
@@ -144,13 +160,13 @@ def test_wall_detector_rejects_full_frame_scene_boundary():
     )
     assert evidence.hint != "wall"
 
-    # 中等大小且位于前向 ROI 下半部的墙体轮廓仍需保留召回率。
+    # 中等大小的闭合框仍然没有米制高度，不能只因尺寸看似像墙就输出 WALL。
     mask.fill(0)
     cv2.rectangle(mask, (80, 100), (240, 210), 255, 4)
     evidence = detect_obstacle_evidence(
         np.zeros_like(mask), np.zeros_like(mask), mask, 100.0
     )
-    assert evidence.hint == "wall"
+    assert evidence.hint != "wall"
 
 
 def test_pole_pair_rejects_unaligned_vertical_clutter():
@@ -160,6 +176,24 @@ def test_pole_pair_rejects_unaligned_vertical_clutter():
     cv2.rectangle(orange, (50, 10), (70, 100), 255, -1)
     cv2.rectangle(orange, (220, 145), (240, 235), 255, -1)
     evidence = detect_obstacle_evidence(orange, empty, empty, 100.0)
+    assert evidence.hint != "poles"
+
+
+def test_single_centered_colored_pole_is_not_mislabeled_as_wall():
+    """另一根杆在视野外时，前向单根细长色柱仍应优先于歧义墙轮廓。"""
+    orange = np.zeros((240, 320), dtype=np.uint8)
+    edges = np.zeros_like(orange)
+    cv2.rectangle(orange, (150, 65), (170, 220), 255, -1)
+    cv2.rectangle(edges, (149, 64), (171, 221), 255, 2)
+    evidence = detect_obstacle_evidence(orange, np.zeros_like(orange), edges, 100.0)
+    assert evidence.hint == "poles"
+    assert evidence.confidence >= 0.70
+
+    # 画面边缘的竖直场地边框不属于正前方立柱，保持无提示或交给其他几何分支。
+    orange.fill(0)
+    edges.fill(0)
+    cv2.rectangle(orange, (2, 65), (20, 220), 255, -1)
+    evidence = detect_obstacle_evidence(orange, np.zeros_like(orange), edges, 100.0)
     assert evidence.hint != "poles"
 
 
@@ -625,6 +659,114 @@ def test_grid_ground_segmentation_detects_competition_height_bar_clearance():
     assert result.valid
     assert result.obstacle_type == BAR
     assert 0.25 <= result.clearance_height <= 0.33
+
+
+def test_near_field_ground_anchor_keeps_stairs_out_of_pit_class():
+    """台阶占据多数栅格时，入口近场平地仍必须作为地面，不能反报成坑。"""
+    points = []
+    for x in np.arange(0.10, 0.71, 0.04):
+        for y in np.arange(-0.45, 0.46, 0.04):
+            points.extend(((x, y, -0.001), (x, y, 0.001)))
+    for x in np.arange(0.75, 1.91, 0.04):
+        level = min(4, int((x - 0.75) / 0.28) + 1)
+        height = 0.10 * level
+        for y in np.arange(-0.45, 0.46, 0.04):
+            points.extend(((x, y, height - 0.002), (x, y, height + 0.002)))
+    result = analyze_terrain_geometry(
+        np.asarray(points),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == STEP
+    assert result.obstacle_height >= 0.35
+    assert result.pit_depth < 0.02
+
+
+def test_near_field_ground_anchor_recognizes_bridge_approach_as_ramp():
+    """平地后的 14 度木桥引坡应输出坡度，而不是把平地误报为坑。"""
+    points = []
+    for x in np.arange(0.10, 0.71, 0.04):
+        for y in np.arange(-0.45, 0.46, 0.04):
+            points.extend(((x, y, -0.001), (x, y, 0.001)))
+    tangent = np.tan(np.deg2rad(14.0))
+    for x in np.arange(0.75, 1.91, 0.04):
+        height = tangent * (x - 0.75)
+        for y in np.arange(-0.45, 0.46, 0.04):
+            points.extend(((x, y, height - 0.002), (x, y, height + 0.002)))
+    result = analyze_terrain_geometry(
+        np.asarray(points),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == CLEAR
+    assert abs(np.rad2deg(result.slope_pitch) - 14.0) < 1.0
+    assert result.pit_depth == 0.0
+
+
+def test_height_bar_with_grounded_supports_uses_crossbar_clearance():
+    """限高杆落地支柱不得把横杆净空拉到零并误分类为墙。"""
+    floor = _dense_floor()
+    supports = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in (-0.32, 0.32)
+            for z in np.arange(0.02, 0.35, 0.02)
+        ]
+    )
+    crossbar = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in np.arange(-0.40, 0.41, 0.025)
+            for z in (0.30, 0.32, 0.34)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, supports, crossbar)))
+    assert result.valid
+    assert result.obstacle_type == BAR
+    assert 0.27 <= result.clearance_height <= 0.32
+
+
+def test_dense_narrow_competition_pole_survives_grid_cell_gate():
+    """约 70 mm 立柱只占一至两格，但有足够三维回波时仍应识别为立柱。"""
+    floor = _dense_floor()
+    pole = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in (-0.02, 0.00, 0.02)
+            for z in np.arange(0.02, 0.35, 0.015)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, pole)))
+    assert result.valid
+    assert result.obstacle_type == POLE
+    assert result.width <= 0.12
+
+
+def test_dense_single_cell_flat_blob_cannot_use_narrow_pole_exception():
+    """窄立柱召回门不能让单格密集飞点被降级误报成台阶。"""
+    floor = _dense_floor()
+    blob = np.asarray(
+        [
+            (0.625 + dx, 0.025 + dy, 0.30 + dz)
+            for dx in (-0.008, -0.004, 0.0, 0.004, 0.008)
+            for dy in (-0.008, 0.0, 0.008)
+            for dz in (-0.002, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, blob)))
+    assert result.valid
+    assert result.obstacle_type == CLEAR
 
 
 def test_grid_ground_segmentation_requires_real_low_returns_for_pit():

@@ -307,6 +307,79 @@ def best_pole_pair(
     return best_pair, best_score
 
 
+def best_segmented_horizontal_bar(
+    boxes: Sequence[ContourBox],
+    image_width: int,
+    image_height: int,
+    min_fill_ratio: float = 0.0,
+) -> Tuple[List[ContourBox], float]:
+    """合并同一水平线上的蓝色短段，识别规则中的蓝白相间限高杆。
+
+    比赛横杆由蓝白短段交替组成，HSV 蓝色掩膜天然会得到多个互不连通的小框。旧算法
+    只接受单个宽横框，因此即使肉眼清楚看到横杆也会输出 ``VISION: NONE``。这里不做
+    任意形态学长距离闭合（那会粘连台阶边缘），而是要求至少三个蓝色短段同时满足：
+    高度中心对齐、单段较薄、合并后横向跨度有限且蓝色覆盖率足够。
+
+    返回的分数只表示二维几何一致性；真实净空仍必须由点云确认。
+    """
+    candidates = [
+        box
+        for box in boxes
+        if box[2] >= 3
+        and box[3] >= 2
+        and box[3] <= image_height * 0.12
+        and box[2] <= image_width * 0.28
+        # 相机安装高度高于 0.32 m 横杆时，接近过程中横杆会落到画面下部；至少
+        # 三段对齐的强结构证据足以把下界放到 ROI 底部附近。
+        and box[1] + box[3] / 2.0 <= image_height * 0.93
+        and box_fill_ratio(box) >= min_fill_ratio
+    ]
+    best_group: List[ContourBox] = []
+    best_score = 0.0
+    alignment_limit = max(4.0, image_height * 0.035)
+    for anchor in candidates:
+        anchor_center_y = anchor[1] + anchor[3] / 2.0
+        group = [
+            box
+            for box in candidates
+            if abs((box[1] + box[3] / 2.0) - anchor_center_y)
+            <= alignment_limit
+        ]
+        if len(group) < 3:
+            continue
+        left = min(box[0] for box in group)
+        right = max(box[0] + box[2] for box in group)
+        top = min(box[1] for box in group)
+        bottom = max(box[1] + box[3] for box in group)
+        span_width = right - left
+        span_height = bottom - top
+        width_ratio = span_width / max(1.0, float(image_width))
+        height_ratio = span_height / max(1.0, float(image_height))
+        horizontal_coverage = sum(box[2] for box in group) / max(
+            1.0, float(span_width)
+        )
+        if not 0.18 <= width_ratio <= 0.85:
+            continue
+        if height_ratio > 0.16 or span_width < span_height * 3.0:
+            continue
+        if horizontal_coverage < 0.22:
+            continue
+        centers = np.asarray([box[1] + box[3] / 2.0 for box in group])
+        alignment = 1.0 - min(
+            1.0, float(np.ptp(centers)) / max(1.0, 2.0 * alignment_limit)
+        )
+        score = min(
+            1.0,
+            0.34
+            + 0.08 * min(5, len(group))
+            + 0.18 * alignment
+            + 0.18 * min(1.0, horizontal_coverage / 0.50),
+        )
+        if score > best_score:
+            best_group, best_score = group, score
+    return best_group, best_score
+
+
 def largest_color_feature(mask: np.ndarray, min_area: float) -> ColorFeature:
     """返回最大有效色块的面积与归一化外接框。"""
     boxes = contour_boxes(mask, min_area)
@@ -529,7 +602,7 @@ def detect_obstacle_evidence(
 ) -> ObstacleEvidence:
     """融合颜色与轮廓几何，产生一帧尚未时序确认的候选证据。
 
-    优先级依次为带颜色横杆、带颜色立柱、纯边缘立柱/墙、一般色块。
+    优先级依次为带颜色横杆、带颜色立柱和纯边缘成对立柱。
     越靠后的分支歧义越大，因此置信度上限更低；同一帧只返回一个完整候选，避免
     多话题字段在不同时间被规划层拼接。
     """
@@ -543,6 +616,28 @@ def detect_obstacle_evidence(
     bar_height_limit = float(np.clip(max_bar_height_ratio, 0.02, 1.0))
     orange_boxes = contour_boxes(orange_mask, min_area)
     blue_boxes = contour_boxes(blue_mask, min_area)
+
+    # 蓝白相间横杆的单个蓝段可能小于通用轮廓面积门槛。仅在“至少三段水平对齐”的
+    # 强结构约束下使用更小面积门，既恢复远距离横杆召回率，又不会放宽其他类别。
+    segmented_blue_boxes = contour_boxes(
+        blue_mask,
+        max(20.0, float(min_area) * 0.12),
+    )
+    segmented_bar, segmented_score = best_segmented_horizontal_bar(
+        segmented_blue_boxes,
+        image_width,
+        image_height,
+        min_color_fill_ratio,
+    )
+    if segmented_bar:
+        confidence = min(0.96, 0.62 + 0.30 * segmented_score)
+        return evidence_from_boxes(
+            "height_bar",
+            confidence,
+            segmented_bar,
+            image_width,
+            image_height,
+        )
 
     # 优先使用颜色特征：比赛标志色比普通场景边缘更稳定。
     horizontal_blue = [
@@ -586,6 +681,37 @@ def detect_obstacle_evidence(
             "poles", confidence, pole_pair, image_width, image_height
         )
 
+    # 接近直角绕杆区时，另一根杆可能位于视野外或被近处杆遮挡。只接受位于前向通道、
+    # 高宽比很大且颜色填充充分的单根细长区域；这比随后歧义较大的“无色墙轮廓”更能
+    # 解释比赛立柱，也消除 RViz 中点云已判 POLE、视觉却长期显示 WALL 的矛盾。
+    single_colored_poles = [
+        box
+        for box in orange_boxes
+        if box[3] >= box[2] * 3.0
+        and box[3] >= image_height * 0.20
+        and box[2] <= image_width * 0.12
+        and image_width * 0.20
+        <= box[0] + box[2] / 2.0
+        <= image_width * 0.80
+        and image_height * 0.18
+        <= box[1] + box[3] / 2.0
+        <= image_height * 0.78
+        and box_fill_ratio(box) >= min_color_fill_ratio
+    ]
+    if single_colored_poles:
+        box = max(single_colored_poles, key=lambda item: item[3])
+        slenderness = min(1.0, box[3] / max(1.0, box[2] * 6.0))
+        edge_support = mask_density(edge_mask, box)
+        confidence = min(
+            0.86,
+            0.64
+            + 0.12 * slenderness
+            + 0.08 * min(1.0, edge_support * 5.0),
+        )
+        return evidence_from_boxes(
+            "poles", confidence, [box], image_width, image_height
+        )
+
     # 当颜色受光照影响时，再使用 Canny 轮廓作为保守的几何补充。
     edge_boxes = contour_boxes(edge_mask, min_area)
     edge_pair, edge_pair_score = best_pole_pair(
@@ -602,24 +728,9 @@ def detect_obstacle_evidence(
     # 提供 edge_support，并可辅助墙/立柱候选；但 HEIGHT_BAR 类别必须拥有蓝色色块证据，
     # 近距离无色横杆则由深度点云的离地净空分类兜底。
 
-    wall_edges = [
-        box
-        for box in edge_boxes
-        if box[2] >= image_width * 0.28
-        # 覆盖几乎整幅画面的轮廓通常是地面/天空分界、ROI 边缘或近距离遮挡。
-        # 它没有可靠的单目尺度，应由点云几何分支判断，避免黄色赛场边缘持续误报墙。
-        and box[2] <= image_width * 0.70
-        and box[3] >= image_height * 0.15
-        and box[3] <= image_height * 0.75
-        and box[1] + box[3] / 2.0 >= image_height * 0.45
-    ]
-    if wall_edges:
-        box = max(wall_edges, key=lambda item: item[4])
-        return evidence_from_boxes(
-            # 单个无颜色闭合轮廓歧义较大，保留在标注图中供调试，但默认低于规划层
-            # 0.55 的视觉介入阈值；墙体安全结论由深度/点云几何确认。
-            "wall", 0.54, [box], image_width, image_height
-        )
+    # 单个闭合边缘框无法区分墙、台阶正面、坡道边界、部分出画的立柱组和场地边缘。
+    # 旧版用固定 0.54 输出 WALL，虽低于规划介入阈值，却会在 RViz 长期显示错误名称。
+    # 这里不再给纯边缘框赋语义；高墙由点云的米制高度/垂直跨度可靠确认。
 
     # 单个橙/蓝色块无法区分台阶、桥板、坡面、坑区边框或黄色场地反射。旧逻辑把
     # 任意大色块稳定确认为 COLORED OBSTACLE，既没有动作语义，又会让 RViz 看起来像

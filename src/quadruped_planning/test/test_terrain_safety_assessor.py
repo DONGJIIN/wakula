@@ -91,6 +91,12 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.obstacle_height = 0.40
     safety.width = 1.0
     assert front_obstacle_name_zh(safety) == "T 字形台阶"
+    # 只看到多级踏面时，局部拟合平面会吸收部分总高度；宽度、阶梯趋势和残差仍足以
+    # 与平滑斜坡（CLEAR）及坑区（PIT）区分。
+    safety.obstacle_height = 0.112
+    safety.slope_pitch = 0.189
+    safety.roughness = 0.032
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
     safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
     assert front_obstacle_name_zh(safety) == "限高杆"
     safety.obstacle_type = NavigationSafety.OBSTACLE_POLE

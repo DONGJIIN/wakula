@@ -1,8 +1,8 @@
 """可测试的点云地形分割与障碍几何分类。
 
 本模块刻意不依赖 ROS：在线节点、rosbag 离线工具和单元测试使用同一算法。
-算法先把前向点云压成二维栅格高度图，再从占多数的栅格高度估计地面平面，避免
-台阶顶面、墙面或少量深度飞点把地面拟合拉偏。输出只描述几何，不产生腿部命令。
+算法先把前向点云压成二维栅格高度图，再以近场连续表面锚定地面平面，避免占据多数的
+台阶顶面/桥面或少量深度飞点把地面拟合拉偏。输出只描述几何，不产生腿部命令。
 """
 
 from dataclasses import dataclass
@@ -141,11 +141,25 @@ def _grid_samples(points: np.ndarray, cell_size: float):
 
 
 def _dominant_ground_mask(cells: np.ndarray, bin_size: float) -> np.ndarray:
-    """在栅格中值高度直方图中选择面积占优的地面层。"""
+    """用机器人近场锚定地面高度层，而不是盲选全 ROI 的最大平面。
+
+    桥面、宽台阶或坡面在画面里可能比入口前的地面占更多栅格。若直接把全 ROI 中面积
+    最大的高度层当作地面，真实地面会落到拟合平面下方，随后被稳定误报为 ``PIT``。
+    机器人当前脚下延伸到相机近场的表面才是可靠地面先验，因此优先在最近约 30%（上限
+    0.65 m）的 x 范围选择主高度箱，再把同一高度层扩展到整幅 ROI。近场确实缺点时才
+    回退到全局直方图，保留相机已经位于桥面/台阶顶部时的可用性。
+    """
     z = cells[:, 3]
-    origin = float(np.quantile(z, 0.05))
+    x = cells[:, 0]
+    x_low, x_high = np.quantile(x, (0.02, 0.98))
+    anchor_span = min(0.65, max(0.35, 0.30 * float(x_high - x_low)))
+    anchor_mask = x <= float(x_low) + anchor_span
+    # 至少六个格才能拟合平面；稀疏近场使用原有全局面积主层作为安全退化。
+    voting_z = z[anchor_mask] if np.count_nonzero(anchor_mask) >= 6 else z
+    origin = float(np.quantile(voting_z, 0.05))
     bins = np.floor((z - origin) / bin_size).astype(np.int32)
-    values, counts = np.unique(bins, return_counts=True)
+    voting_bins = bins[anchor_mask] if np.count_nonzero(anchor_mask) >= 6 else bins
+    values, counts = np.unique(voting_bins, return_counts=True)
     dominant = values[int(np.argmax(counts))]
     # 相邻一个高度箱也纳入拟合，容许缓坡和深度噪声。
     return np.abs(bins - dominant) <= 1
@@ -305,6 +319,16 @@ def analyze_terrain_geometry(
         min_region_cells,
         min_region_points,
     )
+    # 规则立柱直径只有约 70 mm；5 cm 高度图中通常只占 1～2 格，无法满足宽障碍使用的
+    # 连通格数门槛。允许“少格但原始回波很多”的候选进入后续三维细长结构校验；真正
+    # 飞点仍会因回波总数、z/y/x 跨度三重约束被拒绝。
+    positive_region_points = (
+        int(np.sum(cells[positive_region, 5])) if len(positive_region) else 0
+    )
+    narrow_positive_supported = (
+        len(positive_region) >= 1
+        and positive_region_points >= max(12, int(min_region_points))
+    )
 
     if negative_supported:
         selected = cells[negative_region]
@@ -318,7 +342,8 @@ def analyze_terrain_geometry(
         lateral_offset = float(np.median(selected[:, 1]))
         width = float(np.ptp(selected[:, 1]) + cell_size)
         confidence = min(0.96, 0.42 + 0.07 * len(selected))
-    elif positive_supported:
+    elif positive_supported or narrow_positive_supported:
+        narrow_only = narrow_positive_supported and not positive_supported
         selected_cells = cells[positive_region]
         supporting_points = int(np.sum(selected_cells[:, 5]))
         obstacle_height = max(
@@ -327,6 +352,42 @@ def analyze_terrain_geometry(
         distance = float(np.quantile(selected_cells[:, 0], 0.10))
         lateral_offset = float(np.median(selected_cells[:, 1]))
         width = float(np.ptp(selected_cells[:, 1]) + cell_size)
+        # 宽连续凸起还可能是从平地开始的 10° 主斜坡或 14° 木桥引坡。只拟合最近的
+        # 0.9 m 候选表面，并同时要求足够 x/y 跨度和低残差；阶梯的离散高度平台即使
+        # 总体呈上升趋势，也会因平面残差过大而继续进入 STEP 分支。
+        surface_limit = distance + 0.90
+        surface_cells = selected_cells[selected_cells[:, 0] <= surface_limit]
+        if len(surface_cells) >= 8:
+            surface_a, surface_b, surface_c, surface_roughness = _fit_plane(
+                surface_cells
+            )
+            surface_pitch = math.atan(surface_a)
+            surface_roll = math.atan(surface_b)
+            surface_x_span = float(np.ptp(surface_cells[:, 0]))
+            surface_y_span = float(np.ptp(surface_cells[:, 1]))
+            if (
+                0.10 <= abs(surface_pitch) <= 0.32
+                and abs(surface_roll) <= 0.10
+                and surface_x_span >= 0.42
+                and surface_y_span >= 0.40
+                and surface_roughness <= 0.015
+            ):
+                return GeometryEstimate(
+                    valid=True,
+                    obstacle_type=CLEAR,
+                    confidence=min(
+                        0.96,
+                        0.62 + 0.02 * len(surface_cells),
+                    ),
+                    ground_height=float(surface_c),
+                    obstacle_height=0.0,
+                    pit_depth=0.0,
+                    slope_pitch=surface_pitch,
+                    slope_roll=surface_roll,
+                    roughness=surface_roughness,
+                    distance=float(np.max(points[:, 0])),
+                    valid_points=len(points),
+                )
         # 只看障碍前缘附近的原始点，利用垂直/横向跨度区分几何类别。
         front = points[
             (points[:, 0] >= distance - cell_size)
@@ -345,7 +406,58 @@ def analyze_terrain_geometry(
             low_clearance = float(np.quantile(elevated_relative, 0.10))
             x_span = float(np.ptp(elevated_front[:, 0]))
             vertical_score = min(1.0, z_span / max(wall_height, 1e-3))
-            if (
+            # 限高杆包含两根落地支柱，直接取所有高点的最低值会得到 0，并被误认为墙。
+            # 在净空以上按 3 cm 高度箱寻找占优的横向窄带：真正横杆的大多数回波集中
+            # 在同一高度，墙面则沿 z 连续分布，任何单一高度带都不会占多数。
+            high_mask = elevated_relative >= max(bar_min_clearance, step_height)
+            horizontal_band = False
+            band_clearance = 0.0
+            if np.count_nonzero(high_mask) >= 8:
+                high_points = elevated_front[high_mask]
+                high_relative = elevated_relative[high_mask]
+                bin_size = 0.03
+                bin_origin = float(np.min(high_relative))
+                # 使用最近箱而不是向下取整，避免恰在 3 cm 边界上的浮点误差把两层
+                # 均匀墙面回波挤进同一箱，制造并不存在的“横杆峰值”。
+                high_bins = np.rint(
+                    (high_relative - bin_origin) / bin_size
+                ).astype(np.int32)
+                values, counts = np.unique(high_bins, return_counts=True)
+                dominant_bin = values[int(np.argmax(counts))]
+                # 墙面在各高度箱中近似均匀；横杆则会在杆体高度形成明显峰值。仅看
+                # “连续三个箱所占比例”会把低矮墙误判为横杆，因此还要求主箱相对
+                # 其余高度箱有足够显著性。
+                count_baseline = float(np.median(counts))
+                peak_prominence = float(np.max(counts)) / max(1.0, count_baseline)
+                band_mask = np.abs(high_bins - dominant_bin) <= 1
+                band_points = high_points[band_mask]
+                band_relative = high_relative[band_mask]
+                band_fraction = len(band_points) / max(1.0, float(len(high_points)))
+                band_y_span = (
+                    float(np.ptp(band_points[:, 1])) if len(band_points) else 0.0
+                )
+                band_x_span = (
+                    float(np.ptp(band_points[:, 0])) if len(band_points) else 0.0
+                )
+                horizontal_band = (
+                    len(band_points) >= 8
+                    and band_fraction >= 0.50
+                    and peak_prominence >= 1.80
+                    and band_y_span >= 0.25
+                    and band_x_span <= 0.20
+                )
+                if horizontal_band:
+                    band_clearance = float(np.quantile(band_relative, 0.10))
+            if horizontal_band:
+                obstacle_type = BAR
+                clearance = max(0.0, band_clearance)
+                confidence = min(
+                    0.96,
+                    0.58
+                    + min(0.25, float(np.ptp(elevated_front[:, 1])) * 0.20)
+                    + 0.002 * supporting_points,
+                )
+            elif (
                 obstacle_height >= wall_height
                 and z_span >= wall_height * 0.70
                 and y_span >= 0.25
@@ -394,6 +506,20 @@ def analyze_terrain_geometry(
         else:
             obstacle_type = STEP
             confidence = 0.50
+
+        # “少格但回波多”的例外只为细长立柱保留。若三维前缘没有足够垂直跨度证明
+        # POLE，就不能让一个高度恒定的密集深度斑点绕过普通障碍的连通区域门而触发 STEP。
+        if narrow_only and obstacle_type != POLE:
+            obstacle_type = CLEAR
+            obstacle_height = 0.0
+            distance = float(np.max(points[:, 0]))
+            lateral_offset = 0.0
+            width = 0.0
+            clearance = 0.0
+            confidence = min(
+                1.0,
+                np.count_nonzero(ground_mask) / max(1.0, min_cells * 2.0),
+            )
 
     return GeometryEstimate(
         valid=True,

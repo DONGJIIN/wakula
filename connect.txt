@@ -23,6 +23,7 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：/terrain/features_stamped、/perception/obstacle_points、/diagnostics。
   注意：点云必须带有效 frame_id 和传感器到 base_link 的 TF。
         确认坑洞会以虚拟障碍点写入局部代价地图；无回波盲区不会被当成坑。
+        地面由近场有效栅格锚定；横杆落地支柱和窄立柱分别用高度带/原始回波复核。
 
 /vision_obstacle_detector（quadruped_perception / vision_obstacle_detector）
   作用：用 OpenCV 提取颜色、轮廓和多帧稳定证据，辅助判断比赛障碍。
@@ -30,7 +31,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：/vision/obstacle_stamped、/vision/annotated_image（RViz 标注画面）、
         /vision/debug_mask（可选）及调试信息。
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
-        限高杆必须有合格蓝色细长区域；孤立水平 Canny 边缘不会单独输出横杆类别。
+        蓝白限高杆需至少三段蓝色短段水平对齐；单根着色细柱可提示立柱。孤立 Canny
+        横边或大框不会单独输出横杆/墙，WALL 由点云确认。
 
 /perception_fusion（quadruped_perception / perception_fusion）
   作用：按时间戳同步点云几何与视觉结果，并检查视觉框与前向通道相交，输出统一障碍信息。
@@ -46,7 +48,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：/terrain/navigation_safety、/terrain/navigation_mode、/terrain/speed_limit、
         /perception/front_obstacle_name。
   注意：终端约每秒打印一次正前方障碍名称、置信度、距离和高度；名称优先来自点云几何，
-        可显示主斜坡、木桥引坡、T 字形台阶、限高杆、直角绕杆区、坑区和高墙。仅视觉命中
+        可显示主斜坡、木桥引坡、T 字形台阶、限高杆、直角绕杆区、坑区和高墙。T 字台阶
+        同时兼容“直接看到顶部”和“多级踏面形成阶梯趋势”两种视角。仅视觉命中
         会标明“点云未确认/待分类”，且不能覆盖已确认名称。无法由局部数据区分木桥 A/B 时
         明确写“待结构确认”。越障目标在 0.90 m 外保留低速入口接近窗口，进入交接区停车。
         当前只提供导航约束，不发送抬腿、关节或越障动作命令。
