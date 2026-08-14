@@ -55,9 +55,15 @@ def test_nav2_rk3588_budget_keeps_safety_rates_and_bounds_trajectory_samples():
     assert local["publish_frequency"] >= 2.0
     assert global_map["update_frequency"] >= 1.0
     assert global_map["rolling_window"] is True
+    # nav2_costmap_2d 在 Jazzy 中把滚动窗口尺寸声明为 integer 参数；YAML 中写成
+    # 16.0/8.0 会让 planner_server 在初始化全局代价地图时抛 InvalidParameterTypeException
+    # 并 SIGABRT。这里显式约束类型，防止以后“看起来数值相同”的改动再次破坏启动。
+    assert type(global_map["width"]) is int
+    assert type(global_map["height"]) is int
     assert global_map["width"] >= 14.0
     assert global_map["height"] >= 6.0
     assert planner["expected_planner_frequency"] >= 1.0
+    assert planner["GridBased"]["plugin"] == "nav2_navfn_planner::NavfnPlanner"
     assert 150 <= dwb["vx_samples"] * dwb["vtheta_samples"] <= 320
     assert 1.2 <= dwb["sim_time"] <= 2.0
 

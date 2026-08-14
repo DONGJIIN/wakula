@@ -105,6 +105,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 
 /planner_server
   作用：运行 NavFnPlanner，根据 SLAM 地图和全局代价地图生成全局路径。
+  选型：当前保留 NavFn；Nav2 Jazzy 没有官方 D* Lite 插件。真机阶段先用同一 rosbag
+        对比官方 Smac 规划器，只有全局重规划确为瓶颈时再考虑自研增量规划器。
 
 /controller_server
   作用：运行 DWBLocalPlanner，结合局部代价地图跟踪全局路径并产生 /cmd_vel_nav。

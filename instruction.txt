@@ -120,6 +120,10 @@ Action 成功也不能声称真机已经具备越障能力。
    Nav2 仍采用标准双层规划：planner_server 的 NavFnPlanner 使用 SLAM 地图生成全局路径；
    controller_server 的 DWBLocalPlanner 使用实时局部代价地图跟踪路径和绕开临时障碍。
    /scan 同时进入全局/局部代价地图，去地面后的点云只补充 local_costmap。
+   当前不切换到 D* Lite：Nav2 Jazzy 官方未提供该插件，比赛场尺度下也没有测得 NavFn
+   成为瓶颈。地图变化由周期重规划、代价地图和 DWB 处理；后续真机若需要更强的足式运动
+   可行性，先基准测试官方 SmacPlanner2D 或 SmacPlannerLattice，再依据规划耗时、路径质量
+   和失败率决定，不能仅因算法名称较新就替换稳定基线。
    状态超时用于容纳全栈同机运行时实测约 2.7 秒的极端帧抖动；速度门仍以 0.7 秒独立
    检查评估心跳，因此不会延后控制链停车，真正断流后决策状态也会 fail-closed STOP。
 
