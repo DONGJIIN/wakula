@@ -11,7 +11,7 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、151 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、155 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
 前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
@@ -144,6 +144,11 @@ Xbox 手柄（使用独立 launch，刻意不加入 slam.launch.py）：
 
   ros2 launch quadruped_teleop xbox_teleop.launch.py
 
+手柄启动后，十字键上等价于另开终端执行
+`ros2 launch slam autonomous_navigation.launch.py`，十字键下等价于在该自主任务终端按
+Ctrl-C。自主任务默认不启动；按住不会重复触发。下键只结束由当前 xbox_teleop 创建的任务，
+不关闭 Gazebo、核心 slam.launch.py 或其他终端手动启动的自主任务。
+
 Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 
   ros2 launch quadruped_gazebo robocon_field.launch.py
@@ -245,6 +250,8 @@ src/quadruped_gazebo/worlds/robocon_obstacle_field.sdf 开头的 REFERENCE LAYOU
 `/cmd_vel`；真机阶段增加 twist_mux，将手柄和 Nav2 仲裁结果送入 Collision Monitor。
 LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需松开并重新按下。轴方向相反时
 修改 xbox.yaml 的 linear_x_direction、linear_y_direction 或 angular_z_direction 为 -1.0。
+十字键上下默认读取 axes[7]（上 +1、下 -1）；若驱动相反，将 dpad_y_direction 改为 -1.0。
+用 `ros2 topic echo /teleop/autonomy_process` 可查看 STOPPED/RUNNING/STOPPING/FAILED。
 若手柄断流，节点持续输出零速度；恢复连接后必须先松开并重新按下 LB。
 
 五、快速验收

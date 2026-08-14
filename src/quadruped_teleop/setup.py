@@ -19,7 +19,7 @@ setup(
     zip_safe=True,
     maintainer="Quadruped Developer",
     maintainer_email="developer@example.com",
-    description="Fail-safe Xbox joystick to Twist adapter for Wakula.",
+    description="Fail-safe Xbox Twist adapter with an isolated autonomy process switch.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={

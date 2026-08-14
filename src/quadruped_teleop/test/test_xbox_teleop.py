@@ -1,10 +1,13 @@
 """Xbox 手柄纯状态机的安全行为回归测试。"""
 
 import math
+import signal
 
 from quadruped_teleop.xbox_teleop import (
     apply_deadzone,
+    AutonomyProcessManager,
     button_pressed,
+    DpadAutonomySwitch,
     safe_axis,
     TeleopConfig,
     XboxTeleopController,
@@ -166,3 +169,99 @@ def test_reserved_buttons_do_not_change_motion_state():
     assert not result.active
     assert not result.emergency_stop
     assert result.event == ""
+
+
+def test_dpad_up_and_down_are_edge_triggered_autonomy_events():
+    """上/下各触发一次，持续按住不得按 Joy 帧率重复启动或停止。"""
+    switch = DpadAutonomySwitch(axis=7, threshold=0.5)
+    neutral = [0.0] * 8
+    up = [0.0] * 8
+    up[7] = 1.0
+    down = [0.0] * 8
+    down[7] = -1.0
+
+    assert switch.update(neutral) == ""
+    assert switch.update(up) == "start"
+    assert switch.update(up) == ""
+    # 不必先回中：从上直接按到下必须立即停止自主任务。
+    assert switch.update(down) == "stop"
+    assert switch.update(down) == ""
+    assert switch.update(neutral) == ""
+    assert switch.update(up) == "start"
+
+
+def test_dpad_direction_can_be_reversed_for_driver_mapping():
+    """某些驱动把上报成 -1，YAML 翻转后物理上键仍必须解释为 START。"""
+    switch = DpadAutonomySwitch(axis=7, direction=-1.0)
+    physical_up = [0.0] * 8
+    physical_up[7] = -1.0
+    assert switch.update(physical_up) == "start"
+
+
+class FakeProcess:
+    """不创建系统进程的最小 Popen 替身。"""
+
+    pid = 4321
+
+    def __init__(self):
+        self.return_code = None
+
+    def poll(self):
+        return self.return_code
+
+
+def test_autonomy_manager_owns_one_exact_launch_and_ctrl_c_process_group():
+    """START 必须执行指定 launch；STOP 只向其进程组发一次 SIGINT。"""
+    created = []
+    signals = []
+    fake = FakeProcess()
+
+    def factory(command, *, start_new_session):
+        created.append((command, start_new_session))
+        return fake
+
+    manager = AutonomyProcessManager(
+        ("ros2", "launch", "slam", "autonomous_navigation.launch.py"),
+        popen_factory=factory,
+        kill_group=lambda pid, sig: signals.append((pid, sig)),
+    )
+    assert manager.start() == "started"
+    assert created == [
+        (["ros2", "launch", "slam", "autonomous_navigation.launch.py"], True)
+    ]
+    assert manager.start() == "already_running"
+    assert manager.request_stop() == "stop_requested"
+    assert manager.request_stop() == "stop_in_progress"
+    assert signals == [(fake.pid, signal.SIGINT)]
+
+    fake.return_code = -signal.SIGINT
+    assert manager.poll() == f"exited:{-signal.SIGINT}"
+    assert manager.state == "STOPPED"
+
+
+def test_autonomy_manager_escalates_only_after_ctrl_c_timeouts():
+    """正常 Ctrl-C 有完整宽限期；仅卡死子进程才依次 TERM/KILL。"""
+    now = [0.0]
+    signals = []
+    fake = FakeProcess()
+    manager = AutonomyProcessManager(
+        ("ros2", "launch", "slam", "autonomous_navigation.launch.py"),
+        stop_timeout=4.0,
+        term_timeout=2.0,
+        popen_factory=lambda _command, **_kwargs: fake,
+        kill_group=lambda pid, sig: signals.append((pid, sig)),
+        monotonic=lambda: now[0],
+    )
+    manager.start()
+    manager.request_stop()
+    now[0] = 3.9
+    assert manager.poll() == ""
+    now[0] = 4.0
+    assert manager.poll() == "sigterm_sent"
+    now[0] = 6.0
+    assert manager.poll() == "sigkill_sent"
+    assert signals == [
+        (fake.pid, signal.SIGINT),
+        (fake.pid, signal.SIGTERM),
+        (fake.pid, signal.SIGKILL),
+    ]

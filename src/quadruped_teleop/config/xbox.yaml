@@ -8,6 +8,8 @@ xbox_teleop:
     active_topic: /teleop/active
     emergency_stop_topic: /teleop/emergency_stop
     speed_mode_topic: /teleop/speed_mode
+    # 当前仅表示由 xbox_teleop 自己启动的自主 launch：STOPPED/RUNNING/STOPPING/FAILED。
+    autonomy_status_topic: /teleop/autonomy_process
     publish_rate: 20.0
     joy_timeout: 0.5
     deadzone: 0.12
@@ -16,6 +18,11 @@ xbox_teleop:
     axis_linear_x: 1
     axis_linear_y: 0
     axis_angular_z: 3
+    # Linux joy_node 常见映射：十字键 Y 为 axes[7]，上=+1、下=-1。若实测相反，
+    # 只把 dpad_y_direction 改为 -1.0，不修改源码。
+    axis_dpad_y: 7
+    dpad_threshold: 0.5
+    dpad_y_direction: 1.0
     # 若实测方向相反，将对应 direction 改为 -1；横移默认只保留平移档位的 60%。
     linear_x_direction: 1.0
     linear_y_direction: 1.0
@@ -30,13 +37,22 @@ xbox_teleop:
     # Start(7)：清除软件急停，仅在松开 LB 且三个控制摇杆居中时有效。
     # Guide/Xbox(8)：系统可能截获，当前不使用。
     # 左摇杆按下(9)、右摇杆按下(10)：预留，当前不使用。
-    # LT/RT 和十字键在 joy_node 中通常属于 axes；当前均不参与运动，防止误触发。
+    # LT/RT 不参与运动；十字键上/下只管理独立自主 launch，也不产生 Twist。
     button_slow: 0
     button_stop: 1
     button_normal: 2
     button_fast: 3
     button_deadman: 4
     button_clear_stop: 7
+
+    # 十字键上实际执行的命令为：
+    #   ros2 launch slam autonomous_navigation.launch.py
+    # 十字键下先向该子进程组发送 SIGINT（等价 Ctrl-C）；4 秒未退出才发送 SIGTERM，
+    # 再等待 2 秒才强制清理。它只停止本节点启动的子进程，不停止 SLAM 或 Gazebo。
+    autonomy_package: slam
+    autonomy_launch_file: autonomous_navigation.launch.py
+    autonomy_stop_timeout: 4.0
+    autonomy_term_timeout: 2.0
 
     # 三档最大速度：[前后/横移 m/s，偏航 rad/s]。真机完成能力测试前保持保守值。
     slow_linear_speed: 0.12

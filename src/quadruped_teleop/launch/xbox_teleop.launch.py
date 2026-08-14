@@ -3,6 +3,8 @@
 该入口刻意不包含 SLAM、Nav2、Collision Monitor 或运动控制器。``joy_node`` 负责读取
 Linux 手柄设备并发布 ``sensor_msgs/Joy``；``xbox_teleop`` 负责按键安全状态机和 Twist
 转换。默认结果仍写入独立的 ``/cmd_vel_joy``，不会直接抢占 Nav2 的 ``/cmd_vel``。
+十字键上/下仅在运行时创建或 Ctrl-C 自主任务子进程；本 launch 仍不 include 自主任务、
+SLAM 或 Gazebo，因此三者可以继续分别启动和关闭。
 """
 
 from launch import LaunchDescription

@@ -2,7 +2,7 @@
 <package format="3">
   <name>quadruped_teleop</name>
   <version>0.1.0</version>
-  <description>Fail-safe Xbox joystick adapter for the Wakula velocity interface.</description>
+  <description>Fail-safe Xbox Twist adapter with an isolated autonomy process switch.</description>
   <maintainer email="developer@example.com">Quadruped Developer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>

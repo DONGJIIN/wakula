@@ -137,11 +137,16 @@ Action 成功也不能声称真机已经具备越障能力。
    回中时按下才能解锁，之后须持续按住，松开立即归零。带量按 LB 会拒绝解锁，必须松开
    后重试。横移默认限制为当前平移档位的 60%，三个轴方向可在 YAML 独立翻转。
    A/X/Y 切换三档速度，B 锁存软件急停，Start 仅在 LB 松开且摇杆回中时清除急停。
+   十字键上按下边沿使用独立进程组启动 ros2 launch slam
+   autonomous_navigation.launch.py；十字键下向该组发送 SIGINT，等价于在自主任务终端
+   Ctrl-C。按住不重复触发，正常退出超时才升级 TERM/KILL。管理器只记录自己创建的 PID，
+   不关闭 Gazebo、slam.launch.py 或其他终端手动启动的自主任务。
    默认发布 /cmd_vel_joy，不加入 slam.launch.py；真机阶段必须经 twist_mux 与 Nav2 仲裁，
    再进入 Collision Monitor。手柄断流超过 0.5 s 会持续发布零速度；恢复连接后必须先
    松开再重新按下 LB，不能沿用断流前的使能状态。
    xbox_teleop.launch.py：独立同时启动 joy_node 和 xbox_teleop；不包含 SLAM/Nav2，方便
-   单独调试手柄，也满足主导航 launch 不自动启动手柄的边界。
+   单独调试手柄，也满足主导航 launch 不自动启动手柄的边界。自主任务仍默认关闭，只有
+   十字键事件才在运行时创建独立子进程，因此 Xbox、Gazebo、SLAM 三个入口保持分离。
 
 5. quadruped_tools
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类

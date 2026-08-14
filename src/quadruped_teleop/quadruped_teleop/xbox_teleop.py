@@ -6,15 +6,23 @@
 * LB：摇杆回中时按下完成安全解锁，之后必须持续按住；松手立即输出零速度；
 * A/X/Y：切换低速/正常/快速三档；
 * B：锁存软件急停；Start：在松开 LB 且摇杆回中时解除软件急停；
-* RB、Back、Guide、左右摇杆按下、LT/RT 和十字键：当前预留，不产生动作。
+* 十字键上：独立启动 ``ros2 launch slam autonomous_navigation.launch.py``；
+* 十字键下：向上述由本节点启动的进程组发送 Ctrl-C 并结束自主任务；
+* RB、Back、Guide、左右摇杆按下、LT/RT：当前预留，不产生动作。
 
 节点只生成机身期望速度，不包含步态、关节或越障控制。默认输出 ``/cmd_vel_joy``，避免
 与 Nav2/Collision Monitor 同时发布 ``/cmd_vel``；真机应使用速度仲裁器选择手柄或自主导航。
+十字键只是一个可选的外部进程开关：Xbox launch 不 include 自主任务、SLAM 或 Gazebo，
+停止时也只处理它自己启动的自主任务进程，不改变核心算法和仿真进程的生命周期。
 软件急停只是 ROS 层保护，不能替代实体急停、驱动失能和底层通信看门狗。
 """
 
 from dataclasses import dataclass
 from math import copysign, isfinite
+import os
+import signal
+import subprocess
+import time
 from typing import Sequence
 
 from geometry_msgs.msg import Twist
@@ -44,15 +52,15 @@ XBOX_BUTTON_GUIDE = 8      # 预留；部分系统不会把它发送给 joy_node
 XBOX_BUTTON_LEFT_STICK = 9   # 预留，不产生动作
 XBOX_BUTTON_RIGHT_STICK = 10  # 预留，不产生动作
 
-# 常见轴顺序：LT/RT 与十字键也是轴，但当前刻意不参与运动，减少误触发来源。
+# 常见轴顺序：LT/RT 与十字键也是轴；十字键只控制独立自主任务进程，不参与 Twist。
 XBOX_AXIS_LEFT_X = 0       # 左摇杆左右：横移
 XBOX_AXIS_LEFT_Y = 1       # 左摇杆上下：前进/后退
 XBOX_AXIS_LEFT_TRIGGER = 2  # 预留，不产生动作
 XBOX_AXIS_RIGHT_X = 3      # 右摇杆左右：偏航
 XBOX_AXIS_RIGHT_Y = 4      # 预留，不产生动作
 XBOX_AXIS_RIGHT_TRIGGER = 5  # 预留，不产生动作
-XBOX_AXIS_DPAD_X = 6       # 预留，不产生动作
-XBOX_AXIS_DPAD_Y = 7       # 预留，不产生动作
+XBOX_AXIS_DPAD_X = 6       # 左/右预留，不产生动作
+XBOX_AXIS_DPAD_Y = 7       # 上=启动自主任务，下=停止自主任务
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,154 @@ class TeleopResult:
     emergency_stop: bool
     speed_mode: str
     event: str = ""
+
+
+class DpadAutonomySwitch:
+    """把十字键 Y 轴转换成一次性的 START/STOP 边沿事件。
+
+    ``joy_node`` 通常把十字键作为轴持续发布。若直接按数值判断，按住上键时会以手柄帧率
+    重复启动 launch。该小状态机只有跨过阈值时才产生一次事件，回到中位后才允许同方向
+    再触发；从上直接切换到下也能立即产生 STOP。
+    """
+
+    def __init__(
+        self,
+        axis: int = XBOX_AXIS_DPAD_Y,
+        threshold: float = 0.5,
+        direction: float = 1.0,
+    ):
+        self.axis = max(0, int(axis))
+        self.threshold = max(0.1, min(1.0, float(threshold)))
+        self.direction = -1.0 if isfinite(direction) and direction < 0.0 else 1.0
+        self.previous = 0.0
+
+    def update(self, axes: Sequence[float]) -> str:
+        """返回 ``start``、``stop`` 或空字符串；非法/缺失轴按中位处理。"""
+        current = safe_axis(axes, self.axis) * self.direction
+        event = ""
+        if current >= self.threshold and self.previous < self.threshold:
+            event = "start"
+        elif current <= -self.threshold and self.previous > -self.threshold:
+            event = "stop"
+        self.previous = current
+        return event
+
+
+class AutonomyProcessManager:
+    """拥有一个独立自主 launch 子进程，并以 Ctrl-C 语义安全结束其整个进程组。
+
+    管理器刻意不搜索或杀死系统中同名 ROS 节点：它只记录自己 ``Popen`` 的 PID，因此
+    Xbox、Gazebo 和核心 SLAM 仍拥有互不依赖的启动/关闭边界。测试可注入进程工厂、信号
+    函数和单调时钟，不需要真的启动 ROS。
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        stop_timeout: float = 4.0,
+        term_timeout: float = 2.0,
+        popen_factory=subprocess.Popen,
+        kill_group=os.killpg,
+        monotonic=time.monotonic,
+    ):
+        self.command = tuple(str(part) for part in command)
+        self.stop_timeout = max(0.1, float(stop_timeout))
+        self.term_timeout = max(0.1, float(term_timeout))
+        self._popen_factory = popen_factory
+        self._kill_group = kill_group
+        self._monotonic = monotonic
+        self.process = None
+        self.stop_stage = ""
+        self.stage_started = 0.0
+        self.state = "STOPPED"
+
+    def start(self) -> str:
+        """启动一次自主 launch；已有子进程运行或正在停止时保持幂等。"""
+        self.poll()
+        if self.process is not None:
+            return "already_running" if not self.stop_stage else "stop_in_progress"
+        try:
+            # 新会话让 launch 及其全部节点拥有独立进程组。向该组发送 SIGINT 与在它自己
+            # 的终端按 Ctrl-C 等价，同时不会把信号传播到 xbox_teleop/joy_node。
+            self.process = self._popen_factory(
+                list(self.command), start_new_session=True
+            )
+        except (OSError, ValueError) as exc:
+            self.state = "FAILED"
+            return f"start_failed:{exc}"
+        self.stop_stage = ""
+        self.state = "RUNNING"
+        return "started"
+
+    def request_stop(self) -> str:
+        """非阻塞发送 SIGINT；后续 ``poll`` 负责超时升级，不阻塞手柄速度心跳。"""
+        self.poll()
+        if self.process is None:
+            self.state = "STOPPED"
+            return "already_stopped"
+        if self.stop_stage:
+            return "stop_in_progress"
+        try:
+            self._kill_group(self.process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            self.poll()
+            return "already_stopped"
+        except OSError as exc:
+            self.state = "FAILED"
+            return f"stop_failed:{exc}"
+        self.stop_stage = "sigint"
+        self.stage_started = self._monotonic()
+        self.state = "STOPPING"
+        return "stop_requested"
+
+    def poll(self) -> str:
+        """回收退出进程；仅在宽限期过后依次发送 TERM/KILL，避免孤儿任务。"""
+        if self.process is None:
+            return ""
+        return_code = self.process.poll()
+        if return_code is not None:
+            self.process = None
+            self.stop_stage = ""
+            self.state = "STOPPED" if return_code in (0, -signal.SIGINT) else "FAILED"
+            return f"exited:{return_code}"
+
+        now = self._monotonic()
+        try:
+            if self.stop_stage == "sigint" and now - self.stage_started >= self.stop_timeout:
+                self._kill_group(self.process.pid, signal.SIGTERM)
+                self.stop_stage = "sigterm"
+                self.stage_started = now
+                return "sigterm_sent"
+            if self.stop_stage == "sigterm" and now - self.stage_started >= self.term_timeout:
+                self._kill_group(self.process.pid, signal.SIGKILL)
+                self.stop_stage = "sigkill"
+                self.stage_started = now
+                return "sigkill_sent"
+        except ProcessLookupError:
+            return self.poll()
+        except OSError as exc:
+            self.state = "FAILED"
+            return f"signal_failed:{exc}"
+        return ""
+
+    def shutdown(self) -> None:
+        """节点退出时确保它启动的自主任务不成为孤儿；不触碰外部启动的任务。"""
+        self.request_stop()
+        deadline = self._monotonic() + self.stop_timeout + self.term_timeout + 1.0
+        while self.process is not None and self._monotonic() < deadline:
+            self.poll()
+            if self.process is not None:
+                time.sleep(0.05)
+        if self.process is not None:
+            try:
+                self._kill_group(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            self.process = None
+            self.stop_stage = ""
+            self.state = "STOPPED"
 
 
 def safe_axis(axes: Sequence[float], index: int) -> float:
@@ -263,14 +419,18 @@ class XboxTeleopNode(Node):
         self.declare_parameter("active_topic", "/teleop/active")
         self.declare_parameter("emergency_stop_topic", "/teleop/emergency_stop")
         self.declare_parameter("speed_mode_topic", "/teleop/speed_mode")
+        self.declare_parameter("autonomy_status_topic", "/teleop/autonomy_process")
         self.declare_parameter("publish_rate", 20.0)
         self.declare_parameter("joy_timeout", 0.5)
         self.declare_parameter("deadzone", 0.12)
 
-        # 参与控制的轴。LT/RT、十字键和右摇杆 Y 均不读取，因此不会误触发移动。
+        # 三个摇杆轴只生成 Twist；十字键 Y 单独管理自主进程，绝不参与速度计算。
         self.declare_parameter("axis_linear_x", XBOX_AXIS_LEFT_Y)
         self.declare_parameter("axis_linear_y", XBOX_AXIS_LEFT_X)
         self.declare_parameter("axis_angular_z", XBOX_AXIS_RIGHT_X)
+        self.declare_parameter("axis_dpad_y", XBOX_AXIS_DPAD_Y)
+        self.declare_parameter("dpad_threshold", 0.5)
+        self.declare_parameter("dpad_y_direction", 1.0)
         # 方向参数只允许 ±1；若某个驱动轴方向相反，改 YAML 即可，无需改算法。
         self.declare_parameter("linear_x_direction", 1.0)
         self.declare_parameter("linear_y_direction", 1.0)
@@ -328,6 +488,29 @@ class XboxTeleopNode(Node):
             fast_angular_speed=self._positive_parameter("fast_angular_speed", 0.90),
         )
         self.controller = XboxTeleopController(config)
+        self.autonomy_switch = DpadAutonomySwitch(
+            axis=self._index_parameter("axis_dpad_y", XBOX_AXIS_DPAD_Y),
+            threshold=self._bounded_parameter("dpad_threshold", 0.5, 0.1, 1.0),
+            direction=self._direction_parameter("dpad_y_direction"),
+        )
+        # 只保存命令名称而不导入 slam Python 包，确保 quadruped_teleop 在构建和启动层面
+        # 仍是独立包。只有用户按十字键上时，才创建可单独 Ctrl-C 的外部 launch 子进程。
+        self.declare_parameter("autonomy_package", "slam")
+        self.declare_parameter(
+            "autonomy_launch_file", "autonomous_navigation.launch.py"
+        )
+        self.declare_parameter("autonomy_stop_timeout", 4.0)
+        self.declare_parameter("autonomy_term_timeout", 2.0)
+        self.autonomy_process = AutonomyProcessManager(
+            (
+                "ros2",
+                "launch",
+                str(self.get_parameter("autonomy_package").value),
+                str(self.get_parameter("autonomy_launch_file").value),
+            ),
+            stop_timeout=self._positive_parameter("autonomy_stop_timeout", 4.0),
+            term_timeout=self._positive_parameter("autonomy_term_timeout", 2.0),
+        )
         self.joy_timeout = self._positive_parameter("joy_timeout", 0.5)
         publish_rate = self._bounded_parameter("publish_rate", 20.0, 1.0, 100.0)
         self.latest_result = TeleopResult(zero_twist(), False, False, "normal")
@@ -351,6 +534,10 @@ class XboxTeleopNode(Node):
         self.mode_pub = self.create_publisher(
             String, str(self.get_parameter("speed_mode_topic").value), state_qos
         )
+        self.autonomy_pub = self.create_publisher(
+            String, str(self.get_parameter("autonomy_status_topic").value), state_qos
+        )
+        self.last_autonomy_state = ""
         # joy_node 通常使用 SensorDataQoS；这里采用相同 profile，兼容有线和无线驱动。
         self.create_subscription(
             Joy, input_topic, self.joy_callback, qos_profile_sensor_data
@@ -358,8 +545,10 @@ class XboxTeleopNode(Node):
         self.create_timer(1.0 / publish_rate, self.publish_command)
         self.get_logger().info(
             f"Xbox teleop: {input_topic} -> {output_topic}; "
-            "center sticks, then hold LB to enable"
+            "center sticks, then hold LB to enable; D-pad up/down starts/stops "
+            "the independent autonomy launch"
         )
+        self._publish_autonomy_state(force=True)
 
     def _index_parameter(self, name: str, fallback: int) -> int:
         """读取非负下标；错误配置回退到已知 Xbox 默认值。"""
@@ -395,6 +584,21 @@ class XboxTeleopNode(Node):
             self.controller.disarm_for_timeout()
         self.latest_result = self.controller.update(msg.axes, msg.buttons)
         self.last_joy_time = now
+        autonomy_event = self.autonomy_switch.update(msg.axes)
+        if autonomy_event == "start":
+            outcome = self.autonomy_process.start()
+            self.get_logger().info(
+                f"D-pad up: autonomy process {outcome}; "
+                f"state={self.autonomy_process.state}"
+            )
+            self._publish_autonomy_state(force=True)
+        elif autonomy_event == "stop":
+            outcome = self.autonomy_process.request_stop()
+            self.get_logger().info(
+                f"D-pad down: autonomy process {outcome}; "
+                f"state={self.autonomy_process.state}"
+            )
+            self._publish_autonomy_state(force=True)
         if self.latest_result.event:
             self.get_logger().info(
                 f"Xbox event={self.latest_result.event}, "
@@ -405,6 +609,18 @@ class XboxTeleopNode(Node):
 
     def publish_command(self) -> None:
         """固定频率发布命令；无手柄或超过 timeout 未更新时强制发布零速度。"""
+        process_event = self.autonomy_process.poll()
+        if process_event:
+            log = (
+                self.get_logger().warning
+                if self.autonomy_process.state == "FAILED"
+                else self.get_logger().info
+            )
+            log(
+                f"Autonomy process event={process_event}, "
+                f"state={self.autonomy_process.state}"
+            )
+        self._publish_autonomy_state()
         now = self.get_clock().now()
         age = (
             float("inf")
@@ -423,6 +639,13 @@ class XboxTeleopNode(Node):
         self.stop_pub.publish(Bool(data=self.latest_result.emergency_stop))
         self.mode_pub.publish(String(data=self.latest_result.speed_mode))
 
+    def _publish_autonomy_state(self, *, force: bool = False) -> None:
+        """状态变化时发布一次；transient-local 足以让后来订阅者立即获得当前值。"""
+        state = self.autonomy_process.state
+        if force or state != self.last_autonomy_state:
+            self.autonomy_pub.publish(String(data=state))
+            self.last_autonomy_state = state
+
 
 def main(args=None):
     """启动 Xbox 手柄速度适配节点。"""
@@ -433,6 +656,9 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        # 若自主任务由十字键启动，退出手柄节点等价于先对那个独立终端按 Ctrl-C；管理器
+        # 只拥有自己的子进程 PID，不会结束手动启动的自主任务、SLAM 或 Gazebo。
+        node.autonomy_process.shutdown()
         # 退出前尽力发布一次零速度。launch/SIGINT 可能已经先关闭 ROS context，因此必须
         # 检查 rclpy.ok() 并容忍发布竞态；底盘仍必须有自己的超时看门狗。
         try:

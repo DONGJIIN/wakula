@@ -47,7 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，151 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，155 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -156,7 +156,7 @@ wakula/
 | `quadruped_interfaces` | 带时间戳的感知、导航与越障交接合同 | 五个 `msg/` + `TraverseObstacle.action` |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
 | `quadruped_planning` | 地形风险分类、入口引导、速度安全门和未知地图自主任务 | 四个导航/任务节点 |
-| `quadruped_teleop` | Xbox 按键安全状态机和独立 Twist 候选 | `xbox_teleop` |
+| `quadruped_teleop` | Xbox 按键安全状态机、独立 Twist 候选和自主任务进程开关 | `xbox_teleop` |
 | `quadruped_tools` | rosbag 标注评估、SLAM/Nav2 长测与资源报告 | `perception_bag_evaluator`、`stack_regression` |
 | `slam` | 核心 SLAM/Nav2/OpenCV 入口，以及需显式启动的独立自主导航入口 | 两个互不 include 的 launch |
 
@@ -188,7 +188,8 @@ wakula/
   和里程计突跳；跳变会锁存到连续稳定样本确认恢复。
 - `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2。
 - `navigation_speed_gate`：检查 Nav2 命令、地形评估和导航健康心跳，任一失效立即输出零速。
-- `xbox_teleop`：将 `/joy` 转换为带 LB 使能、B 急停和断流归零的 `/cmd_vel_joy`。
+- `xbox_teleop`：将 `/joy` 转换为带 LB 使能、B 急停和断流归零的 `/cmd_vel_joy`；十字键
+  上/下可单独启动或 Ctrl-C 由该节点创建的自主导航 launch，不改变 Gazebo/SLAM 生命周期。
 - `perception_bag_evaluator`：将 rosbag 预测与人工标签对齐，统计准确率、召回率和混淆矩阵。
 - `stack_regression`：在明确允许仿真运动后自动执行连续旋转、前进、倒退、回环、多目标、
   1 m 绕杆窄通道和不可达目标恢复，并记录数据断流、闭环误差、越障阶段稳定性/安全合同、
@@ -735,6 +736,10 @@ ros2 launch quadruped_teleop xbox_teleop.launch.py
 
 多手柄时可以指定 `device_id:=1`；用 `--show-args` 查看设备编号、话题和参数文件覆盖项。
 该 launch 只启动 `joy_node` 与 `xbox_teleop`，不会启动 SLAM、Nav2 或真实运动控制器。
+自主功能仍然默认关闭；只有十字键上出现一次按下边沿时，`xbox_teleop` 才执行
+`ros2 launch slam autonomous_navigation.launch.py`。十字键下向这个子进程组发送 SIGINT，
+效果等同在自主任务自己的终端按 `Ctrl-C`；它不会关闭 Gazebo、`slam.launch.py`、手柄节点，
+也不会搜索或杀死从其他终端手动启动的自主任务。按住十字键不会重复触发。
 
 | 控件 | 当前作用 |
 |---|---|
@@ -744,13 +749,16 @@ ros2 launch quadruped_teleop xbox_teleop.launch.py
 | A / X / Y | 低速档 / 正常档 / 快速档 |
 | B | 锁存软件急停 |
 | Start | 松开 LB 且摇杆回中时解除软件急停 |
+| 十字键上 | 启动独立 `autonomous_navigation.launch.py`，已运行时不重复启动 |
+| 十字键下 | Ctrl-C 并结束由本 Xbox 节点启动的自主任务，不影响 Gazebo/SLAM |
 | RB、Back、Guide、左右摇杆按下 | 预留，当前不产生动作 |
-| LT、RT、十字键、右摇杆上下 | 预留，当前不产生动作 |
+| LT、RT、十字键左右、右摇杆上下 | 预留，当前不产生动作 |
 
 若带着非零摇杆按下 LB，节点会拒绝解锁；即使随后回中也必须松开并重新按下 LB，避免
 手柄放置姿态造成突然起步。若 `/joy` 断流，重连后同样必须先松开再重新按下 LB，避免
 沿用断流前的使能状态。调试时查看 `/cmd_vel_joy`、`/teleop/active`、
-`/teleop/emergency_stop` 和 `/teleop/speed_mode`。若某个摇杆方向与表格相反，只需在
+`/teleop/emergency_stop`、`/teleop/speed_mode` 和 `/teleop/autonomy_process`。若十字键
+上下方向相反，把 `xbox.yaml` 的 `dpad_y_direction` 改成 `-1.0`；若某个摇杆方向相反，只需在
 `xbox.yaml` 将对应 `*_direction` 改成 `-1.0`。默认不直接发布
 `/cmd_vel`，防止与 Nav2 同时控制；真机应增加 `twist_mux`，在手柄和 Nav2 间仲裁后再进入
 Collision Monitor。该节点只输出机身速度，仍需运动控制团队把 Twist 转换为四足步态。
