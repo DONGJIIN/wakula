@@ -80,7 +80,6 @@ class ResourceStats:
             "terrain_safety_assessor",
             "traversal_guidance",
             "navigation_speed_gate",
-            "collision_monitor",
         )
         total_ticks = 0
         total_rss_pages = 0

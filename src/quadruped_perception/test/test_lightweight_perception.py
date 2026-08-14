@@ -1,5 +1,7 @@
 """Tests for bounded OpenCV and NumPy terrain feature extraction."""
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -51,6 +53,17 @@ def test_annotated_image_visualizes_roi_candidate_and_confirmed_result():
     assert annotated.shape == source.shape
     assert np.count_nonzero(annotated) > 0
     assert np.count_nonzero(source) == 0
+
+
+def test_annotated_image_qos_matches_default_rviz_reliability():
+    """标注图发布端必须兼容 RViz Image 默认的 RELIABLE 订阅策略。"""
+    source = (
+        Path(__file__).parents[1]
+        / "quadruped_perception"
+        / "vision_obstacle_detector.py"
+    ).read_text(encoding="utf-8")
+    assert "annotated_qos = QoSProfile" in source
+    assert "reliability=ReliabilityPolicy.RELIABLE" in source
 
 
 def test_plain_colored_region_is_not_promoted_to_an_obstacle_class():

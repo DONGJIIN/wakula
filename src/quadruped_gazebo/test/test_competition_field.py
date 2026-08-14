@@ -257,14 +257,38 @@ def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     assert "self.publisher.publish(Twist())" in mux_source
 
 
+def test_gui_field_opens_remapped_keyboard_without_loading_algorithms():
+    """第一条 GUI 命令应提供人工测试窗口，但不能借机耦合 SLAM 或自主任务。"""
+    launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'package="teleop_twist_keyboard"' in launch_source
+    assert '("cmd_vel", "/cmd_vel_teleop")' in launch_source
+    assert '"keyboard_teleop"' in launch_source
+    assert "gnome-terminal --wait" in launch_source
+
+
 def test_generic_rgbd_resolution_is_bounded_for_realtime_integration():
     """测试相机保留可用细节，但不能以无意义的高像素拖慢整套联调。"""
-    image = ROBOT.find(".//sensor[@name='rgbd']/camera/image")
+    camera = ROBOT.find(".//sensor[@name='rgbd']/camera")
+    assert camera is not None
+    image = camera.find("image")
     assert image is not None
     width = int(image.findtext("width"))
     height = int(image.findtext("height"))
     assert width >= 320 and height >= 180
     assert width * height <= 150_000
+    # RGBD 不使用可见掩码：Gazebo Harmonic 的部分渲染后端会因此输出全 Inf 深度。
+    assert camera.find("visibility_mask") is None
+    camera_link = ROBOT.find("link[@name='camera_link']")
+    assert camera_link is not None
+    camera_pose = [float(value) for value in camera_link.findtext("pose").split()]
+    camera_visual_pose = [
+        float(value) for value in camera_link.findtext("visual/pose").split()
+    ]
+    # 光心要在机头外，外观必须位于光心后方，防止相机看到自身外壳。
+    assert camera_pose[0] > 0.45
+    assert camera_visual_pose[0] < 0.0
 
 
 def test_generic_quadruped_is_planar_and_has_no_fake_leg_controller():

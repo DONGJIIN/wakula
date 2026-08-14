@@ -1,7 +1,7 @@
 """只启动当前建图导航链实际需要的 Nav2 生命周期节点。
 
 不启动 Docking、Route Server 或 Waypoint Follower；这些属于以后任务层需求。控制器仍只
-产生标准 ``Twist``，由速度平滑、地形速度门和 Collision Monitor 依次约束。
+产生标准 ``Twist``，由速度平滑和带雷达急停的最终地形速度门依次约束。
 """
 
 from launch import LaunchDescription
@@ -45,7 +45,6 @@ def generate_launch_description():
         "planner_server",
         "behavior_server",
         "velocity_smoother",
-        "collision_monitor",
         "bt_navigator",
     ]
     configured_params = ParameterFile(
@@ -63,8 +62,8 @@ def generate_launch_description():
     )
 
     # 速度链刻意分成三个命名话题，便于逐段定位“谁把速度归零”：
-    # controller -> cmd_vel_nav -> smoother -> cmd_vel_smoothed -> 地形门 ->
-    # cmd_vel_terrain_safe -> collision monitor -> cmd_vel。
+    # controller -> cmd_vel_nav -> smoother -> cmd_vel_smoothed -> 最终地形/雷达安全门 ->
+    # cmd_vel。每段仍有独立话题，最终节点持续发布，避免下游在停车后永久等不到新命令。
     nodes = [
         nav2_node(
             "nav2_controller",
@@ -100,17 +99,6 @@ def generate_launch_description():
             configured_params,
             log_level,
             smoother_remaps,
-        ),
-        # 监督层只负责退出排序：运行的仍是官方 Nav2 collision_monitor，ROS 节点名、
-        # 参数、生命周期与全部话题保持不变。避免全栈 Ctrl-C 时最后一帧 Twist 与
-        # Publisher 析构并发，触发 Jazzy 1.3.12 的 get_subscription_count SIGSEGV。
-        nav2_node(
-            "slam",
-            "collision_monitor_supervisor",
-            configured_params,
-            log_level,
-            tf_remaps,
-            name="collision_monitor",
         ),
         nav2_node(
             "nav2_bt_navigator",

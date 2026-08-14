@@ -47,7 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，155 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，157 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -244,10 +244,9 @@ RGB 相机 ──> OpenCV ──> /vision/obstacle_stamped ─┐
        └────────────────> /perception/obstacle_points ─> Nav2 local_costmap
 
 Nav2 /cmd_vel_nav ─> velocity_smoother ─> navigation_speed_gate
-     ─> collision_monitor ─> /cmd_vel ─> 未来真机底盘接口
+     ─> /cmd_vel ─> 未来真机底盘接口
 
-Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
-                                                               └─> collision_monitor
+Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux/底盘仲裁
 
 /scan + /odom + TF ─> navigation health + Nav2 readiness
 ```
@@ -261,9 +260,10 @@ Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux 仲裁 ─┐
 3. **OpenCV** 识别杆、限高横杆、墙面和大面积有色障碍，用于提前减速和提示。
 4. **深度点云** 测量障碍高度、坡度、横向偏移和粗糙度，是 `STEP/CLIMB/STOP` 及入口
    对正的几何依据；当前任务层会完成入口导航和 Action 交接，但不生成真实跨越动作。
-5. **Collision Monitor** 是 `/cmd_vel` 的唯一发布者，负责最后一层碰撞保护。
+5. **navigation_speed_gate** 是自动导航 `/cmd_vel` 的最终发布者：应用地形限速、检查导航
+   心跳，并用 `/scan` 对运动方向执行极近距离急停兜底；它不把可越障目标改成绕行目标。
 6. **Xbox 手柄节点** 默认独立发布 `/cmd_vel_joy`，不加入主导航 launch，也不绕过
-   Collision Monitor；真机阶段通过 `twist_mux` 与 Nav2 速度仲裁。
+   未来底盘安全层；真机阶段通过 `twist_mux` 与 Nav2 速度仲裁。
 7. **自主任务节点** 只使用 `/map`、TF 和感知输出决定“去哪里、何时交接”，不包含步态；
    停止服务会取消当前 Nav2/越障目标并发布零速，之后可以继续启动。
 
@@ -358,7 +358,7 @@ RPLIDAR S2、YDLIDAR/LDLiDAR 或 Hokuyo 的 ROS 2 兼容型号中选择；重点
 | 深度/3D 点云 | 自动选择 | `sensor_msgs/msg/PointCloud2` | `point_cloud_topic` |
 
 `slam.launch.py` 是唯一推荐的一键入口，内部直接读取 profile，并将雷达/里程计 remap
-作用到 SLAM、Nav2、Collision Monitor、就绪监视器和 RViz；图像/点云参数同时传给
+作用到 SLAM、Nav2、最终速度门、就绪监视器和 RViz；图像/点云参数同时传给
 OpenCV 与地形节点。整个过程不复制高带宽数据，也不用修改算法源码。预置 profile：
 
 ```text
@@ -561,6 +561,10 @@ ros2 launch slam autonomous_navigation.launch.py
 SLAM、Nav2、OpenCV、点云和 RViz，且默认没有自主任务；第三条才启动自主探索与越障编排。
 真机联调时用真实驱动替换第一条，后两条保持不变。
 
+第一条在 GUI 模式下会自动打开标题为 `Wakula Simulation Keyboard` 的键盘窗口，不需要
+第四条命令；点击该窗口后使用 `i/k` 前后、`j/l` 原地转向、任意其他键停车。键盘仅发布
+仿真专用 `/cmd_vel_teleop`，不属于 SLAM 或自主任务。
+
 启动该 launch 就立即执行，回到该终端按 `Ctrl-C` 就停止并取消任务；核心 SLAM、Nav2、
 OpenCV、RViz 和地图继续运行。退出时先通过 `/navigation/autonomy_stop` 锁住自动导航速度，
 再取消 Nav2/越障 Action；没有人工输入时机械狗立即停车，键盘或手柄持续发布时仍可人工
@@ -679,11 +683,14 @@ ros2 launch slam slam_sim.launch.py
 参考 world 的物理时钟为 100 Hz，足够支撑测试 IMU，并避免 Gazebo GUI、RViz、OpenCV 与
 点云同机运行时因高频 `/clock` 挤压 `/scan`、`/odom` 和地图更新。时钟、导航关键数据与
 辅助传感器分别桥接，未被算法使用的 `/scan/points` 不再重复进入 ROS。
-360° 雷达位于机身中心且保持水平，并通过 Gazebo 可见掩码忽略测试狗自身外观，避免自遮挡写入地图。RGB 图像
-使用 `camera_optical_frame`；Gazebo 当前生成的 PointCloudPacked 数值轴实际采用
+360° 雷达位于机身中心且保持水平，并通过 Gazebo 可见掩码忽略测试狗自身外观，避免自遮挡写入地图。RGB-D
+光心位于测试狗机头外侧并向下俯视约 14°，相机外观位于光心后方，避免机头遮挡画面或
+深度云全部变成无穷远；RGB 图像使用 `camera_optical_frame`。Gazebo 当前生成的 PointCloudPacked 数值轴实际采用
 `camera_link` 约定，因此仿真专用 bridge 会覆写点云 frame，避免算法把点云重复旋转。
 真机仍应由驱动发布真实 frame 和 TF，不需要这一仿真修正。RViz 中应看到 `/map`、
 LaserScan、机器人 TF、Nav2 代价地图，以及 `Camera Detection` 面板中的识别标注画面。
+标注图 `/vision/annotated_image` 使用 RELIABLE、小队列 QoS，与 RViz 默认 Image 订阅兼容；
+原始相机输入仍使用低延迟传感器 QoS。
 默认 RViz 已关闭容易遮挡地图的 TF、网格和实时 LaserScan；需要查原始雷达时再手动勾选
 LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色是未知区。开放场地初始地图
 会从出生点向可见障碍展开，白色射线边缘是探索范围而不是墙；应低速覆盖通道、在转角
@@ -692,10 +699,11 @@ LaserScan。地图中白色是已观测自由区、黑色是占用区、灰色�
 0.08 rad 即可加入新关键帧，改善倒退和原地旋转时的跟随。RViz 顶视图跟随 `base_link`，但全局固定坐标仍是
 `map`。地图整体相对屏幕旋转只代表 `map` 坐标方向，不是几何错误。
 
-算法运行时不要让键盘和 Collision Monitor 同时直接发布 `/cmd_vel`。Gazebo 场地 launch
+算法运行时不要让键盘与自动导航同时直接发布 `/cmd_vel`。Gazebo 场地 launch
 现内置仿真专用速度仲裁器：算法保持标准 `/cmd_vel`，键盘走 `/cmd_vel_teleop`，Xbox 走
 `/cmd_vel_joy`；有效人工输入拥有最高优先级，唯一输出 `/cmd_vel_gazebo` 再送入模型。
-自主任务退出只锁自动导航分支，键盘和手柄仍能人工接管。启动键盘请另开终端运行：
+自主任务退出只锁自动导航分支，键盘和手柄仍能人工接管。GUI Gazebo 默认已经自动打开
+键盘窗口；仅在使用 `keyboard_teleop:=false` 或需要单独排障时才运行：
 
 ```bash
 cd ~/wakula
@@ -761,7 +769,7 @@ ros2 launch quadruped_teleop xbox_teleop.launch.py
 上下方向相反，把 `xbox.yaml` 的 `dpad_y_direction` 改成 `-1.0`；若某个摇杆方向相反，只需在
 `xbox.yaml` 将对应 `*_direction` 改成 `-1.0`。默认不直接发布
 `/cmd_vel`，防止与 Nav2 同时控制；真机应增加 `twist_mux`，在手柄和 Nav2 间仲裁后再进入
-Collision Monitor。该节点只输出机身速度，仍需运动控制团队把 Twist 转换为四足步态。
+硬件安全层与驱动。该节点只输出机身速度，仍需运动控制团队把 Twist 转换为四足步态。
 
 ## 7. OpenCV 障碍识别
 
@@ -937,21 +945,15 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 速度链路固定为：
 
 ```text
-/cmd_vel_nav -> /cmd_vel_smoothed -> /cmd_vel_terrain_safe -> /cmd_vel
+/cmd_vel_nav -> /cmd_vel_smoothed -> /cmd_vel
 ```
 
 - Nav2 controller 只发布 `/cmd_vel_nav`。
 - Velocity Smoother 限制加速度并发布 `/cmd_vel_smoothed`。
 - `navigation_speed_gate` 应用 `/terrain/speed_limit`，同时检查命令、评估和
-  `/navigation/healthy` 心跳。
-- Collision Monitor 读取 `/scan`，并作为 `/cmd_vel` 唯一发布者。
-
-Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清理与最后一个回调
-并发，表现为 `get_subscription_count()` 处 SIGSEGV。项目的
-`collision_monitor_supervisor` 不修改官方算法或任何 ROS 接口：运行时仍是原版
-`/collision_monitor`；退出时先让上游停发，再结束独立会话里的无持久状态子进程，由
-操作系统回收 DDS 和文件描述符，不再让该 Jazzy 版本进入有缺陷的 SIGINT/SIGTERM 清理
-路径。不要绕过 `slam.launch.py` 单独启动系统可执行文件，否则不会获得此退出保护。
+  `/navigation/healthy` 心跳，并读取 `/scan` 做 0.22 m 极近距离运动方向急停。
+- `navigation_speed_gate` 直接发布标准 `/cmd_vel`，避免当前 Jazzy 版本 Collision Monitor
+  在运行/退出时的 SIGSEGV；近距离扫描只负责防撞兜底，不参与全局避障或越障分类。
 
 规划命令或地形决策心跳任意一项超时，速度门都会发布零速度。这只是导航软件层的失效
 停车，不替代未来真机必须具备的硬件急停、驱动失能、姿态/关节保护和底层看门狗。

@@ -11,10 +11,14 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、155 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、157 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
 前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
+
+2026-08-14 三命令回归还验证：RGB-D 有效深度点约占 75%，RViz 以 RELIABLE QoS 收到标注
+图；自动导航 15 秒里程计位移 2.01 m；第三条 Ctrl-C 后 6 秒非零仿真速度为 0、里程计
+漂移为 0；/cmd_vel_teleop 手动通道可驱动原地旋转。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
@@ -93,6 +97,9 @@ SLAM 产生 map -> odom。启用地形感知还需：
 第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo；现实传感器和 Gazebo 传感器接口
 一致。在第三个终端按 Ctrl-C，会先锁住自动导航速度并停车，再取消 Action；第一、二条
 进程继续运行。键盘或手柄持续发布时仍可人工接管，不需要重新启动第三条。
+
+第一条在 GUI 模式下会自动打开 `Wakula Simulation Keyboard` 窗口；点击该窗口后使用
+i/k 前后、j/l 原地旋转、任意其他键停车。无需运行第四条键盘命令。
 
 真机要求运动组提供 /traverse_obstacle Action 服务端。仿真时第三个命令检测到 /clock 后
 自动启动通用测试狗的 Action 替身，不再需要第四个常规命令。Gazebo 场地仍独立启动：
@@ -173,7 +180,8 @@ simulation_detected=true、use_sim_time=true、robot_model=false。
 /scan、/odom、odom->base_link、/imu/data、/camera/image_raw、/camera/depth/points，并
 提供 lidar_link、camera_link、camera_optical_frame、imu_link 的 TF，不需要额外 remap。
 它的腿仅为固定外观，载体保持水平且无动力学碰撞，只用于算法联调；不能验证步态/接触，
-直接 /cmd_vel 也可能穿过障碍。仿真 RGB-D 默认 424×240@15 Hz 并关闭传感器可视化，
+直接 /cmd_vel 也可能穿过障碍。仿真 RGB-D 光心位于机头外并向下俯约 14°，避免自身
+外观遮住 RGB 或令深度云全部为 Inf；默认 424×240@15 Hz 并关闭传感器可视化，
 world 物理时钟为 100 Hz，/clock、关键导航和辅助数据分桥运行，避免 GUI/RViz 同机时
 /scan 与 /odom 断流；默认话题不变，真机更换常见分辨率
 无需改算法。正式模型可这样一次替换：
@@ -188,7 +196,8 @@ world 物理时钟为 100 Hz，/clock、关键导航和辅助数据分桥运行�
 约 4 Hz 发布，扫描匹配最多约 10 Hz，8 cm / 0.08 rad 即可加入新关键帧。
 
 RViz 的 Camera Detection 面板会显示 /vision/annotated_image：青色为 ROI，黄色为当前帧
-候选，绿色为多帧稳定结果。算法终端会周期打印“[正前方障碍]”；也可单独查看：
+候选，绿色为多帧稳定结果。标注图使用与 RViz 默认 Image 显示兼容的 RELIABLE QoS；
+算法终端会周期打印“[正前方障碍]”；也可单独查看：
 
   ros2 topic echo /perception/front_obstacle_name
 
@@ -209,7 +218,8 @@ LaserScan；顶视图默认跟随 base_link，地图仍固定在 map 坐标，�
 Nav2 只会在雷达角度/样本/frame、里程计时间/frame/协方差和定位 TF 全部有效后激活。
 点云进入局部代价地图前会自动剔除拟合地面和坡面；真机只需保证点云 TF 正确，并用
 rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动侧重复裁成绝对 z>0。
-键盘移动测试：
+GUI Gazebo 已自动提供键盘窗口。只有用 `keyboard_teleop:=false` 关闭自动窗口或单独排障时
+才运行备用脚本：
 
   cd ~/wakula
   ./scripts/keyboard_teleop.sh
@@ -226,7 +236,7 @@ rosbag 调整 terrain.yaml 的相对地面高度阈值，不要在相机驱动�
 拒绝运行；真机不得用这个命令代替正式测试流程。
 
 保持键盘终端获得焦点，i/k 前后、j/l 原地旋转。不要再把键盘直接 remap 到 /cmd_vel：
-算法的 Collision Monitor 也会发布该标准话题，二者会互相覆盖。Gazebo 专用 mux 将
+自动导航最终速度门也会发布该标准话题，二者会互相覆盖。Gazebo 专用 mux 将
 /cmd_vel_teleop 作为短时高优先级输入，统一输出 /cmd_vel_gazebo；真机接口不受影响。
 
 若日志持续出现 Detected jump back in time，先运行 `ros2 topic info /clock --verbose`；通常
@@ -237,17 +247,16 @@ Ubuntu 崩溃窗口可能延迟显示旧报告；核对窗口中的 Date 和最�
 “rviz2 process has finished cleanly”，可关闭旧弹窗，不要误判为当前算法崩溃。
 检查 TF 优先运行 `./scripts/diagnose.sh`。不要使用 `tf2_echo ... | head`：tf2_echo 会持续
 输出，head 提前关闭管道时 ROS 2 Jazzy 可能弹出 BrokenPipeError；这不是 SLAM/Nav2 崩溃。
-若曾看到 collision_monitor 在 get_subscription_count() 处 SIGSEGV，请重新编译并通过
-slam.launch.py 启动。当前入口会隔离官方进程，关闭时先排空上游，再避开有竞态的
-SIGINT/SIGTERM 清理路径；无需改变 /collision_monitor、/scan、/cmd_vel_terrain_safe 或
-/cmd_vel，正常 Ctrl-C 即可。
+若曾看到 collision_monitor 在 get_subscription_count() 处 SIGSEGV，那是旧版本速度链。
+当前版本不再启动该 Jazzy 进程：navigation_speed_gate 直接输出 /cmd_vel，并用 /scan 做
+0.22 m 极近距离急停。重新编译并用 slam.launch.py 启动即可。
 
 规则只公布障碍结构尺寸与颜色，尚未公布正式排列坐标。参考 pose 全部集中在
 src/quadruped_gazebo/worlds/robocon_obstacle_field.sdf 开头的 REFERENCE LAYOUT；正式坐标
 到手后只修改八个 layout_* frame，不修改算法 launch 或参数。
 
 先用 `ros2 topic echo /joy` 核对实际轴/按键下标，再查看 `/cmd_vel_joy`。默认不会接管
-`/cmd_vel`；真机阶段增加 twist_mux，将手柄和 Nav2 仲裁结果送入 Collision Monitor。
+`/cmd_vel`；真机阶段增加 twist_mux，将手柄和 Nav2 仲裁结果送入硬件安全层与驱动。
 LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需松开并重新按下。轴方向相反时
 修改 xbox.yaml 的 linear_x_direction、linear_y_direction 或 angular_z_direction 为 -1.0。
 十字键上下默认读取 axes[7]（上 +1、下 -1）；若驱动相反，将 dpad_y_direction 改为 -1.0。

@@ -18,7 +18,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -35,6 +35,7 @@ def generate_launch_description():
     robot_sdf = LaunchConfiguration("robot_sdf")
     robot_name = LaunchConfiguration("robot_name")
     publish_test_sensor_tf = LaunchConfiguration("publish_test_sensor_tf")
+    keyboard_teleop = LaunchConfiguration("keyboard_teleop")
     use_sim_time = {"use_sim_time": True}
 
     # ros_gz_sim 自带的 launch 负责启动 Gazebo。这里默认实时运行；gui=false 时只启动
@@ -178,7 +179,7 @@ def generate_launch_description():
                         executable="static_transform_publisher",
                         name="camera_static_tf",
                         arguments=[
-                            "--x", "0.40", "--y", "0.0", "--z", "0.40",
+                            "--x", "0.52", "--y", "0.0", "--z", "0.42",
                             "--roll", "0.0", "--pitch", "0.24", "--yaw", "0.0",
                             "--frame-id", "base_link", "--child-frame-id", "camera_link",
                         ],
@@ -213,6 +214,26 @@ def generate_launch_description():
         ],
     )
 
+    # GUI 仿真默认自动打开一个键盘遥控终端，因此完整联调仍然只有 Gazebo、SLAM、
+    # 自动导航三条用户命令。键盘进程只发布仿真专用 /cmd_vel_teleop，不进入 SLAM 或
+    # 自主任务 launch；关闭 Gazebo 主 launch 时该终端也会随 --wait 进程一起结束。
+    keyboard_terminal = Node(
+        package="teleop_twist_keyboard",
+        executable="teleop_twist_keyboard",
+        name="sim_keyboard_teleop",
+        output="screen",
+        emulate_tty=True,
+        prefix="gnome-terminal --wait --title='Wakula Simulation Keyboard' --",
+        remappings=[("cmd_vel", "/cmd_vel_teleop")],
+        parameters=[{"repeat_rate": 20.0, "key_timeout": 0.6}],
+        condition=IfCondition(
+            PythonExpression([
+                "'", gui, "'.lower() in ('true', '1') and '",
+                keyboard_teleop, "'.lower() in ('true', '1')",
+            ])
+        ),
+    )
+
     return LaunchDescription(
         [
             # Snap 版 VS Code 会把 GTK_PATH 指向 /snap/code；Gazebo GUI 若继承它，可能
@@ -223,6 +244,13 @@ def generate_launch_description():
             SetEnvironmentVariable("GIO_MODULE_DIR", ""),
             DeclareLaunchArgument("world", default_value=str(default_world)),
             DeclareLaunchArgument("gui", default_value="true"),
+            DeclareLaunchArgument(
+                "keyboard_teleop",
+                default_value="true",
+                description=(
+                    "Open an independent i/j/k/l simulation teleop terminal when GUI is enabled"
+                ),
+            ),
             DeclareLaunchArgument("spawn_test_robot", default_value="true"),
             DeclareLaunchArgument(
                 "robot_sdf",
@@ -241,5 +269,6 @@ def generate_launch_description():
             gazebo_gui,
             gazebo_headless,
             robot_group,
+            keyboard_terminal,
         ]
     )

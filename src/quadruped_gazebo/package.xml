@@ -21,6 +21,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>teleop_twist_keyboard</exec_depend>
 
   <test_depend>ament_cmake_pytest</test_depend>
 

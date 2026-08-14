@@ -219,39 +219,6 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45
 
-# ---------- 最后一层碰撞保护：/cmd_vel_terrain_safe -> /cmd_vel ----------
-collision_monitor:
-  ros__parameters:
-    use_sim_time: false
-    base_frame_id: base_link
-    odom_frame_id: odom
-    cmd_vel_in_topic: /cmd_vel_terrain_safe
-    cmd_vel_out_topic: cmd_vel
-    state_topic: collision_monitor_state
-    transform_tolerance: 0.2
-    source_timeout: 1.0
-    base_shift_correction: true
-    stop_pub_timeout: 1.0
-    polygons: ["FootprintApproach"]
-    FootprintApproach:
-      type: polygon
-      action_type: approach
-      footprint_topic: local_costmap/published_footprint
-      # 按当前速度预测 1.2 s 内是否会碰撞；不是实际制动距离标定值。
-      time_before_collision: 1.2
-      simulation_time_step: 0.1
-      min_points: 6
-      visualize: true
-      polygon_pub_topic: collision_monitor_polygon
-      enabled: true
-    observation_sources: ["scan"]
-    scan:
-      type: scan
-      topic: /scan
-      min_height: 0.05
-      max_height: 2.0
-      enabled: true
-
 # ---------- Wakula 自定义输入健康检查 ----------
 navigation_health_monitor:
   ros__parameters:

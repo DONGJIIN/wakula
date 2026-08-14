@@ -17,16 +17,13 @@ Action 成功也不能声称真机已经具备越障能力。
    slam.yaml：SLAM Toolbox 的地图分辨率、扫描匹配和回环参数。
    slam.yaml 中 scan_queue_size=5 只用于吸收短时 TF/调度抖动；它不是回环扫描缓存，不能
    无限制调大，否则会让旧激光积压。
-   nav2.yaml：全局/局部代价地图、规划器、控制器、平滑器、行为与碰撞监控参数。
+   nav2.yaml：全局/局部代价地图、规划器、控制器、平滑器与恢复行为参数。
    navigate_to_pose_wakula.xml：规划失败、控制失败时清图、等待、后退、旋转再规划；
    FollowPath 显式选择 goal_checker 和 progress_checker，避免依赖空 ID 的运行期回退。
    nav2_readiness_monitor.py：复用运行期数据合同，只有 scan、odom 和 map->base_link
    均有效且新鲜才激活 Nav2。
    navigation_health_monitor.py：检查激光 frame/样本数/角度/量程/有效率、采样时间戳、
    里程计 frame/四元数/协方差/跳变、TF 与断流，发布诊断并参与速度门联锁。
-   collision_monitor_supervisor.py：运行时仅转发参数给官方 Nav2 Collision Monitor；全栈
-   退出时先排空上游，再结束独立会话中的无状态子进程，由内核回收资源，不再发送会触发
-   Jazzy 1.3.12 Publisher 清理竞态的 SIGINT/SIGTERM。节点名和话题完全不变。
    sensor_profiles.yaml：常见设备默认话题；显式 launch 参数优先级最高。
    slam.launch.py：只启动核心 SLAM/Nav2/OpenCV/点云/RViz，不创建 autonomous_mission。
    autonomous_navigation.launch.py：完全独立的可选任务入口，不 include 核心 launch；启动
@@ -52,7 +49,8 @@ Action 成功也不能声称真机已经具备越障能力。
    蓝色横杆必须满足长宽比及最大画面占比；未着色的孤立水平 Canny 边缘只作结构辅助，
    不能单独输出 BAR，防止远处障碍顶边、地平线和地面交界形成稳定误报。
    它输出归一化图像框和置信度，不把像素尺寸伪装成真实米制高度；另发布带检测 ROI、
-   原始候选和多帧确认框的 /vision/annotated_image，RViz 可直接查看算法实际看到的画面。
+   原始候选和多帧确认框的 /vision/annotated_image。该调试输出使用 RELIABLE、小队列 QoS，
+   与 RViz 默认 Image 订阅兼容；原始相机输入仍使用低延迟传感器 QoS。
 
    terrain_analyzer.py：把 PointCloud2 按采样时间变换到 base_link，截取前方 ROI，估计
    地面基准、俯仰/横滚坡度、粗糙度、障碍高度、距离、横向偏移、宽度、坑深和横杆净空；结果同时
@@ -129,8 +127,10 @@ Action 成功也不能声称真机已经具备越障能力。
 
    cmd_vel_gate.py（可执行名 navigation_speed_gate）：同时要求 Nav2 命令、地形评估和
    /navigation/healthy 心跳新鲜，按速度上限缩放；任一路断流、异常或上限为零就输出零
-   Twist。它是导航软件保护，不
-   替代未来驱动器急停和硬件看门狗。
+   Twist。最后读取 /scan，仅对当前运动方向检查 0.22 m 极近距离急停区，并直接发布
+   标准 /cmd_vel。它不改变规划目标、不把越障改成绕行，也不替代未来驱动器急停和
+   硬件看门狗。此直接速度门替代了会在当前 Jazzy 版本运行/退出时 SIGSEGV 的
+   Collision Monitor 进程。
 
 4. quadruped_teleop
    xbox_teleop.py：订阅标准 /joy，左摇杆控制前后/横移、右摇杆控制偏航；LB 只有在摇杆
@@ -142,7 +142,7 @@ Action 成功也不能声称真机已经具备越障能力。
    Ctrl-C。按住不重复触发，正常退出超时才升级 TERM/KILL。管理器只记录自己创建的 PID，
    不关闭 Gazebo、slam.launch.py 或其他终端手动启动的自主任务。
    默认发布 /cmd_vel_joy，不加入 slam.launch.py；真机阶段必须经 twist_mux 与 Nav2 仲裁，
-   再进入 Collision Monitor。手柄断流超过 0.5 s 会持续发布零速度；恢复连接后必须先
+   再进入硬件安全层与驱动。手柄断流超过 0.5 s 会持续发布零速度；恢复连接后必须先
    松开再重新按下 LB，不能沿用断流前的使能状态。
    xbox_teleop.launch.py：独立同时启动 joy_node 和 xbox_teleop；不包含 SLAM/Nav2，方便
    单独调试手柄，也满足主导航 launch 不自动启动手柄的边界。自主任务仍默认关闭，只有
@@ -169,15 +169,19 @@ Action 成功也不能声称真机已经具备越障能力。
    固定腿仅用于辨认外形，机身由平面速度插件保持水平且没有动力学碰撞。它专门隔离验证
    SLAM/Nav2/OpenCV，不能评价步态、接触或真实越障；直接 /cmd_vel 测试可能穿过障碍。
    顶置 360° 二维雷达用可见掩码忽略测试狗自身外观，避免自遮挡和机身倾斜形成假墙。
-   RGB-D 使用 424×240@15 Hz 的仿真轻量档并关闭 Gazebo 传感器可视化，降低同机运行
+   RGB-D 光心位于机头外侧并向下俯约 14°，外观后移到光心后方；不使用会让部分 Gazebo
+   渲染后端输出全 Inf 深度的相机可见掩码。它使用 424×240@15 Hz 的仿真轻量档并关闭
+   Gazebo 传感器可视化，降低同机运行
    Gazebo、SLAM、Nav2 和 OpenCV 时的渲染/桥接压力；world 物理更新率为 100 Hz，足以
    支撑测试 IMU。/clock 独立桥接，/scan、/odom、/tf、/cmd_vel 使用轻量导航桥，IMU 与
    CameraInfo 使用辅助桥；不再桥接算法未使用的 /scan/points，避免高带宽数据拖住导航。
    地图每 0.25 s（4 Hz）发布；扫描匹配最多约 10 Hz，倒退/转向达到 8 cm / 0.08 rad
    即可加入关键帧。RViz 视图跟随 base_link，但 Fixed Frame 仍保持 map。
    点云在线以 5 Hz 处理最新帧并前视 2.5 m。这些优化不改变任何标准真机接口。
-   robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥和仿真固定 TF，不 include
-   slam.launch.py、Nav2、OpenCV 或手柄。联合测试时必须在另一个终端显式启动算法。
+   robocon_field.launch.py：只启动 Gazebo、可选测试载体、ROS 桥、仿真固定 TF 和可选的
+   仿真键盘输入，不 include slam.launch.py、Nav2、OpenCV 或 Xbox。GUI 默认自动打开
+   `Wakula Simulation Keyboard` 窗口，因此三命令联调无需额外键盘命令；联合测试仍必须
+   在另一个终端显式启动算法。
    2D SLAM 的必要链路是 /scan、/odom、odom->base_link 和 base_link->lidar_link；RGB-D
    用于 OpenCV/点云感知，IMU 是为 RViz、时间同步和未来状态估计预留，不会被 SLAM
    Toolbox 自动融合。相机消息使用 camera_optical_frame，避免把光学点云误当成机身坐标。
@@ -197,8 +201,9 @@ Action 成功也不能声称真机已经具备越障能力。
    slam_sim.launch.py 显式锁定仿真时钟，不能在系统时间下消费 Gazebo 传感器时间戳。
    Gazebo 服务端被 Ctrl-C 或关闭窗口后，RViz 可能继续显示最后一张地图；此时 /scan、
    /odom、点云已停止，“感知数据无效”是正确的安全降级。先用 ros2 topic hz 分别检查三路。
-   仿真键盘不要直接占用 /cmd_vel。运行 scripts/keyboard_teleop.sh 后，i/j/k/l 发布到
-   /cmd_vel_teleop；sim_cmd_vel_mux 令新鲜手动命令优先于算法 /cmd_vel，并将唯一结果写入
+   仿真键盘不要直接占用 /cmd_vel。Gazebo GUI 默认打开的键盘窗口把 i/j/k/l 发布到
+   /cmd_vel_teleop；scripts/keyboard_teleop.sh 只作为关闭自动窗口后的排障入口。
+   sim_cmd_vel_mux 令新鲜手动命令优先于算法 /cmd_vel，并将唯一结果写入
    /cmd_vel_gazebo。手动与算法都超时后输出零速度，避免遗留运动指令。
    Ubuntu 可能延迟弹出旧的 RViz 崩溃报告；以报告 Date 和最新 launch.log 为准。最新日志若为
    “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。

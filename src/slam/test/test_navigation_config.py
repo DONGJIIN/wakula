@@ -11,7 +11,6 @@ from sensor_msgs.msg import LaserScan
 
 from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
 from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
-from slam.collision_monitor_supervisor import DEFAULT_DRAIN_SECONDS, _drain_seconds
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -222,29 +221,18 @@ def test_navigation_launch_description_is_constructible():
     assert '"use_sim_time": use_sim_time' in source
 
 
-def test_collision_monitor_uses_ordered_shutdown_supervisor():
-    """退出必须隔离官方信号竞态，同时继续沿用标准 collision_monitor 节点名。"""
+def test_final_velocity_gate_does_not_depend_on_silent_collision_relay():
+    """最终门直接发布 cmd_vel，并保留雷达急停，不能再串联静默断流节点。"""
     path = PACKAGE_ROOT / "launch" / "navigation.launch.py"
     source = path.read_text(encoding="utf-8")
-    assert '"collision_monitor_supervisor"' in source
-    assert 'name="collision_monitor"' in source
-    assert '"nav2_collision_monitor",\n            "collision_monitor"' not in source
-    supervisor = (PACKAGE_ROOT / "slam" / "collision_monitor_supervisor.py").read_text(
-        encoding="utf-8"
-    )
-    assert "child.kill()" in supervisor
-    assert "PR_SET_PDEATHSIG" in supervisor
-    assert "child.send_signal(signal.SIGINT)" not in supervisor
-
-
-def test_collision_monitor_drain_setting_is_bounded(monkeypatch):
-    """排空值即使误配也不能拖过 launch 的正常终止窗口。"""
-    monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "invalid")
-    assert _drain_seconds() == DEFAULT_DRAIN_SECONDS
-    monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "99")
-    assert _drain_seconds() == 2.0
-    monkeypatch.setenv("WAKULA_COLLISION_DRAIN_SECONDS", "-1")
-    assert _drain_seconds() == 0.0
+    assert "collision_monitor_supervisor" not in source
+    assert '"collision_monitor"' not in source
+    terrain_file = PACKAGE_ROOT.parent / "quadruped_planning" / "config" / "terrain_navigation.yaml"
+    config = yaml.safe_load(terrain_file.read_text(encoding="utf-8"))
+    gate = config["navigation_speed_gate"]["ros__parameters"]
+    assert gate["output_topic"] == "/cmd_vel"
+    assert gate["require_emergency_scan"] is True
+    assert 0.10 <= gate["emergency_stop_distance"] <= 0.40
 
 
 def test_sensor_profiles_cover_common_devices_and_allow_overrides():

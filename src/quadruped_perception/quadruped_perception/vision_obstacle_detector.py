@@ -19,7 +19,12 @@ import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, String
 
@@ -872,13 +877,19 @@ class VisionObstacleDetector(Node):
             if self.publish_debug
             else None
         )
-        # 标注图仅用于 RViz/录包调试，不回灌检测算法。使用传感器 QoS，避免慢速 GUI
-        # 订阅导致图像队列积压并拖慢 RK3588 上的主感知回调。
+        # 标注图仅用于 RViz/录包调试，不回灌检测算法。RViz 的 Image 显示默认请求
+        # RELIABLE；若沿用相机输入常用的 BEST_EFFORT 传感器 QoS，双方会因可靠性策略
+        # 不兼容而完全收不到图。小队列仍可避免慢速 GUI 在 RK3588 上造成图像积压。
+        annotated_qos = QoSProfile(
+            depth=2,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.annotated_pub = (
             self.create_publisher(
                 Image,
                 str(self.get_parameter("annotated_image_topic").value),
-                qos_profile_sensor_data,
+                annotated_qos,
             )
             if self.publish_annotated
             else None

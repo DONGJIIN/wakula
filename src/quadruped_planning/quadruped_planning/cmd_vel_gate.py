@@ -1,17 +1,22 @@
-"""Nav2 与底盘之间的失效安全速度门。
+"""Nav2 与底盘之间的最终失效安全速度门。
 
 只有 Nav2 速度命令、地形安全评估和导航健康三条独立心跳都有效且新鲜时才允许非零
-输出。节点不规划路线、不创建新的运动意图，只约束 Nav2 已经计算出的 Twist。它也不替代
-硬件急停、驱动器看门狗或姿态保护，它只是防止 ROS 节点失联后沿用最后一条速度。
+输出。最后再用二维雷达做一个极近距离急停检查，然后直接发布标准 ``/cmd_vel``。
+
+该节点不规划路线、不创建新的运动意图，也不会把可越障目标改成绕行目标；雷达检查只在
+物体已经进入紧急制动距离时兜底。真正的障碍分类、入口对正与越障交接仍分别属于
+OpenCV/点云、Nav2 和 ``TraverseObstacle``。它也不替代硬件急停、驱动器看门狗或姿态
+保护，只防止 ROS 节点失联或近距离碰撞时沿用最后一条速度。
 """
 
-from math import isfinite
+from math import isfinite, pi
 
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32
 
 
@@ -47,8 +52,45 @@ def gated_twist(
     return output
 
 
+def scan_allows_command(
+    scan: LaserScan | None,
+    command: Twist,
+    stop_distance: float,
+    sector_half_angle: float,
+) -> bool:
+    """判断命令方向的极近距离扇区是否仍有制动空间。
+
+    前进只检查正前方、后退只检查正后方；原地旋转检查整圈，因为任意方向过近的物体都
+    可能被机身扫到。无效量程被忽略，但一个有效样本低于阈值就立即拒绝命令。这里使用
+    ``LaserScan`` 自带角度定义，不假设固定 720 点或固定雷达型号。
+    """
+    if scan is None or not scan.ranges:
+        return False
+    linear = float(command.linear.x)
+    angular = float(command.angular.z)
+    if abs(linear) < 1e-6 and abs(angular) < 1e-6:
+        return True
+    threshold = max(0.05, float(stop_distance))
+    half_angle = min(pi, max(0.05, float(sector_half_angle)))
+    check_all = abs(linear) < 1e-6 and abs(angular) >= 1e-6
+    target_angle = 0.0 if linear >= 0.0 else pi
+    valid_samples = 0
+    for index, measured_range in enumerate(scan.ranges):
+        distance = float(measured_range)
+        if not isfinite(distance) or distance < float(scan.range_min):
+            continue
+        angle = float(scan.angle_min) + index * float(scan.angle_increment)
+        # 把相对目标方向的角差折叠到 [-pi, pi]，正确处理后方跨越 ±pi 的扇区。
+        angle_error = (angle - target_angle + pi) % (2.0 * pi) - pi
+        if check_all or abs(angle_error) <= half_angle:
+            valid_samples += 1
+            if distance <= threshold:
+                return False
+    return valid_samples > 0
+
+
 class NavigationSpeedGate(Node):
-    """以 20 Hz 重算导航速度，命令或地形评估任一超时即归零。"""
+    """以 20 Hz 重算最终速度，任一安全输入超时即归零。"""
 
     def __init__(self):
         """建立三路安全心跳，并以固定频率发布经过门控的 Twist。
@@ -58,12 +100,17 @@ class NavigationSpeedGate(Node):
         """
         super().__init__("navigation_speed_gate")
         self.declare_parameter("input_topic", "/cmd_vel_smoothed")
-        self.declare_parameter("output_topic", "/cmd_vel_terrain_safe")
+        self.declare_parameter("output_topic", "/cmd_vel")
         self.declare_parameter("command_timeout", 0.5)
         self.declare_parameter("assessment_timeout", 0.7)
         self.declare_parameter("navigation_health_timeout", 0.5)
         self.declare_parameter("require_navigation_health", True)
         self.declare_parameter("default_speed_limit", 0.0)
+        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("scan_timeout", 0.5)
+        self.declare_parameter("emergency_stop_distance", 0.22)
+        self.declare_parameter("emergency_sector_half_angle", 0.60)
+        self.declare_parameter("require_emergency_scan", True)
 
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value
@@ -96,6 +143,22 @@ class NavigationSpeedGate(Node):
         self.require_navigation_health = bool(
             self.get_parameter("require_navigation_health").value
         )
+        self.scan_timeout = max(
+            0.05, float(self.get_parameter("scan_timeout").value)
+        )
+        self.emergency_stop_distance = max(
+            0.05, float(self.get_parameter("emergency_stop_distance").value)
+        )
+        self.emergency_sector_half_angle = min(
+            pi,
+            max(
+                0.05,
+                float(self.get_parameter("emergency_sector_half_angle").value),
+            ),
+        )
+        self.require_emergency_scan = bool(
+            self.get_parameter("require_emergency_scan").value
+        )
         configured_limit = float(self.get_parameter("default_speed_limit").value)
         self.speed_limit = (
             max(0.0, min(1.0, configured_limit))
@@ -108,6 +171,8 @@ class NavigationSpeedGate(Node):
         self.last_assessment_time = self.get_clock().now()
         self.navigation_healthy = not self.require_navigation_health
         self.last_health_time = None
+        self.latest_scan = None
+        self.last_scan_time = None
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
@@ -116,6 +181,14 @@ class NavigationSpeedGate(Node):
         )
         self.create_subscription(
             Bool, "/navigation/healthy", self.health_callback, 10
+        )
+        self.create_subscription(
+            LaserScan,
+            str(self.get_parameter("scan_topic").value),
+            self.scan_callback,
+            # Gazebo 与常见雷达驱动通常使用传感器 QoS；显式 best-effort 可同时兼容
+            # reliable 发布者，避免“话题存在但急停门收不到扫描”的静默故障。
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT),
         )
         stop_qos = QoSProfile(depth=1)
         stop_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -149,6 +222,11 @@ class NavigationSpeedGate(Node):
         """锁止核心速度链；最终底盘仲裁器还必须用同一信号覆盖手动输入。"""
         self.external_stop = bool(msg.data)
 
+    def scan_callback(self, msg: LaserScan) -> None:
+        """保存最新扫描和接收时刻；具体扇区由当前运动方向决定。"""
+        self.latest_scan = msg
+        self.last_scan_time = self.get_clock().now()
+
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
@@ -158,6 +236,11 @@ class NavigationSpeedGate(Node):
             float("inf")
             if self.last_health_time is None
             else (now - self.last_health_time).nanoseconds / 1e9
+        )
+        scan_age = (
+            float("inf")
+            if self.last_scan_time is None
+            else (now - self.last_scan_time).nanoseconds / 1e9
         )
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
@@ -170,6 +253,18 @@ class NavigationSpeedGate(Node):
             or health_age <= self.health_timeout,
             self.external_stop,
         )
+        # 导航健康监控负责完整的 scan/odom/TF 校验；这里再保留一个局部、可解释的最终
+        # 防撞条件。扫描断流或命令方向 22 cm 内有物体时，只把本周期输出置零。
+        if self.require_emergency_scan and (
+            scan_age > self.scan_timeout
+            or not scan_allows_command(
+                self.latest_scan,
+                output,
+                self.emergency_stop_distance,
+                self.emergency_sector_half_angle,
+            )
+        ):
+            output = Twist()
         self.pub.publish(output)
 
 

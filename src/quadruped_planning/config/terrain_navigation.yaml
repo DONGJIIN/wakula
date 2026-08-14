@@ -39,14 +39,21 @@ terrain_safety_assessor:
 
 navigation_speed_gate:
   ros__parameters:
-    # Nav2 始终是速度来源；本节点只执行新鲜有效的 0..1 比例限制。
+    # Nav2 始终是速度来源；本节点执行心跳、0..1 比例限制和极近距离雷达急停后，直接
+    # 发布标准 /cmd_vel。无需再串接会静默停止发布的额外速度节点。
     input_topic: /cmd_vel_smoothed
-    output_topic: /cmd_vel_terrain_safe
+    output_topic: /cmd_vel
     command_timeout: 0.5
     assessment_timeout: 0.7
     navigation_health_timeout: 0.5
     require_navigation_health: true
     default_speed_limit: 0.0
+    scan_topic: /scan
+    scan_timeout: 0.5
+    # 只作为最后 22 cm 的急停兜底，不参与普通障碍绕行，也不会阻止 Action 越障后端。
+    emergency_stop_distance: 0.22
+    emergency_sector_half_angle: 0.60
+    require_emergency_scan: true
 
 # 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。
 traversal_guidance:

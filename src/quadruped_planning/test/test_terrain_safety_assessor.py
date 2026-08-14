@@ -2,8 +2,9 @@
 
 from geometry_msgs.msg import Twist
 from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
+from sensor_msgs.msg import LaserScan
 
-from quadruped_planning.cmd_vel_gate import gated_twist
+from quadruped_planning.cmd_vel_gate import gated_twist, scan_allows_command
 from quadruped_planning.terrain_safety_assessor import (
     ConservativeAssessmentFilter,
     apply_distance_aware_constraint,
@@ -329,6 +330,29 @@ def test_velocity_gate_requires_fresh_command_and_assessment():
     assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
     assert gated_twist(command, float("nan"), True, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, True, True, True, True).linear.x == 0.0
+
+
+def test_final_velocity_gate_checks_only_the_command_direction():
+    """前后扇区和原地旋转急停应独立，不能把远处比赛障碍提前当成绕行目标。"""
+    scan = LaserScan()
+    scan.angle_min = -3.141592653589793
+    scan.angle_increment = 3.141592653589793 / 4.0
+    scan.range_min = 0.05
+    scan.ranges = [1.0] * 9
+    command = Twist()
+    command.linear.x = 0.2
+    assert scan_allows_command(scan, command, 0.22, 0.60)
+    # 正前方索引 4 进入 22 cm，前进必须停车；后退仍可脱离。
+    scan.ranges[4] = 0.18
+    assert not scan_allows_command(scan, command, 0.22, 0.60)
+    command.linear.x = -0.2
+    assert scan_allows_command(scan, command, 0.22, 0.60)
+    # 后方位于 ±pi 两端；任一端过近时后退被拒绝。
+    scan.ranges[0] = 0.16
+    assert not scan_allows_command(scan, command, 0.22, 0.60)
+    command.linear.x = 0.0
+    command.angular.z = 0.4
+    assert not scan_allows_command(scan, command, 0.22, 0.60)
 
 
 def test_filter_confirms_hazard_and_clearance_but_stops_immediately():

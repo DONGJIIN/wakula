@@ -122,9 +122,14 @@
     <joint name="imu_fixed" type="fixed"><parent>base_link</parent><child>imu_link</child></joint>
 
     <link name="camera_link">
-      <pose>0.40 0 0.40 0 0.24 0</pose><gravity>false</gravity>
+      <!--
+        光心放在机头最前端之外，向下俯视约 14°。相机外观相对光心后移，避免 RGBD
+        射线从自身外壳内部出发而得到单色图或全 Inf 深度。不要在 RGBD 上使用
+        visibility_mask：Gazebo Harmonic 的深度渲染在部分显卡驱动上会把场景一并过滤。
+      -->
+      <pose>0.52 0 0.42 0 0.24 0</pose><gravity>false</gravity>
       <inertial><mass>0.16</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-      <visual name="visual"><visibility_flags>0x02</visibility_flags><geometry><box><size>0.05 0.11 0.045</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
+      <visual name="visual"><visibility_flags>0x02</visibility_flags><pose>-0.04 0 0 0 0 0</pose><geometry><box><size>0.05 0.11 0.045</size></box></geometry><material><diffuse>0.03 0.03 0.04 1</diffuse></material></visual>
       <sensor name="rgbd" type="rgbd_camera">
         <topic>/camera</topic><update_rate>15</update_rate><gz_frame_id>camera_optical_frame</gz_frame_id>
         <camera>

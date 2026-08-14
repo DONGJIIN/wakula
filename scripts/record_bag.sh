@@ -19,5 +19,5 @@ ros2 bag record --output "${bag_root}/${bag_name}" \
   /terrain/navigation_mode /terrain/speed_limit /terrain/visual_assist_active \
   /terrain/navigation_safety \
   /traversal/guidance /traversal/phase /traversal/approach_pose \
-  /cmd_vel_nav /cmd_vel_smoothed /cmd_vel_terrain_safe /cmd_vel \
+  /cmd_vel_nav /cmd_vel_smoothed /cmd_vel \
   /navigation/healthy /diagnostics
