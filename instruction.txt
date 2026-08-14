@@ -279,3 +279,11 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 4. 最后结合 config/*.yaml 注释、行为树 XML 和 quadruped_interfaces/msg 核对参数与接口。
 5. 注释解释“为什么这样做”和安全边界；实际运行合同仍以代码、消息定义和 connect.txt 为准。
 6. 需要场地联调时再看 quadruped_gazebo/worlds 下的 REFERENCE LAYOUT；仿真不得反向成为算法依赖。
+
+九、Isaac Lab 后续开发边界
+----------------------
+强化学习统一采用 Isaac Lab/Isaac Sim，并在独立 NVIDIA GPU 工作站训练；当前仓库不安装
+训练环境，也不在缺少真机质量、惯量和执行器参数时伪造策略。后续先冻结训练与真机共用的
+观测/动作字段，再按平地、坡面、单障碍、连续障碍做课程训练与域随机化。策略部署到 RK3588
+前必须通过离线回放、限幅、超时停车和保护绳验证；策略负责运动控制，不替代现有
+SLAM、Nav2、OpenCV、任务编排及安全链。

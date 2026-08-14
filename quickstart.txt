@@ -21,9 +21,9 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 入口、Action 客户端/合同和后续探索；没有真实服务端时不会抬腿或完成真实跨越。当前 Gazebo
 仅用于 SLAM/Nav2/OpenCV 的场景与接口测试，不能代表四足越障能力。
 
-技术基线：后续强化学习新工程使用 Isaac Lab（Isaac Sim 上层框架），不再使用 NVIDIA
-已经停止支持的 Isaac Gym。训练放在独立 NVIDIA GPU 工作站，RK3588 运行 ROS 2 与部署后的
-策略。当前 Nav2 全局规划继续使用官方 NavFn；D* Lite 不是 Nav2 Jazzy 内置插件且尚无性能
+技术基线：后续强化学习新工程统一使用 Isaac Lab（Isaac Sim 上层框架）。训练放在独立
+NVIDIA GPU 工作站，RK3588 运行 ROS 2 与部署后的策略。当前 Nav2 全局规划继续使用官方
+NavFn；D* Lite 不是 Nav2 Jazzy 内置插件且尚无性能
 证据支持自研替换。真机参数确定后优先对比官方 SmacPlanner2D/SmacPlannerLattice。
 
 二、新电脑完整复现

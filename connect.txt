@@ -367,3 +367,7 @@ LaserScan。相机和点云最好使用同一时间源；硬件同步优先，�
 CrossingCommand/CrossingStatus、hardware/status、joint trajectory、ros2_control controller、
 模拟 SDK、正式比赛状态机或故障注入控制接口。未来真机模块应单独实现 Action 服务端，
 不能让感知话题直接驱动关节。
+
+Isaac Lab 训练/策略接口同样尚未定义。应在真机关节、状态估计和执行器合同确定后，再冻结
+观测向量、动作向量、字段顺序、单位、坐标系、归一化和控制周期；当前阶段不预设 ROS 话题，
+避免训练接口反向污染已经稳定的 SLAM/Nav2/感知通信合同。
