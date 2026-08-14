@@ -11,8 +11,9 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、147 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
-多目标/1 m 窄通道/不可达目标恢复，以及一次“探索→入口→Action→继续探索”在线联调通过。
+当前基线：9 个 ROS 2 包、151 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
+前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
@@ -88,12 +89,16 @@ SLAM 产生 map -> odom。启用地形感知还需：
 一致。在第三个终端按 Ctrl-C，会先锁住自动导航速度并停车，再取消 Action；第一、二条
 进程继续运行。键盘或手柄持续发布时仍可人工接管，不需要重新启动第三条。
 
-该功能要求运动组提供 /traverse_obstacle Action 服务端。仿真时先独立启动场地和
-sim_traverse_obstacle（不包含任何算法）：
+真机要求运动组提供 /traverse_obstacle Action 服务端。仿真时第三个命令检测到 /clock 后
+自动启动通用测试狗的 Action 替身，不再需要第四个常规命令。Gazebo 场地仍独立启动：
 
   ros2 launch quadruped_gazebo robocon_field.launch.py
 
-以下命令只供运动控制开发者单独验证 Action 合同，不是常规运行所需的第四个命令：
+在线探索使用 16 m × 8 m 滚动全局代价地图；任务层只容忍机器人超出最新 SLAM 栅格
+边界 0.30 m 以内的短暂发布滞后，超过后仍停在 WAITING_FOR_MAP。该策略避免仿真越障
+落点仅越界几厘米就永久停止，同时不会放行定位大跳变。
+
+以下命令只供运动控制开发者脱离自主任务单独验证 Action 合同：
 
   ros2 launch quadruped_gazebo sim_traversal_controller.launch.py
 
@@ -262,7 +267,7 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
 
 正常现象：vision=true 时相机短暂缺帧会先等待同步，超过 0.25 s 后自动使用纯点云结果；
 点云也缺失或无效才保持 speed_limit=0。识别 CLEAR 且数据持续新鲜后为 1；
-越障目标在远处先低速 APPROACH/ALIGN，进入 0.75 m 交接区后为 READY 且速度归零；
+越障目标在远处先低速 APPROACH/ALIGN，进入 0.90 m 交接区后为 READY 且速度归零；
 POLE 由 Nav2 低速绕杆。相机证据不能触发腿部动作。`/navigation/healthy` 为 false 或
 断流时速度门也保持零。只有点云时
 使用 vision:=false，决策会自动采用兼容路径。

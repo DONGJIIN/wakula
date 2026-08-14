@@ -54,6 +54,9 @@ def test_nav2_rk3588_budget_keeps_safety_rates_and_bounds_trajectory_samples():
     assert local["update_frequency"] >= 5.0
     assert local["publish_frequency"] >= 2.0
     assert global_map["update_frequency"] >= 1.0
+    assert global_map["rolling_window"] is True
+    assert global_map["width"] >= 14.0
+    assert global_map["height"] >= 6.0
     assert planner["expected_planner_frequency"] >= 1.0
     assert 150 <= dwb["vx_samples"] * dwb["vtheta_samples"] <= 320
     assert 1.2 <= dwb["sim_time"] <= 2.0
@@ -180,6 +183,27 @@ def test_depth_costmap_accepts_low_steps_after_ground_filtering():
     assert source["max_obstacle_height"] > 0.5
 
 
+def test_traversal_handoff_precedes_inflated_costmap_boundary():
+    """越障 Action 必须在 DWB 被障碍膨胀层卡住之前取得控制权。"""
+    with (PACKAGE_ROOT / "config" / "nav2.yaml").open(encoding="utf-8") as stream:
+        nav2 = yaml.safe_load(stream)
+    with (
+        PACKAGE_ROOT.parent / "quadruped_planning" / "config" /
+        "terrain_navigation.yaml"
+    ).open(encoding="utf-8") as stream:
+        terrain = yaml.safe_load(stream)
+    local = nav2["local_costmap"]["local_costmap"]["ros__parameters"]
+    handoff = terrain["traversal_guidance"]["ros__parameters"]["handoff_distance"]
+    hard_stop = terrain["terrain_safety_assessor"]["ros__parameters"][
+        "hard_stop_distance"
+    ]
+    inflated_boundary = (
+        local["robot_radius"] + local["inflation_layer"]["inflation_radius"]
+    )
+    assert handoff == hard_stop
+    assert handoff >= inflated_boundary + 0.10
+
+
 def test_navigation_launch_description_is_constructible():
     """The reduced Nav2 launch entry must remain importable."""
     path = PACKAGE_ROOT / "launch" / "navigation.launch.py"
@@ -299,7 +323,7 @@ def test_core_entry_auto_detects_clock_without_ros2_daemon_cache(monkeypatch):
     spec.loader.exec_module(module)
 
     class Result:
-        stdout = "Type: rosgraph_msgs/msg/Clock\nPublisher count: 1\n"
+        stdout = "/clock\n/map\n"
 
     calls = []
 
@@ -316,7 +340,7 @@ def test_core_entry_auto_detects_clock_without_ros2_daemon_cache(monkeypatch):
 
 
 def test_core_entry_retries_transient_clock_discovery_failure(monkeypatch):
-    """首次 DDS 查询漏报 publisher 时不能立即把 Gazebo 当成真机。"""
+    """首次 DDS 查询漏掉 /clock 时不能立即把 Gazebo 当成真机。"""
     path = PACKAGE_ROOT / "launch" / "slam.launch.py"
     spec = importlib.util.spec_from_file_location("slam_launch_retry", path)
     module = importlib.util.module_from_spec(spec)
@@ -324,12 +348,9 @@ def test_core_entry_retries_transient_clock_discovery_failure(monkeypatch):
 
     class Result:
         def __init__(self, publishers):
-            self.stdout = (
-                "Type: rosgraph_msgs/msg/Clock\n"
-                f"Publisher count: {publishers}\n"
-            )
+            self.stdout = "/clock\n/map\n" if publishers else "/map\n"
 
-    results = iter([Result(0), Result(0), Result(1)])
+    results = iter([Result(0), Result(1)])
     calls = []
 
     def fake_run(command, **kwargs):
@@ -339,7 +360,7 @@ def test_core_entry_retries_transient_clock_discovery_failure(monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
     assert module._robocon_simulation_is_running()
-    assert len(calls) == 3
+    assert len(calls) == 2
     assert all("--no-daemon" in command for command, _kwargs in calls)
 
 
@@ -366,8 +387,8 @@ def test_simulation_entry_locks_clock_and_tf_ownership():
     assert 'package="quadruped_gazebo"' not in source
 
 
-def test_autonomous_entry_keeps_simulator_and_motion_controller_replaceable():
-    """核心入口不创建任务；自主功能必须通过独立入口显式启动。"""
+def test_autonomous_entry_keeps_field_separate_and_selects_sim_action_backend():
+    """核心入口不创建任务；第三入口仅在仿真时补齐可替换 Action 后端。"""
     main = (PACKAGE_ROOT / "launch" / "slam.launch.py").read_text(encoding="utf-8")
     compatibility = (
         PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
@@ -378,8 +399,11 @@ def test_autonomous_entry_keeps_simulator_and_motion_controller_replaceable():
     assert 'executable="autonomous_mission"' in compatibility
     assert '"autostart": True' in compatibility
     assert "IncludeLaunchDescription" not in compatibility
-    assert 'FindPackageShare("quadruped_gazebo")' not in main + compatibility
-    assert "sim_traverse_obstacle" not in main + compatibility
+    assert 'FindPackageShare("quadruped_gazebo")' not in main
+    assert "sim_traverse_obstacle" not in main
+    assert 'package="quadruped_gazebo"' in compatibility
+    assert 'executable="sim_traverse_obstacle"' in compatibility
+    assert '"simulation_traversal_backend"' in compatibility
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

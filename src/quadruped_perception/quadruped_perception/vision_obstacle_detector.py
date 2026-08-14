@@ -23,7 +23,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, String
 
-from quadruped_interfaces.msg import VisionObstacle
+from quadruped_interfaces.msg import NavigationSafety, VisionObstacle
 
 from quadruped_perception.topic_selection import should_accept_source
 
@@ -48,6 +48,15 @@ HINT_DISPLAY_NAMES = {
     "height_bar": "HEIGHT BAR",
     "wall": "WALL",
     "colored_obstacle": "COLORED OBSTACLE",
+}
+GEOMETRY_DISPLAY_NAMES = {
+    NavigationSafety.OBSTACLE_UNKNOWN: "UNKNOWN",
+    NavigationSafety.OBSTACLE_CLEAR: "CLEAR",
+    NavigationSafety.OBSTACLE_STEP: "STEP",
+    NavigationSafety.OBSTACLE_PIT: "PIT",
+    NavigationSafety.OBSTACLE_WALL: "WALL",
+    NavigationSafety.OBSTACLE_BAR: "HEIGHT BAR",
+    NavigationSafety.OBSTACLE_POLE: "POLES",
 }
 
 
@@ -86,6 +95,7 @@ def annotate_detection_frame(
     roi_top_ratio: float,
     roi_bottom_ratio: float,
     roi_side_margin_ratio: float,
+    geometry_label: str = "",
 ) -> np.ndarray:
     """生成供 RViz 调试的标注图，不参与检测或规划决策。
 
@@ -147,9 +157,10 @@ def annotate_detection_frame(
     draw_evidence(raw_evidence, (0, 190, 255), "CANDIDATE", 44)
     draw_evidence(stable_evidence, (0, 255, 0), "CONFIRMED", 68)
     stable_name = HINT_DISPLAY_NAMES.get(stable_evidence.hint, "UNKNOWN")
+    front_name = geometry_label or stable_name
     cv2.putText(
         annotated,
-        f"FRONT: {stable_name} | IMAGE QUALITY: {quality:.2f}",
+        f"FRONT: {front_name} | VISION: {stable_name} | QUALITY: {quality:.2f}",
         (8, 22),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -605,16 +616,10 @@ def detect_obstacle_evidence(
             "wall", 0.54, [box], image_width, image_height
         )
 
-    colored_boxes = orange_boxes + blue_boxes
-    if colored_boxes:
-        box = max(colored_boxes, key=lambda item: item[4])
-        if (
-            box[4] / image_area >= 0.03
-            and box_fill_ratio(box) >= min_color_fill_ratio
-        ):
-            return evidence_from_boxes(
-                "colored_obstacle", 0.55, [box], image_width, image_height
-            )
+    # 单个橙/蓝色块无法区分台阶、桥板、坡面、坑区边框或黄色场地反射。旧逻辑把
+    # 任意大色块稳定确认为 COLORED OBSTACLE，既没有动作语义，又会让 RViz 看起来像
+    # 识别成功。只有横杆、双立柱等具备结构约束的颜色证据才对外发布；其他类别由
+    # 点云几何给出权威名称。
     return ObstacleEvidence()
 
 
@@ -848,6 +853,8 @@ class VisionObstacleDetector(Node):
         self.last_processed_stamp = None
         self.active_topic = None
         self.last_active_image_time = None
+        self.geometry_label = "WAITING FOR DEPTH"
+        self.last_geometry_time = None
         self.feature_pub = self.create_publisher(
             Float32MultiArray, "/vision/color_features", 10
         )
@@ -885,6 +892,12 @@ class VisionObstacleDetector(Node):
             )
             for topic in self.image_topics
         ]
+        self.create_subscription(
+            NavigationSafety,
+            "/terrain/navigation_safety",
+            self.geometry_callback,
+            10,
+        )
         processing_hz = min(
             30.0, max(0.5, float(self.get_parameter("processing_hz").value))
         )
@@ -892,6 +905,15 @@ class VisionObstacleDetector(Node):
         self.get_logger().info(
             f"OpenCV obstacle evidence: {self.image_topics} at {processing_hz:.1f} Hz"
         )
+
+    def geometry_callback(self, msg: NavigationSafety) -> None:
+        """缓存点云融合后的权威类别，仅用于相机调试画面文字，不回灌视觉检测。"""
+        self.geometry_label = (
+            GEOMETRY_DISPLAY_NAMES.get(int(msg.obstacle_type), "UNKNOWN")
+            if msg.perception_valid
+            else "INVALID DEPTH"
+        )
+        self.last_geometry_time = self.get_clock().now()
 
     def _hsv_parameter(self, name: str) -> np.ndarray:
         """读取三通道 HSV 参数并夹紧到 OpenCV uint8 表示范围。"""
@@ -1082,6 +1104,13 @@ class VisionObstacleDetector(Node):
         self.hint_pub.publish(String(data=evidence.hint))
 
         if self.annotated_pub is not None:
+            geometry_label = "WAITING FOR DEPTH"
+            if self.last_geometry_time is not None:
+                geometry_age = (
+                    self.get_clock().now() - self.last_geometry_time
+                ).nanoseconds * 1e-9
+                if 0.0 <= geometry_age <= 1.0:
+                    geometry_label = self.geometry_label
             annotated = annotate_detection_frame(
                 bgr,
                 raw_evidence,
@@ -1090,6 +1119,7 @@ class VisionObstacleDetector(Node):
                 self.roi_top_ratio,
                 self.roi_bottom_ratio,
                 self.roi_side_margin_ratio,
+                geometry_label,
             )
             annotated_msg = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
             annotated_msg.header = msg.header

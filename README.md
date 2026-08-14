@@ -47,7 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，146 项测试通过，并提供一键启动、运行中启停、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，151 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -547,7 +547,14 @@ OpenCV、RViz 和地图继续运行。退出时先通过 `/navigation/autonomy_s
 运行逻辑为：选择未知地图前沿 → Nav2 探索 → 连续确认障碍 → 冻结障碍位置并导航至入口 →
 调用 `/traverse_obstacle` → 成功后登记该障碍并继续下一前沿。前沿目标来自 `/map`，代码不读
 比赛 world 坐标；正式坐标改变不需要修改任务算法。真机必须由运动控制团队实现
-`quadruped_interfaces/action/TraverseObstacle` 服务端，否则任务会保守等待/报告接口不可用。
+`quadruped_interfaces/action/TraverseObstacle` 服务端。第三个命令检测到 `/clock` 时会自动
+启动通用测试狗的平面越障 Action 替身，使三命令仿真能够完成“入口—越障—继续探索”；
+真机时间下不会启动该替身。
+
+入口导航若在已确认比赛障碍的膨胀边界中止，任务层只在最新点云仍指向同一 `map`
+位置且置信度、距离、横偏全部满足守卫时交给 Action，避免永久重试，也不会把普通规划
+失败当成越障条件。Action 成功后继续选择下一前沿。全局代价地图采用 16 m × 8 m 滚动
+窗口；任务层只容忍 0.30 m 的 SLAM 栅格发布滞后，真正离图时仍等待地图恢复。
 
 Gazebo 场地与算法完全分开。仿真时场地只提供测试模型和传感器数据：
 
@@ -556,9 +563,9 @@ ros2 launch quadruped_gazebo robocon_field.launch.py
 ```
 
 然后分别运行核心 `slam.launch.py` 和可选 `autonomous_navigation.launch.py`。Gazebo 入口
-不加载 SLAM、Nav2、OpenCV、自主任务或越障 Action。仓库中的
-`sim_traversal_controller.launch.py` 仅供运动组开发者单独验证 Action 合同，不属于上述三条
-常规运行命令，也不代表真实越障控制器。
+不加载 SLAM、Nav2、OpenCV、自主任务或越障 Action。仿真 Action 替身由第三个命令按
+`/clock` 自动选择，仍不属于 Gazebo 场地入口，也不读取 world 坐标；它只验证流程，不能
+代表真实四足越障能力。
 
 启动 `slam.launch.py` 后先看终端摘要。仿真联调必须显示
 `simulation_detected=true, use_sim_time=true, robot_model=false`；入口会对 `/clock` 做多次
@@ -799,7 +806,7 @@ ros2 topic echo /perception/front_obstacle_name
 |---|---|---|
 | `WALK` | Nav2 速度上限为 1；视觉证据可将上限降至 0.35 | 否 |
 | `POLE` | 速度上限为 0.35，由 Nav2 代价地图规划绕行 | 否 |
-| `STEP` / `PIT` / `WALL` / `BAR` | 远处低速接近入口，随后对正；进入 0.75 m 交接区发布 `READY` 并停车 | 否 |
+| `STEP` / `PIT` / `WALL` / `BAR` | 远处低速接近入口，随后对正；进入 0.90 m 交接区发布 `READY` 并停车 | 否 |
 | 可量测坡面 | 发布坡面越障候选及入口引导；交接区停车 | 否 |
 | 数据断流、TF 失败或字段非法 | 发布 `STOP` 和零速度上限 | 否 |
 
@@ -921,7 +928,7 @@ Jazzy 1.3.12 的 Collision Monitor 在全栈 Ctrl-C 时可能让进程信号清�
 
 融合模式采用非对称防抖：紧急 STOP 立即生效；STEP/CLIMB 需要连续几帧几何证据；向
 更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
-已确认的台阶、坑洞、墙和横杆在 0.75 m 以外保留 0.25 倍低速窗口，让 Nav2 到达入口
+已确认的台阶、坑洞、墙和横杆在 0.90 m 以外保留 0.25 倍低速窗口，让 Nav2 到达入口
 并对正；进入交接区立即归零并发布 READY。立柱属于绕杆导航物体，保持 0.35 倍速度由
 代价地图避碰。坡面会形成越障引导候选，但真机没有运动控制器时仍只能在交接处停车。
 视觉细分类也不能无条件覆盖点云：横杆必须同时具有米制离地净空，立柱必须满足点云窄宽度；

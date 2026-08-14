@@ -18,6 +18,9 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>quadruped_bringup</exec_depend>
   <exec_depend>quadruped_planning</exec_depend>
+  <!-- 仅供 autonomous_navigation.launch.py 在仿真时选择测试 Action 后端；
+       核心 slam.launch.py 不启动或依赖任何 Gazebo 进程。 -->
+  <exec_depend>quadruped_gazebo</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ros2lifecycle</exec_depend>
   <exec_depend>rviz2</exec_depend>

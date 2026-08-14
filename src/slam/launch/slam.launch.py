@@ -4,7 +4,6 @@
 Nav2 是否真正激活则由 readiness monitor 根据 /scan、/odom 和 TF 决定。
 """
 
-import re
 import subprocess
 import time
 
@@ -33,36 +32,29 @@ def package_file(package: str, folder: str, filename: str):
 def _robocon_simulation_is_running() -> bool:
     """重复查询当前 ROS 域的 /clock 发布者，避免 DDS 冷启动时漏判 Gazebo。
 
-    ROS 2 CLI 每次使用 ``--no-daemon`` 都会创建临时 DDS participant。Gazebo 刚启动或同机
-    负载较高时，1 秒内可能尚未发现桥接器；单次查询会把仿真误判为真机，造成传感器时间戳
-    与算法时钟完全不一致。这里最多重试 4 次，只要任一次看到真实发布者就选择仿真时间。
+    ROS 2 CLI 每次使用 ``--no-daemon`` 都会创建临时 DDS participant。直接检查话题列表
+    比等待 ``topic info`` 统计发布者更快；Gazebo 刚启动或同机负载较高时，单次查询仍
+    可能尚未发现桥接器并把仿真误判为真机，造成传感器时间戳
+    与算法时钟完全不一致。这里做 2 次短探测；Gazebo 按推荐顺序先启动时通常首轮命中，
+    真机无 /clock 时也不会再被旧版 4×2 秒查询拖慢十余秒。
     显式传入 true/false 时完全跳过探测。
     """
-    for attempt in range(4):
+    for attempt in range(2):
         try:
             result = subprocess.run(
-                [
-                    "ros2",
-                    "topic",
-                    "info",
-                    "/clock",
-                    "--no-daemon",
-                    "--spin-time",
-                    "2.0",
-                ],
+                ["ros2", "topic", "list", "--no-daemon", "--spin-time", "0.50"],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=2.8,
+                timeout=1.2,
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None
         if result is not None:
-            match = re.search(r"Publisher count:\s*(\d+)", result.stdout)
-            if match and int(match.group(1)) > 0:
+            if "/clock" in result.stdout.splitlines():
                 return True
-        if attempt < 3:
-            time.sleep(0.15)
+        if attempt < 1:
+            time.sleep(0.10)
     return False
 
 

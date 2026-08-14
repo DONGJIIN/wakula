@@ -477,7 +477,7 @@ def select_fused_assessment(
     max_slope: float,
     max_roughness: float,
     vision_speed_scale: float,
-    hard_stop_distance: float = 0.75,
+    hard_stop_distance: float = 0.90,
     hazard_approach_speed: float = 0.25,
 ) -> Assessment:
     """从一条时间同步融合消息生成原子导航评估。"""
@@ -535,7 +535,7 @@ class TerrainSafetyAssessor(Node):
             ("vision_min_confidence", 0.55),
             ("vision_center_margin", 0.20),
             ("vision_speed_scale", 0.35),
-            ("hard_stop_distance", 0.75),
+            ("hard_stop_distance", 0.90),
             ("hazard_approach_speed", 0.25),
             ("future_stamp_tolerance", 0.10),
             ("status_log_period", 1.0),
@@ -588,7 +588,7 @@ class TerrainSafetyAssessor(Node):
         )
         self.vision_speed_scale = self._unit_parameter("vision_speed_scale")
         self.hard_stop_distance = self._positive_parameter(
-            "hard_stop_distance", 0.75
+            "hard_stop_distance", 0.90
         )
         self.hazard_approach_speed = self._unit_parameter(
             "hazard_approach_speed"

@@ -60,7 +60,7 @@ class GuidanceStabilizer:
     """对入口目标做指数平滑，并为 READY 增加连续帧确认和退出迟滞。
 
     点云连通区域的边缘会随视角和缺点轻微变化。若直接按单帧距离/角度切换，停在
-    0.75 m 边界附近时会在 ALIGN 与 READY 间闪烁。这里仅平滑同一障碍的连续量；
+    0.90 m 边界附近时会在 ALIGN 与 READY 间闪烁。这里仅平滑同一障碍的连续量；
     INVALID、障碍类别变化和无越障目标会立即重置，绝不把上一处障碍的入口带到下一处。
     """
 
@@ -324,7 +324,7 @@ class TraversalGuidanceNode(Node):
         defaults = (
             ("input_timeout", 0.8),
             ("approach_start_distance", 1.5),
-            ("handoff_distance", 0.75),
+            ("handoff_distance", 0.90),
             ("alignment_tolerance", 0.10),
             ("max_lateral_target", 0.45),
             ("approach_speed_limit", 0.25),

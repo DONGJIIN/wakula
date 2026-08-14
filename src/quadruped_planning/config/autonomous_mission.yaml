@@ -7,6 +7,8 @@ autonomous_mission:
     frontier_minimum_distance: 0.55
     frontier_maximum_distance: 7.0
     frontier_exclusion_radius: 0.65
+    # 在线地图边界可能比越障后的机体位置滞后几厘米；仅容忍小范围滞后，定位大跳变仍等待。
+    map_boundary_tolerance: 0.30
     # 小于 Nav2 goal checker 容差的入口不再作为导航目标，避免“挪一下就成功”。
     minimum_approach_goal_distance: 0.35
     # Nav2 lifecycle 尚未 ACTIVE 时 Action 会短暂拒绝目标；退避重试而非误记为不可达。
@@ -26,7 +28,8 @@ autonomous_mission:
     traversal_timeout: 25.0
     minimum_obstacle_confidence: 0.55
     obstacle_confirmation_frames: 3
-    completed_obstacle_radius: 1.0
+    # 只对同类别、同位置的已完成障碍去重，避免密集场地中顺带屏蔽相邻的另一类障碍。
+    completed_obstacle_radius: 0.65
     post_traversal_cooldown: 3.0
     # 连续 5 秒找不到前沿才结束，避免 SLAM 刚启动或回环更新期间误判任务完成。
     empty_frontier_confirmations: 20

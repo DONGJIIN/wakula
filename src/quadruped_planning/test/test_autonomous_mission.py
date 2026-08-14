@@ -8,9 +8,13 @@ from quadruped_planning.autonomous_mission import (
     Frontier,
     action_obstacle_type,
     choose_frontier,
+    distance_outside_grid,
     extract_frontiers,
+    nav_status_allows_guarded_handoff,
+    obstacle_was_completed,
     world_to_cell,
 )
+from action_msgs.msg import GoalStatus
 from quadruped_interfaces.action import TraverseObstacle
 from quadruped_interfaces.msg import TraversalGuidance
 
@@ -61,6 +65,9 @@ def test_world_to_cell_rejects_robot_beyond_latest_map_boundary():
     assert world_to_cell(grid, 2.99, 2.49) == (11, 9)
     assert world_to_cell(grid, 3.01, 0.0) is None
     assert world_to_cell(grid, -3.01, 0.0) is None
+    assert distance_outside_grid(grid, 0.0, 0.0) == 0.0
+    assert abs(distance_outside_grid(grid, 3.08, 0.0) - 0.08) < 1e-6
+    assert abs(distance_outside_grid(grid, -3.20, -2.70) - hypot(0.20, 0.20)) < 1e-6
 
 
 def test_slope_handoff_has_an_unambiguous_action_type():
@@ -77,6 +84,23 @@ def test_failed_frontier_exclusion_selects_next_candidate():
     second = Frontier(0.0, 2.0, 15, 2.0, 5.0)
     assert choose_frontier([first, second], [(1.1, 0.0)], 0.5) == second
     assert choose_frontier([first], [(1.0, 0.0)], 0.5) is None
+
+
+def test_only_success_or_obstacle_boundary_abort_can_enter_guarded_handoff():
+    assert nav_status_allows_guarded_handoff(GoalStatus.STATUS_SUCCEEDED)
+    assert nav_status_allows_guarded_handoff(GoalStatus.STATUS_ABORTED)
+    assert not nav_status_allows_guarded_handoff(GoalStatus.STATUS_CANCELED)
+    assert not nav_status_allows_guarded_handoff(GoalStatus.STATUS_UNKNOWN)
+
+
+def test_completed_obstacle_filter_keeps_adjacent_different_type():
+    completed = [(TraversalGuidance.OBSTACLE_STEP, 1.0, 2.0)]
+    assert obstacle_was_completed(
+        TraversalGuidance.OBSTACLE_STEP, (1.2, 2.0), completed, 0.65
+    )
+    assert not obstacle_was_completed(
+        TraversalGuidance.OBSTACLE_BAR, (1.2, 2.0), completed, 0.65
+    )
 
 
 def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():

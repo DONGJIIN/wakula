@@ -46,11 +46,20 @@ def test_annotated_image_visualizes_roi_candidate_and_confirmed_result():
     candidate = ObstacleEvidence("wall", 0.7, 0.5, 0.5, 0.4, 0.5)
     confirmed = ObstacleEvidence("wall", 0.65, 0.5, 0.5, 0.4, 0.5)
     annotated = annotate_detection_frame(
-        source, candidate, confirmed, 0.8, 0.05, 0.95, 0.02
+        source, candidate, confirmed, 0.8, 0.05, 0.95, 0.02, "PIT"
     )
     assert annotated.shape == source.shape
     assert np.count_nonzero(annotated) > 0
     assert np.count_nonzero(source) == 0
+
+
+def test_plain_colored_region_is_not_promoted_to_an_obstacle_class():
+    """无结构单色块不能再被误报成含义不明的 COLORED OBSTACLE。"""
+    orange = np.zeros((240, 320), dtype=np.uint8)
+    empty = np.zeros_like(orange)
+    cv2.rectangle(orange, (60, 90), (260, 220), 255, -1)
+    evidence = detect_obstacle_evidence(orange, empty, empty, 100.0)
+    assert evidence.hint == "none"
 
 
 def test_detects_simple_poles_and_height_bar():

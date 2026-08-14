@@ -58,7 +58,12 @@ class SimTraverseObstacle(Node):
         # SIGINT 可能先使 rcl context 失效，再进入 finally；此时最后一帧零速度已经无法
         # 进入 DDS。主动检查可避免正常关闭被 Ubuntu 误报成节点崩溃。
         if rclpy.ok() and self.publisher is not None:
-            self.publisher.publish(Twist())
+            try:
+                self.publisher.publish(Twist())
+            except Exception:  # rclpy Jazzy 暴露的底层 RCLError 未提供稳定公共导入路径。
+                # ``rclpy.ok()`` 与 publish 之间仍可能收到 launch 的第二个关闭信号；
+                # 这是正常退出竞争，不应把仿真适配器报告成崩溃。
+                pass
 
     def execute(self, handle):
         self.busy = True

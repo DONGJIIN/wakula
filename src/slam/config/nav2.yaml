@@ -21,8 +21,8 @@ controller_server:
       movement_time_allowance: 15.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 越障入口交接距离为 0.75 m；20 cm 默认容差会让 Nav2 在约 0.90 m 处提前成功，
-      # 随后任务层只能反复提交同一入口。10 cm 仍给未标定真机留余量，同时能进入 READY。
+      # 越障入口交接距离为 0.90 m；10 cm 目标容差既给未标定真机留余量，也避免在
+      # 接近入口时反复提交几厘米的伪目标。越障交接由任务层和 Action 完成。
       xy_goal_tolerance: 0.10
       yaw_goal_tolerance: 0.12
       stateful: true
@@ -196,6 +196,12 @@ global_costmap:
       resolution: 0.05
       robot_radius: 0.30
       track_unknown_space: true
+      # 在线探索时 SLAM 地图边界会紧贴最近激光端点。滚动窗口始终覆盖机器人附近，
+      # 避免越障落点仅越出旧地图几厘米就让全局代价地图永久报 out of bounds。
+      # 16 m × 8 m 覆盖当前 14 m × 6 m 比赛场，同时只以 1 Hz 更新以控制 RK3588 开销。
+      rolling_window: true
+      width: 16
+      height: 8
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"

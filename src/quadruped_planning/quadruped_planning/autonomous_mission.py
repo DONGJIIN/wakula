@@ -82,6 +82,28 @@ def world_to_cell(grid: OccupancyGrid, x: float, y: float) -> Optional[Tuple[int
     return (col, row) if 0 <= col < width and 0 <= row < height else None
 
 
+def distance_outside_grid(grid: OccupancyGrid, x: float, y: float) -> float:
+    """返回点到当前地图矩形的最短外部距离；位于地图内时为 0。
+
+    SLAM Toolbox 的 OccupancyGrid 边界由已插入的扫描端点决定，探索或仿真越障后，
+    ``base_link`` 可能短暂比最后一个端点多走几厘米。该连续量让任务层只容忍很小的
+    发布滞后，而不是把任意地图外位置误当成可导航区域。
+    """
+    resolution = float(grid.info.resolution)
+    width, height = int(grid.info.width), int(grid.info.height)
+    if resolution <= 0.0 or width <= 0 or height <= 0:
+        return float("inf")
+    origin = grid.info.origin.position
+    dx, dy = float(x) - origin.x, float(y) - origin.y
+    yaw = _origin_yaw(grid)
+    local_x = cos(yaw) * dx + sin(yaw) * dy
+    local_y = -sin(yaw) * dx + cos(yaw) * dy
+    maximum_x, maximum_y = width * resolution, height * resolution
+    outside_x = max(0.0, -local_x, local_x - maximum_x)
+    outside_y = max(0.0, -local_y, local_y - maximum_y)
+    return hypot(outside_x, outside_y)
+
+
 def extract_frontiers(
     grid: OccupancyGrid,
     robot_xy: Tuple[float, float],
@@ -180,6 +202,33 @@ def action_obstacle_type(guidance: TraversalGuidance) -> int:
     return int(guidance.obstacle_type)
 
 
+def nav_status_allows_guarded_handoff(status: int) -> bool:
+    """入口导航成功或被障碍边界中止时，允许继续执行严格的同障碍交叉验证。
+
+    ``ABORTED`` 本身绝不代表可以越障；调用方仍必须验证最新点云、置信度、障碍在
+    ``map`` 中的位置、距离和横向偏差。它只解决一个比赛特有矛盾：Nav2 正确地把实体
+    障碍加入代价地图后，可能恰好在越障控制器应接管的位置中止局部跟踪。
+    """
+    return int(status) in (
+        GoalStatus.STATUS_SUCCEEDED,
+        GoalStatus.STATUS_ABORTED,
+    )
+
+
+def obstacle_was_completed(
+    obstacle_type: int,
+    position: Tuple[float, float],
+    completed: Sequence[Tuple[int, float, float]],
+    radius: float,
+) -> bool:
+    """仅去重同类别、同位置的已完成障碍，保留密集场地中的相邻异类目标。"""
+    return any(
+        int(completed_type) == int(obstacle_type)
+        and hypot(position[0] - x, position[1] - y) <= max(0.0, float(radius))
+        for completed_type, x, y in completed
+    )
+
+
 class AutonomousMission(Node):
     """可运行时启停的探索—对正—越障状态机。"""
 
@@ -189,6 +238,9 @@ class AutonomousMission(Node):
             "autostart": False, "map_timeout": 2.0, "guidance_timeout": 1.0,
             "frontier_minimum_cells": 8, "frontier_minimum_distance": 0.55,
             "frontier_maximum_distance": 7.0, "frontier_exclusion_radius": 0.65,
+            # 仅容忍 SLAM 栅格边界比机器人滞后几厘米；配合滚动全局代价地图继续选择
+            # 已知自由前沿。超过该距离仍进入 WAITING_FOR_MAP，防止定位跳变后盲目规划。
+            "map_boundary_tolerance": 0.30,
             # DWB 默认 goal checker 容差约 0.25 m。比它更近的入口目标会被立即判成功，
             # 表现为机器人只挪一下就停；任务层直接进入受控交接，不发送伪 Nav2 目标。
             "minimum_approach_goal_distance": 0.35,
@@ -200,7 +252,7 @@ class AutonomousMission(Node):
             "obstacle_lock_radius": 0.75,
             "goal_timeout": 45.0, "traversal_timeout": 15.0,
             "minimum_obstacle_confidence": 0.55, "obstacle_confirmation_frames": 3,
-            "completed_obstacle_radius": 1.0, "post_traversal_cooldown": 3.0,
+            "completed_obstacle_radius": 0.65, "post_traversal_cooldown": 3.0,
             "empty_frontier_confirmations": 20,
         }
         for name, value in defaults.items():
@@ -330,7 +382,15 @@ class AutonomousMission(Node):
         if position is None:
             return True
         radius = float(self.params["completed_obstacle_radius"])
-        return any(hypot(position[0] - x, position[1] - y) <= radius for x, y in self.completed_obstacles)
+        obstacle_type = int(msg.obstacle_type)
+        # 比赛障碍可能紧邻布置。旧实现只存坐标，会把刚完成台阶旁的限高杆一并屏蔽；
+        # 现在只有“相同几何类别 + 相同 map 邻域”才视为已完成目标。
+        return obstacle_was_completed(
+            obstacle_type,
+            position,
+            self.completed_obstacles,
+            radius,
+        )
 
     def _matches_obstacle_lock(self, msg):
         """判断最新证据是否仍指向当前正在接近的同一障碍。"""
@@ -434,7 +494,6 @@ class AutonomousMission(Node):
         if (
             self.enabled
             and purpose == "approach"
-            and succeeded
             and obstacle_position is not None
         ):
             latest = self.guidance
@@ -460,7 +519,7 @@ class AutonomousMission(Node):
                 and abs(latest.lateral_offset)
                 <= float(self.params["handoff_fallback_max_lateral"])
             )
-            if same_entry:
+            if same_entry and nav_status_allows_guarded_handoff(status):
                 now = time.monotonic()
                 if not self.traverse_client.server_is_ready():
                     self._hold_for_traversal_controller(
@@ -472,7 +531,8 @@ class AutonomousMission(Node):
                     self.pending_traverse_started = now
                     self.state = "HANDOFF"
                     self._publish_state(
-                        "Nav2 reached confirmed entry; guarded handoff fallback"
+                        "confirmed entry reached; guarded handoff fallback "
+                        f"after Nav2 status={status}"
                     )
                 return
             # 到达旧入口后若最新证据已经属于另一个障碍，释放目标锁再探索，不能把新障碍
@@ -535,6 +595,11 @@ class AutonomousMission(Node):
         wrapped = future.result()
         success = bool(wrapped and wrapped.result.success)
         completed_position = self.pending_traverse_position
+        completed_type = (
+            int(self.pending_traverse.obstacle_type)
+            if self.pending_traverse is not None
+            else TraversalGuidance.OBSTACLE_UNKNOWN
+        )
         self.traverse_handle, self.pending_traverse = None, None
         self.traverse_cancel_pending = False
         self.pending_traverse_position = None
@@ -542,7 +607,9 @@ class AutonomousMission(Node):
             self.state = "STOPPED"
             return
         if success and completed_position is not None:
-            self.completed_obstacles.append(completed_position)
+            self.completed_obstacles.append(
+                (completed_type, completed_position[0], completed_position[1])
+            )
             self.locked_obstacle_position = None
             self.cooldown_until = time.monotonic() + float(self.params["post_traversal_cooldown"])
             self.state = "EXPLORING"
@@ -577,7 +644,11 @@ class AutonomousMission(Node):
         if robot is None:
             self.state = "WAITING_FOR_INPUTS"
             return
-        if world_to_cell(self.map_msg, robot[0], robot[1]) is None:
+        if (
+            world_to_cell(self.map_msg, robot[0], robot[1]) is None
+            and distance_outside_grid(self.map_msg, robot[0], robot[1])
+            > float(self.params["map_boundary_tolerance"])
+        ):
             self.state = "WAITING_FOR_MAP"
             return
         if self.traverse_handle is not None or self.traverse_send_pending:
