@@ -10,7 +10,7 @@ Nav2 擅长在自由空间中到达一个位姿，但不能完成抬腿、攀爬
 """
 
 from dataclasses import dataclass, replace
-from math import atan2, cos, isfinite, sin
+from math import atan2, cos, isfinite, pi, sin, tan
 import signal
 
 from geometry_msgs.msg import PoseStamped
@@ -37,6 +37,35 @@ PHASE_NAMES = {
 }
 
 
+def surface_axis_heading(slope_pitch: float, slope_roll: float) -> float | None:
+    """Return the nearest yaw correction that aligns the body with a surface.
+
+    The two input angles are the forward and lateral components of the fitted
+    plane in ``base_link``.  Their gradient gives the uphill direction.  Since
+    uphill and downhill share the same traversable axis, the result is folded
+    into ``[-pi/2, pi/2]``.  Flat/noisy or wall-like fits return ``None``.
+
+    This is deliberately geometry-only.  It fixes diagonal approaches to a
+    ramp or stair without reading a Gazebo entity name or a competition-map
+    coordinate, so the same logic can be calibrated on the future real robot.
+    """
+    pitch = float(slope_pitch)
+    roll = float(slope_roll)
+    if not isfinite(pitch) or not isfinite(roll):
+        return None
+    gradient = (tan(pitch) ** 2 + tan(roll) ** 2) ** 0.5
+    # Ignore less than about 6 degrees as plane-fit noise and more than about
+    # 25 degrees as a mixed vertical face rather than an approach surface.
+    if gradient < tan(0.105) or gradient > tan(0.436):
+        return None
+    heading = atan2(tan(roll), tan(pitch))
+    while heading > pi * 0.5:
+        heading -= pi
+    while heading < -pi * 0.5:
+        heading += pi
+    return heading
+
+
 @dataclass(frozen=True)
 class GuidanceDecision:
     """与 ROS 消息一一对应的可测试决策结果。"""
@@ -60,7 +89,7 @@ class GuidanceStabilizer:
     """对入口目标做指数平滑，并为 READY 增加连续帧确认和退出迟滞。
 
     点云连通区域的边缘会随视角和缺点轻微变化。若直接按单帧距离/角度切换，停在
-    0.90 m 边界附近时会在 ALIGN 与 READY 间闪烁。这里仅平滑同一障碍的连续量；
+    1.20 m 边界附近时会在 ALIGN 与 READY 间闪烁。这里仅平滑同一障碍的连续量；
     INVALID、障碍类别变化和无越障目标会立即重置，绝不把上一处障碍的入口带到下一处。
     """
 
@@ -230,15 +259,18 @@ def compute_guidance(
 ) -> GuidanceDecision:
     """生成保守入口目标；任何非法字段都返回 INVALID/零速度。
 
-    STEP/PIT/WALL/BAR 需要越障控制器；POLE 是需要 Nav2 从旁边绕行的实体，不触发
-    接管。CLEAR 仅在点云确认坡度超过阈值时按坡面越障候选处理。这里的“需要”只是
-    候选接口，最终仍应由比赛路线/预期障碍类型进行授权，不能直接解释为腿部命令。
+    STEP/PIT/WALL/BAR 需要越障控制器。POLE 只有在量测高度达到规则绕杆立柱的
+    0.45 m 下限时才进入比赛绕杆流程；约 0.32 m 的限高杆支柱仍是普通导航线索，避免
+    只看到一侧支柱时误启动绕杆。CLEAR 仅在点云确认坡度超过阈值时按坡面候选处理。
+    这里的“需要”只是任务 Action 候选，不能直接解释为关节或足端命令。
     """
     values = (
         safety.confidence,
         safety.distance,
         safety.lateral_offset,
         safety.slope_pitch,
+        safety.structure_heading,
+        safety.structure_heading_confidence,
         approach_start_distance,
         handoff_distance,
         alignment_tolerance,
@@ -256,6 +288,7 @@ def compute_guidance(
         or float(safety.confidence) < 0.0
         or float(safety.confidence) > 1.0
         or float(safety.distance) < 0.0
+        or not 0.0 <= float(safety.structure_heading_confidence) <= 1.0
         or handoff_distance <= 0.0
         or approach_start_distance < handoff_distance
     ):
@@ -266,7 +299,16 @@ def compute_guidance(
         and abs(float(safety.slope_pitch))
         >= max(0.0, minimum_slope_for_handoff)
     )
-    traversal_required = obstacle_type in TRAVERSAL_TYPES or slope_candidate
+    pole_course_candidate = (
+        obstacle_type == NavigationSafety.OBSTACLE_POLE
+        and isfinite(float(safety.obstacle_height))
+        and float(safety.obstacle_height) >= 0.45
+    )
+    traversal_required = (
+        obstacle_type in TRAVERSAL_TYPES
+        or slope_candidate
+        or pole_course_candidate
+    )
     if not traversal_required:
         return GuidanceDecision(
             phase=TraversalGuidance.PHASE_CLEAR,
@@ -285,7 +327,24 @@ def compute_guidance(
     lateral_target = max(
         -abs(max_lateral_target), min(abs(max_lateral_target), lateral)
     )
-    heading = atan2(lateral_target, max(distance, 0.05))
+    centre_heading = atan2(lateral_target, max(distance, 0.05))
+    # For a sloped STEP/CLEAR surface the plane axis is stronger orientation
+    # evidence than the centre of its visible crop.  Keep a small centring
+    # term so an axis-aligned robot also moves into the usable obstacle width.
+    axis_heading = surface_axis_heading(
+        float(safety.slope_pitch), float(safety.slope_roll)
+    )
+    # Flat stairs, bridge decks and walls have no useful plane gradient.  For
+    # those cases the point-cloud front-edge normal is the stronger evidence.
+    # A conservative confidence gate prevents sparse/isotropic clusters from
+    # overriding the well-tested centre-of-obstacle fallback.
+    if axis_heading is None and float(safety.structure_heading_confidence) >= 0.45:
+        axis_heading = float(safety.structure_heading)
+    heading = (
+        centre_heading
+        if axis_heading is None
+        else axis_heading + 0.25 * centre_heading
+    )
     approach_x = max(0.0, distance - handoff_distance)
     approach_y = lateral_target
 
@@ -323,8 +382,8 @@ class TraversalGuidanceNode(Node):
         super().__init__("traversal_guidance")
         defaults = (
             ("input_timeout", 0.8),
-            ("approach_start_distance", 1.5),
-            ("handoff_distance", 0.90),
+            ("approach_start_distance", 1.8),
+            ("handoff_distance", 1.20),
             ("alignment_tolerance", 0.10),
             ("max_lateral_target", 0.45),
             ("approach_speed_limit", 0.25),

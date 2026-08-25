@@ -28,6 +28,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 from quadruped_interfaces.msg import TerrainFeatures
 from quadruped_perception.terrain_geometry import (
+    CLEAR,
     analyze_terrain_geometry,
     navigation_obstacle_points,
 )
@@ -124,6 +125,8 @@ def filter_roi_points(
     x_max: float,
     y_half: float,
     max_points: int,
+    z_min: float = -1.0,
+    z_max: float = 2.0,
 ) -> np.ndarray:
     """返回前向 ROI 内有限且数量有上限的 ``Nx3`` 点数组。
 
@@ -135,6 +138,12 @@ def filter_roi_points(
     valid = np.isfinite(points).all(axis=1)
     valid &= (points[:, 0] >= x_min) & (points[:, 0] <= x_max)
     valid &= np.abs(points[:, 1]) <= y_half
+    # 深度相机无回波像素有时不是 NaN/Inf，而是驱动定义的极大有限值。经过相机到
+    # base_link 的轴变换后，这些值可能落在前向 XY ROI 内，却产生几十米高的伪障碍。
+    # 垂向物理窗口既过滤这类哨兵值，也避免天空/机器人自身进入地形拟合；上下界作为
+    # 参数暴露，换真机或大型机器人时可按安装高度修改。
+    lower_z, upper_z = sorted((float(z_min), float(z_max)))
+    valid &= (points[:, 2] >= lower_z) & (points[:, 2] <= upper_z)
     points = points[valid]
     if len(points) > max_points:
         indices = np.linspace(0, len(points) - 1, max_points, dtype=np.int64)
@@ -214,13 +223,17 @@ def compute_terrain_features(
     max_slope: float,
     max_roughness: float,
     min_points: int,
+    z_min: float = -1.0,
+    z_max: float = 2.0,
 ) -> Optional[TerrainResult]:
     """从 ``base_link`` 下的 ``Nx3`` 点云计算固定九字段地形特征。
 
     返回 ``None`` 表示证据不足，调用者不得将其解释为平地；在线节点会停止发布新特征，
     规划节点随后依靠传感器超时进入 STOP。该 fail-closed 行为是安全合同的一部分。
     """
-    points = filter_roi_points(xyz, x_min, x_max, y_half, max_points)
+    points = filter_roi_points(
+        xyz, x_min, x_max, y_half, max_points, z_min=z_min, z_max=z_max
+    )
     if len(points) < min_points:
         return None
 
@@ -299,6 +312,8 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("front_x_min", 0.10)
         self.declare_parameter("front_x_max", 2.50)
         self.declare_parameter("lateral_half_width", 0.55)
+        self.declare_parameter("front_z_min", -1.0)
+        self.declare_parameter("front_z_max", 2.0)
         self.declare_parameter("ground_percentile", 0.10)
         self.declare_parameter("warning_height", 0.07)
         self.declare_parameter("critical_height", 0.28)
@@ -345,6 +360,13 @@ class TerrainAnalyzer(Node):
         self.y_half = max(
             0.0, float(self.get_parameter("lateral_half_width").value)
         )
+        self.z_min = float(self.get_parameter("front_z_min").value)
+        self.z_max = float(self.get_parameter("front_z_max").value)
+        if self.z_max <= self.z_min:
+            self.get_logger().warning(
+                "front_z_max must exceed front_z_min; using a 3.0 m vertical ROI"
+            )
+            self.z_max = self.z_min + 3.0
         self.ground_percentile = float(
             self.get_parameter("ground_percentile").value
         )
@@ -392,6 +414,9 @@ class TerrainAnalyzer(Node):
         self.last_processed_stamp = None
         self.active_topic = None
         self.last_active_cloud_time = None
+        # 只由明确 CLEAR 帧更新，用于近场被墙/平台完全遮挡时防止地面层翻转。
+        # 它属于同一传感器会话的短期几何先验，不含场地坐标或障碍标签。
+        self.ground_height_prior = None
         self.features_pub = self.create_publisher(
             Float32MultiArray, "/terrain/features", 10
         )
@@ -466,6 +491,8 @@ class TerrainAnalyzer(Node):
             self.x_max,
             self.y_half,
             self.max_points,
+            z_min=self.z_min,
+            z_max=self.z_max,
         )
         result = compute_terrain_features(
             xyz,
@@ -478,6 +505,8 @@ class TerrainAnalyzer(Node):
             self.max_slope,
             self.max_roughness,
             self.min_points,
+            z_min=self.z_min,
+            z_max=self.z_max,
         )
         if result is None:
             self._publish_diagnostic(
@@ -499,7 +528,16 @@ class TerrainAnalyzer(Node):
             min_cells=max(8, self.min_points // 3),
             min_region_cells=self.min_connected_region_cells,
             min_region_points=self.min_connected_region_points,
+            ground_height_prior=self.ground_height_prior,
         )
+        if geometry.valid and geometry.obstacle_type == CLEAR:
+            if self.ground_height_prior is None:
+                self.ground_height_prior = float(geometry.ground_height)
+            else:
+                self.ground_height_prior = (
+                    0.90 * float(self.ground_height_prior)
+                    + 0.10 * float(geometry.ground_height)
+                )
         # 代价地图只接收相对局部地面凸起的点。平地和可通行坡面不会再因为 base_link
         # 高度或坡度而被标成障碍；几何无效时输出空云，同时安全评估保持 STOP。
         nav2_points = navigation_obstacle_points(
@@ -547,6 +585,10 @@ class TerrainAnalyzer(Node):
         )
         typed.lateral_offset = float(geometry.lateral_offset)
         typed.width = float(geometry.width)
+        typed.structure_heading = float(geometry.structure_heading)
+        typed.structure_heading_confidence = float(
+            geometry.structure_heading_confidence
+        )
         typed.clearance_height = float(geometry.clearance_height)
         typed.valid_points = int(valid_points)
         self.typed_features_pub.publish(typed)

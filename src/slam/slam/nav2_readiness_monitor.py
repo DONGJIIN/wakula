@@ -1,6 +1,10 @@
 """在最小传感器与定位 TF 就绪后才启动 Nav2 生命周期节点。"""
 
+import time
+
 import rclpy
+from lifecycle_msgs.msg import State, Transition
+from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
@@ -17,6 +21,23 @@ from slam.navigation_health_monitor import (
     scan_is_valid,
     source_stamp_is_current,
 )
+
+
+def slam_transition_for_state(state_id: int):
+    """Return the safe next SLAM lifecycle transition, or ``None``.
+
+    ``slam_toolbox`` can occasionally remain unconfigured/inactive when a complete
+    Gazebo + SLAM stack is stopped and restarted quickly.  Nav2 must not be started
+    without ``map -> odom``, but simply waiting for that TF creates a permanent
+    startup deadlock.  This small pure function deliberately permits only the two
+    forward startup transitions; it never cleans up, shuts down or otherwise takes
+    ownership of an already active external localization source.
+    """
+    if int(state_id) == State.PRIMARY_STATE_UNCONFIGURED:
+        return Transition.TRANSITION_CONFIGURE
+    if int(state_id) == State.PRIMARY_STATE_INACTIVE:
+        return Transition.TRANSITION_ACTIVATE
+    return None
 
 
 class Nav2ReadinessMonitor(Node):
@@ -40,11 +61,27 @@ class Nav2ReadinessMonitor(Node):
             "lifecycle_service",
             "/lifecycle_manager_navigation/manage_nodes",
         )
+        self.declare_parameter("recover_slam_toolbox", True)
+        self.declare_parameter("slam_lifecycle_node", "/slam_toolbox")
+        self.declare_parameter("slam_recovery_period", 2.0)
+        self.declare_parameter("slam_recovery_startup_grace", 4.0)
         self.global_frame = str(self.get_parameter("global_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         scan_topic = str(self.get_parameter("scan_topic").value)
         odom_topic = str(self.get_parameter("odom_topic").value)
         service_name = str(self.get_parameter("lifecycle_service").value)
+        slam_lifecycle_node = str(
+            self.get_parameter("slam_lifecycle_node").value
+        ).rstrip("/")
+        self.recover_slam_toolbox = bool(
+            self.get_parameter("recover_slam_toolbox").value
+        )
+        self.slam_recovery_period = max(
+            0.5, float(self.get_parameter("slam_recovery_period").value)
+        )
+        self.slam_recovery_startup_grace = max(
+            0.0, float(self.get_parameter("slam_recovery_startup_grace").value)
+        )
         self.sensor_timeout = max(
             0.1, float(self.get_parameter("sensor_timeout").value)
         )
@@ -76,6 +113,11 @@ class Nav2ReadinessMonitor(Node):
         self.last_odom_time = None
         self.startup_requested = False
         self.startup_complete = False
+        self.slam_recovery_pending = False
+        self.last_slam_recovery_time = None
+        # 启动宽限必须使用墙钟。仿真 /clock 可能在节点刚创建时已经运行数分钟，若用
+        # ROS 时间会把启动年龄误算成数分钟并立刻与 launch 自带生命周期事件竞争。
+        self.node_started_monotonic = time.monotonic()
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.create_subscription(
@@ -92,6 +134,12 @@ class Nav2ReadinessMonitor(Node):
         )
         self.lifecycle_client = self.create_client(
             ManageLifecycleNodes, service_name
+        )
+        self.slam_get_state_client = self.create_client(
+            GetState, f"{slam_lifecycle_node}/get_state"
+        )
+        self.slam_change_state_client = self.create_client(
+            ChangeState, f"{slam_lifecycle_node}/change_state"
         )
         self.create_timer(0.5, self._check_readiness)
         self.get_logger().info(
@@ -166,6 +214,11 @@ class Nav2ReadinessMonitor(Node):
             Time(),
             timeout=Duration(seconds=0.05),
         )
+        # Only inspect SLAM after both physical inputs are healthy.  If an external
+        # localization stack is used and no slam_toolbox service exists this branch
+        # is a harmless no-op; the normal TF readiness contract remains unchanged.
+        if scan_ready and odom_ready and not tf_ready:
+            self._recover_slam_if_needed()
         if not (scan_ready and odom_ready and tf_ready):
             missing = []
             if not scan_ready:
@@ -192,6 +245,66 @@ class Nav2ReadinessMonitor(Node):
         future = self.lifecycle_client.call_async(request)
         future.add_done_callback(self._startup_response)
         self.get_logger().info("Inputs ready; requesting Nav2 activation")
+
+    def _recover_slam_if_needed(self) -> None:
+        """Advance a stalled local ``slam_toolbox`` to active, one step at a time."""
+        if not self.recover_slam_toolbox or self.slam_recovery_pending:
+            return
+        now = self.get_clock().now()
+        # 正常启动本来就需要短暂 configure/activate；过早查询会与 launch 自带的
+        # lifecycle 事件竞争并在 slam_toolbox 端留下无意义的 service timeout 警告。
+        startup_age = time.monotonic() - self.node_started_monotonic
+        if startup_age < self.slam_recovery_startup_grace:
+            return
+        if self.last_slam_recovery_time is not None:
+            age = (now - self.last_slam_recovery_time).nanoseconds / 1e9
+            if age < self.slam_recovery_period:
+                return
+        if not self.slam_get_state_client.service_is_ready():
+            return
+        self.slam_recovery_pending = True
+        self.last_slam_recovery_time = now
+        future = self.slam_get_state_client.call_async(GetState.Request())
+        future.add_done_callback(self._slam_state_response)
+
+    def _slam_state_response(self, future) -> None:
+        """Read lifecycle state and request only the next safe startup transition."""
+        try:
+            response = future.result()
+            transition_id = slam_transition_for_state(response.current_state.id)
+        except Exception as exc:
+            self.slam_recovery_pending = False
+            self.get_logger().warning(f"Unable to inspect slam_toolbox state: {exc}")
+            return
+        if transition_id is None:
+            self.slam_recovery_pending = False
+            return
+        if not self.slam_change_state_client.service_is_ready():
+            self.slam_recovery_pending = False
+            return
+        request = ChangeState.Request()
+        request.transition.id = int(transition_id)
+        future = self.slam_change_state_client.call_async(request)
+        future.add_done_callback(self._slam_transition_response)
+        transition_name = (
+            "configure"
+            if transition_id == Transition.TRANSITION_CONFIGURE
+            else "activate"
+        )
+        self.get_logger().warning(
+            f"map TF is absent; requesting slam_toolbox {transition_name} recovery"
+        )
+
+    def _slam_transition_response(self, future) -> None:
+        """Release the recovery guard so the next timer can verify actual state."""
+        try:
+            response = future.result()
+            if not response.success:
+                self.get_logger().error("slam_toolbox lifecycle recovery was rejected")
+        except Exception as exc:
+            self.get_logger().error(f"slam_toolbox lifecycle recovery failed: {exc}")
+        finally:
+            self.slam_recovery_pending = False
 
     def _startup_response(self, future) -> None:
         """处理 lifecycle STARTUP 服务结果，并允许失败后重试。"""

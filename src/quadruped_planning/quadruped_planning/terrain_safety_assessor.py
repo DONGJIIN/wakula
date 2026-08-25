@@ -115,6 +115,58 @@ class ConservativeAssessmentFilter:
         return self.current
 
 
+class ObstacleNameStabilizer:
+    """Stabilize the human/machine semantic name without hiding invalid data.
+
+    Metric obstacle geometry is already filtered separately, but the final
+    competition name combines several thresholds (height, width, roughness,
+    slope and optional OpenCV evidence).  A value sitting on one threshold can
+    otherwise alternate between, for example, ``高墙`` and ``T 字形台阶`` on
+    consecutive frames.  Requiring repeated equal names makes the terminal
+    output and the mission semantic vote describe the same persistent object.
+
+    Invalid perception is never delayed: it immediately clears the old name.
+    Returning to clear ground uses its own, normally slightly longer count so
+    a single missing depth frame cannot erase an obstacle being approached.
+    """
+
+    def __init__(
+        self,
+        confirmation_frames: int = 3,
+        clear_frames: int = 4,
+        initial: str = "感知数据无效",
+    ):
+        self.confirmation_frames = max(1, int(confirmation_frames))
+        self.clear_frames = max(1, int(clear_frames))
+        self.current = str(initial)
+        self.pending = ""
+        self.pending_count = 0
+
+    def update(self, candidate: str, perception_valid: bool) -> str:
+        """Return the stable name for one observation."""
+        value = str(candidate).strip() or "未知障碍"
+        if not perception_valid:
+            self.current = "感知数据无效"
+            self.pending = ""
+            self.pending_count = 0
+            return self.current
+        if value == self.current:
+            self.pending = ""
+            self.pending_count = 0
+            return self.current
+        if value == self.pending:
+            self.pending_count += 1
+        else:
+            self.pending = value
+            self.pending_count = 1
+        required = self.clear_frames if value == "无障碍" else self.confirmation_frames
+        if self.pending_count >= required:
+            self.current = value
+            self.pending = ""
+            self.pending_count = 0
+        return self.current
+
+
 def validate_height_thresholds(
     step: float, climb: float, stop: float
 ) -> Tuple[float, float, float]:
@@ -162,6 +214,25 @@ def front_obstacle_name_zh(
         return "感知数据无效"
 
     obstacle_type = int(safety.obstacle_type)
+    # The blue/white competition crossbar is much more specific than a local
+    # orange STEP crop.  During a full-field run the same height-bar entry was
+    # geometrically correct for several seconds, then near clipping changed
+    # it to STEP/T while OpenCV still reported 横杆.  Preserve the bar semantic
+    # only within its published 0.30 m clearance neighbourhood; generic color
+    # evidence outside these metric bounds still cannot affect control.
+    if (
+        visual_hint_name == "横杆"
+        and obstacle_type
+        in {
+            NavigationSafety.OBSTACLE_BAR,
+            NavigationSafety.OBSTACLE_POLE,
+            NavigationSafety.OBSTACLE_STEP,
+            NavigationSafety.OBSTACLE_WALL,
+        }
+        and 0.28 <= float(safety.obstacle_height) <= 0.39
+        and float(safety.width) <= 1.25
+    ):
+        return "限高杆"
     if obstacle_type == NavigationSafety.OBSTACLE_POLE:
         # 限高杆的横梁很细，单帧深度云常先只看到一侧 0.32 m 支柱而归入 POLE；规则
         # 绕杆立柱高度不低于 0.50 m。用量测高度给出接近阶段名称，比直接误报绕杆可靠。
@@ -172,16 +243,97 @@ def front_obstacle_name_zh(
             return "限高杆（支柱结构）"
         return "直角绕杆区（立柱）"
     if obstacle_type == NavigationSafety.OBSTACLE_PIT:
+        pitch_degrees = abs(degrees(float(safety.slope_pitch)))
+        # 低矮高墙完全遮住墙后近地面后，地面拟合可能跨过墙顶并把墙前区域解释为
+        # 约 0.40 m 的负落差。该轮廓比 T 台的踏面落差更深，横向连续宽度接近规则
+        # 中的 1 m，且保留中等边缘残差；因此可恢复高墙语义。这里仍只看实时几何，
+        # 不读取 Gazebo 中的障碍名称或位置。
+        if (
+            12.0 <= pitch_degrees <= 22.0
+            and float(safety.pit_depth) > 0.36
+            and float(safety.obstacle_height) < 0.10
+            and 0.035 <= float(safety.roughness) <= 0.070
+            and 0.80 <= float(safety.width) <= 1.20
+        ):
+            return "高墙（遮挡轮廓）"
+        # 正对 T 字台阶的近场点云会用较高踏面拟合参考平面，较低踏面因此暂时落入
+        # ``negative`` 区域并被粗分类为 PIT。它与真正坑洞的关键差异是 16～24° 的
+        # 连续阶梯趋势、约 0.3 m 高差和接近 1 m 的规则宽度。先恢复为 T 台语义，
+        # 否则任务会把台阶错误交给坑洞流程。
+        if (
+            16.0 <= pitch_degrees <= 24.0
+            and 0.20 <= float(safety.pit_depth) <= 0.36
+            and float(safety.obstacle_height) < 0.12
+            and 0.025 <= float(safety.roughness) <= 0.065
+            and 0.75 <= float(safety.width) <= 1.25
+        ):
+            return "T 字形台阶"
+        # 木桥 A 的 14° 入口坡只占深度 ROI 的一部分时，地面先验会把坡脚解释成浅坑，
+        # 但坡向、低残差和约 1 m 通道宽仍然稳定。这里输出比赛语义而不读取 world pose。
+        if (
+            7.0 <= pitch_degrees <= 16.0
+            and 0.08 <= float(safety.pit_depth) <= 0.22
+            and float(safety.obstacle_height) < 0.08
+            and float(safety.roughness) < 0.035
+            and 0.75 <= float(safety.width) <= 1.25
+        ):
+            return "木桥 A（14°入口坡）"
+        # 障碍赛场地边缘后的低层支撑/地面，在深度云中同样会表现为约 0.10～0.13 m
+        # 的负台阶。真正砂砾坑还有 0.15 m 护栏、碎石/木料起伏；若前缘几乎没有凸起、
+        # 表面也很平整，就只能确认“场地边界”，不得把它计成砂砾坑并执行越障。
+        if (
+            float(safety.obstacle_height) < 0.06
+            # 深度相机越靠近赛台边缘，部分射线会直接看向更低的参考地面甚至无回波，
+            # 量得的“坑深”没有可靠上限。真实砂砾坑入口必须同时出现 0.15 m 护栏、
+            # 填料正凸起或明显粗糙度；因此平整、无凸起轮廓只要求负落差下限。
+            and float(safety.pit_depth) >= 0.07
+            and float(safety.roughness) < 0.045
+            # 靠近边界并带横偏时，前向 ROI 只能截到约 0.4 m 的边缘，不能要求一帧
+            # 必须看到完整 0.8 m 宽度。真正砂砾坑的 0.15 m 护栏会产生更高正凸起，
+            # 且坑底/碎料通常更深或更粗糙；联合深度、平整度后放宽宽度不会把它误杀。
+            and float(safety.width) >= 0.35
+            and pitch_degrees < 5.0
+        ):
+            return "场地边界（禁止越界）"
+        # 若同一帧同时含有 0.30 m 以上的大块正凸起，它就不是规则中仅 0.15 m 护栏、
+        # 0.10 m 深的砂砾坑。常见来源是从木桥/T 台侧面观察时，地面拟合跨过高平台，
+        # 低处被粗分为 PIT。保持“待结构确认”可让机器人换角度继续观察，绝不能把桥
+        # 误记成坑并执行一次错误的比赛任务。桥 B 正常入口平台约 0.20 m，不受影响。
+        if (
+            # 规则坑入口护栏约 0.15 m、木桥 B 桥板约 0.20 m；达到 0.22 m 后更像
+            # 高踏板/台阶的混合视图，不能继续向坑或桥板缝规则下落。
+            float(safety.obstacle_height) >= 0.22
+            and float(safety.width) >= 0.55
+        ):
+            return "台阶或木桥踏板（待结构确认）"
         # 木桥 B 的 0.40 m 周期性板间隙也会形成真实负高度回波。若同时看到较宽、
         # 约 0.20 m 高且表面较平整的桥板，就不能把它叫作砂砾坑。阈值来自规则尺寸，
         # 并已用 Gazebo 点云联调；真机仍需用 rosbag 校准，而不是读取场地坐标。
         if (
-            float(safety.obstacle_height) >= 0.17
-            and float(safety.pit_depth) >= 0.15
-            and float(safety.width) >= 0.75
+            float(safety.pit_depth) >= 0.14
+            and float(safety.width) >= 0.65
+            # 板缝后必须同时看到高于地面的桥板。只凭“平整负落差”会把黄色赛台外沿
+            # （实测高度约 0、负落差约 0.15 m）误报成木桥 B。
+            and float(safety.obstacle_height) >= 0.12
         ):
             return "木桥 B（桥板间隙）"
-        return "砂砾与碎木坑"
+        # 不能把通用 PIT 粗分类直接等同于比赛中的砂砾/碎木坑。PIT 只说明 ROI 内存在
+        # 负高度回波；桥板缝、台阶侧面、赛台边缘以及被高平台遮挡的地面都可能产生
+        # 相同结果。比赛坑必须额外看到约 0.15 m 的入口护栏/碎料正凸起和粗糙表面。
+        # 这里采用规则尺寸附近的联合门限；不满足时保留“待确认”，让任务换角度观察，
+        # 而不是错误执行一次越障并把它计入八项任务。
+        if (
+            0.10 <= float(safety.obstacle_height) <= 0.21
+            and 0.07 <= float(safety.pit_depth) <= 0.22
+            # Gazebo 的确定性砂砾/碎木样件在 5 Hz 体素化后实测残差约 0.025 m；
+            # 真坑的护栏高、坑深和正凸起已经由其余条件共同确认，因此不应再要求
+            # 4.5 cm 的单一粗糙度。平整场地边界没有 0.10 m 以上正凸起，不会通过。
+            and float(safety.roughness) >= 0.020
+            and 0.35 <= float(safety.width) <= 1.40
+            and pitch_degrees < 7.0
+        ):
+            return "砂砾与碎木坑"
+        return "坑洞（结构待确认）"
     if obstacle_type == NavigationSafety.OBSTACLE_BAR:
         # 坑区 0.15 m 护栏在斜视点云中可能产生悬空外观；高度明显低于 0.30 m
         # 限高横杆时只标为坑区入口线索，等待后续负高度回波确认。
@@ -189,19 +341,65 @@ def front_obstacle_name_zh(
             float(safety.obstacle_height) < 0.28
             and float(safety.clearance_height) >= 0.15
         ):
-            return "坑区护栏（后方地形待确认）"
+            # 坑护栏是约 0.60 m 的局部窄结构；1 m 宽的高墙在雷达从侧面扫到
+            # 顶边时也可能暂时具有“下方有空间”的 BAR 外观。横向连续宽度可在
+            # 不依赖场地坐标的前提下区分二者。
+            if float(safety.width) < 0.80:
+                return "坑区护栏（后方地形待确认）"
+            return "高墙（顶边轮廓）"
         return "限高杆"
     if obstacle_type == NavigationSafety.OBSTACLE_WALL:
+        # 相机斜向看出黄色赛台时，会把台面到场外地面的落差重建成约 0.25 m 的平整
+        # 立面。高墙规则高度约 0.30 m，且墙体边缘不会同时满足“低于 0.28 m、近水平、
+        # 低残差”的组合；先识别边界，避免在赛台东/西侧反复调用高墙 Action。
+        if (
+            float(safety.obstacle_height) < 0.28
+            and float(safety.width) >= 0.55
+            and float(safety.roughness) < 0.045
+            and abs(degrees(float(safety.slope_pitch))) < 5.0
+        ):
+            return "场地边界（禁止越界）"
+        # 砂砾坑 0.15 m 护栏在斜视时会与碎料合成约 0.25 m 的窄粗糙立面；高墙则有
+        # 约 1 m 连续横宽。先保留坑区入口语义，等待后方负高度确认。
+        if (
+            float(safety.obstacle_height) < 0.28
+            and float(safety.width) < 0.80
+            and float(safety.roughness) >= 0.045
+        ):
+            return "坑区护栏（后方地形待确认）"
         return "高墙"
     if obstacle_type == NavigationSafety.OBSTACLE_STEP:
+        # 木桥 B 的分段踏板实测为约 0.26 m 高、1.1 m 宽；周期板缝会把稳健残差提高到
+        # 0.09 m 左右。它比砂砾坑 0.15 m 护栏更高、更宽，整体坡向仍近水平，因此应
+        # 在通用“粗糙低台阶=坑区”规则之前确认，防止把桥板间隙误叫成砂砾坑。
+        if (
+            # Full-field calibration: true segmented planks produced either
+            # 0.20 m / 0.080 m or 0.261 m / 0.093 m height/roughness.  The
+            # 10-degree ramp side that triggered a false bridge-B action was
+            # 0.277 m / 0.059 m with no periodic gaps.  Tightening both bounds
+            # separates them without using the world pose.
+            0.19 <= float(safety.obstacle_height) <= 0.27
+            and float(safety.width) >= 0.80
+            and float(safety.roughness) >= 0.070
+            and abs(degrees(float(safety.slope_pitch))) < 5.0
+        ):
+            return "木桥 B（分段桥板）"
         # 进入砂砾/碎木区后，护栏与低洼填料会在单帧栅格中表现成约 0.15～0.25 m
         # 的低台阶，同时粗糙度显著升高。该组合接续上面的“坑区护栏”接近提示。
         if (
-            0.12 <= float(safety.obstacle_height) <= 0.28
+            0.12 <= float(safety.obstacle_height) <= 0.19
             and float(safety.roughness) >= 0.05
             and float(safety.width) >= 0.40
         ):
             return "砂砾与碎木坑（入口/填料区）"
+        # 两座木桥的起终平台都是约 0.20 m 高、1 m 宽的平整结构。低残差可将它们与
+        # T 台的多级踏面区分；A/B 在看见坡或板间隙前仍保持 unknown 语义。
+        if (
+            0.17 <= float(safety.obstacle_height) <= 0.27
+            and float(safety.roughness) < 0.025
+            and float(safety.width) >= 0.80
+        ):
+            return "木桥平台（A/B 待结构确认）"
         # 高墙已有独立 WALL 分支。正对 T 台时，近场平面会穿过多级踏面，使“相对平面
         # 高度”小于总高；但它仍表现为宽障碍、7～15° 的阶梯总体趋势和明显离散残差。
         # 同时支持直接看到 0.40 m 顶部与只看到多级踏面的两种距离，避免再误叫坑区。
@@ -209,8 +407,32 @@ def front_obstacle_name_zh(
             7.0 <= abs(degrees(float(safety.slope_pitch))) <= 15.0
             and float(safety.roughness) >= 0.02
         )
-        if float(safety.width) >= 0.60 and (
-            float(safety.obstacle_height) >= 0.32 or stepped_profile
+        # T 台总高 0.40 m，但前一级踏面在近场常只量到约 0.30 m，且相机斜视只能覆盖
+        # 约 0.5 m 横宽。它仍比桥面高、表面离散残差也更大；这组联合条件避免要求
+        # “一帧必须看全 1.9 m 台面”而漏检真实入口。
+        partial_t_stair = (
+            float(safety.width) >= 0.45
+            and float(safety.obstacle_height) >= 0.28
+            and float(safety.roughness) >= 0.04
+        )
+        if (
+            # Gazebo 正对 0.40 m T 台时，深度离散和倾斜观察会量到约 0.455 m；
+            # 0.48 m 仍远低于需要独立真机能力确认的高墙/大型未知障碍范围。
+            float(safety.obstacle_height) <= 0.48
+            # 同样高度但残差更大的轮廓来自 10° 主坡的长侧边；高于 0.43 m 时用
+            # 顶面平整度区分，避免把侧向坡面错误计为 T 台任务。
+            and (
+                float(safety.obstacle_height) <= 0.43
+                or float(safety.roughness) <= 0.045
+            )
+            # 主斜坡从长侧观察时会形成与高台阶相似的橘色立面，但坡面法向在机体
+            # 横向留下接近 10° 的 roll；真正从入口对准 T 台时 roll 应接近零。
+            # 这是坐标无关的几何校验，不读取 Gazebo 障碍名称或位置。
+            and abs(degrees(float(safety.slope_roll))) <= 6.0
+            and ((float(safety.width) >= 0.60 and (
+                float(safety.obstacle_height) >= 0.32 or stepped_profile
+            ))
+            or partial_t_stair)
         ):
             return "T 字形台阶"
         return "台阶或木桥踏板（待结构确认）"
@@ -222,7 +444,9 @@ def front_obstacle_name_zh(
         if roll_degrees <= 6.0 and 7.0 <= pitch_degrees <= 12.0:
             return "主斜坡（10°坡面）"
         if roll_degrees <= 6.0 and 12.0 < pitch_degrees <= 17.0:
-            return "木桥引坡（14°，A/B 待结构确认）"
+            # 规则中的连续 14° 入口坡属于木桥 A；木桥 B 由周期分段桥板识别。这里仍
+            # 只使用坡角和横滚，不读取仿真名称或场地位置，因此可直接迁移到真机。
+            return "木桥 A（14°入口坡）"
         # 有色视觉候选没有尺度，不能改变速度或声称具体障碍；但 UI 也不能把它吞掉后
         # 错报“无障碍”。名称明确表达点云尚未完成结构分类。
         if visual_hint_name:
@@ -232,15 +456,22 @@ def front_obstacle_name_zh(
 
 
 def format_front_obstacle_status(
-    safety: NavigationSafety, visual_hint_name: str = ""
+    safety: NavigationSafety,
+    visual_hint_name: str = "",
+    resolved_name: str = "",
 ) -> str:
     """生成一行可读状态，明确这是前向 ROI 的融合判断而非全场物体列表。"""
-    name = front_obstacle_name_zh(safety, visual_hint_name)
+    name = str(resolved_name) or front_obstacle_name_zh(safety, visual_hint_name)
     mode = MODE_NAMES.get(int(safety.mode), "UNKNOWN")
     geometry_is_clear = (
         int(safety.obstacle_type) == NavigationSafety.OBSTACLE_CLEAR
     )
-    if safety.visual_assist_active and visual_hint_name and geometry_is_clear:
+    if (
+        not resolved_name
+        and safety.visual_assist_active
+        and visual_hint_name
+        and geometry_is_clear
+    ):
         # 主名称直接回答“正前方是什么”；括号明确它尚不是点云尺度结论。
         name = f"视觉疑似{visual_hint_name}（点云未确认）"
         vision = "已介入限速"
@@ -457,6 +688,8 @@ def fused_observation_valid(
         msg.distance,
         msg.lateral_offset,
         msg.width,
+        msg.structure_heading,
+        msg.structure_heading_confidence,
         msg.clearance_height,
     )
     confidence_limit = max(0.0, min(1.0, float(min_confidence)))
@@ -470,6 +703,7 @@ def fused_observation_valid(
         and float(msg.roughness) >= 0.0
         and float(msg.distance) >= 0.0
         and float(msg.width) >= 0.0
+        and 0.0 <= float(msg.structure_heading_confidence) <= 1.0
         and float(msg.clearance_height) >= 0.0
         and int(msg.valid_points) >= max(1, int(min_points))
     )
@@ -485,7 +719,7 @@ def select_fused_assessment(
     max_slope: float,
     max_roughness: float,
     vision_speed_scale: float,
-    hard_stop_distance: float = 0.90,
+    hard_stop_distance: float = 1.20,
     hazard_approach_speed: float = 0.25,
 ) -> Assessment:
     """从一条时间同步融合消息生成原子导航评估。"""
@@ -543,7 +777,7 @@ class TerrainSafetyAssessor(Node):
             ("vision_min_confidence", 0.55),
             ("vision_center_margin", 0.20),
             ("vision_speed_scale", 0.35),
-            ("hard_stop_distance", 0.90),
+            ("hard_stop_distance", 1.20),
             ("hazard_approach_speed", 0.25),
             ("future_stamp_tolerance", 0.10),
             ("status_log_period", 1.0),
@@ -553,6 +787,8 @@ class TerrainSafetyAssessor(Node):
         self.declare_parameter("prefer_fused_obstacle", True)
         self.declare_parameter("clear_confirmation_frames", 5)
         self.declare_parameter("hazard_confirmation_frames", 3)
+        self.declare_parameter("name_confirmation_frames", 3)
+        self.declare_parameter("name_clear_frames", 4)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("output_frame", "base_link")
 
@@ -596,7 +832,7 @@ class TerrainSafetyAssessor(Node):
         )
         self.vision_speed_scale = self._unit_parameter("vision_speed_scale")
         self.hard_stop_distance = self._positive_parameter(
-            "hard_stop_distance", 0.90
+            "hard_stop_distance", 1.20
         )
         self.hazard_approach_speed = self._unit_parameter(
             "hazard_approach_speed"
@@ -609,6 +845,10 @@ class TerrainSafetyAssessor(Node):
             int(self.get_parameter("clear_confirmation_frames").value),
             ("STOP", 0.0),
             int(self.get_parameter("hazard_confirmation_frames").value),
+        )
+        self.name_stabilizer = ObstacleNameStabilizer(
+            int(self.get_parameter("name_confirmation_frames").value),
+            int(self.get_parameter("name_clear_frames").value),
         )
 
         self.mode_pub = self.create_publisher(
@@ -903,6 +1143,15 @@ class TerrainSafetyAssessor(Node):
             )
             safety.lateral_offset = finite_or_zero(observation.lateral_offset)
             safety.width = nonnegative_finite_or_zero(observation.width)
+            safety.structure_heading = finite_or_zero(
+                observation.structure_heading
+            )
+            safety.structure_heading_confidence = min(
+                1.0,
+                nonnegative_finite_or_zero(
+                    observation.structure_heading_confidence
+                ),
+            )
             safety.clearance_height = nonnegative_finite_or_zero(
                 observation.clearance_height
             )
@@ -920,13 +1169,16 @@ class TerrainSafetyAssessor(Node):
             and int(safety.obstacle_type) == NavigationSafety.OBSTACLE_CLEAR
         ):
             obstacle_name = f"视觉疑似{visual_hint_name}（点云未确认）"
+        obstacle_name = self.name_stabilizer.update(
+            obstacle_name, bool(safety.perception_valid)
+        )
         self.front_obstacle_name_pub.publish(String(data=obstacle_name))
 
         # 类别/模式变化立即打印；稳定状态每秒刷新一次。这样终端始终能看到当前结果，
         # 又不会按 10 Hz 感知帧率刷屏。数值不参与变化签名，由周期日志展示最新测量。
         status_signature = (
             bool(safety.perception_valid),
-            int(safety.obstacle_type),
+            obstacle_name,
             int(safety.mode),
             bool(safety.visual_assist_active),
             visual_hint_name,
@@ -942,7 +1194,9 @@ class TerrainSafetyAssessor(Node):
             or log_age >= self.status_log_period
         ):
             self.get_logger().info(
-                format_front_obstacle_status(safety, visual_hint_name)
+                format_front_obstacle_status(
+                    safety, visual_hint_name, resolved_name=obstacle_name
+                )
             )
             self.last_obstacle_status = status_signature
             self.last_status_log_time = now

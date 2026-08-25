@@ -22,6 +22,10 @@ terrain_analyzer:
     # 2.5 m 让终端在低速接近障碍时提前给出名称；不是全场物体列表。
     front_x_max: 2.50
     lateral_half_width: 0.55
+    # 丢弃深度驱动以极大有限值表示的无回波点。范围相对 base_link，真机按传感器
+    # 安装高度和最高可见障碍调整；当前比赛结构均位于该窗口内。
+    front_z_min: -1.00
+    front_z_max: 2.00
 
     # ---------- 旧特征接口与通行性阈值 ----------
     ground_percentile: 0.10

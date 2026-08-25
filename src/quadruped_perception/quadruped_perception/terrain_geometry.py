@@ -36,6 +36,8 @@ class GeometryEstimate:
     distance: float = 0.0
     lateral_offset: float = 0.0
     width: float = 0.0
+    structure_heading: float = 0.0
+    structure_heading_confidence: float = 0.0
     clearance_height: float = 0.0
     valid_points: int = 0
 
@@ -160,7 +162,14 @@ def _dominant_ground_mask(cells: np.ndarray, bin_size: float) -> np.ndarray:
     bins = np.floor((z - origin) / bin_size).astype(np.int32)
     voting_bins = bins[anchor_mask] if np.count_nonzero(anchor_mask) >= 6 else bins
     values, counts = np.unique(voting_bins, return_counts=True)
-    dominant = values[int(np.argmax(counts))]
+    # 近距离面对墙/高台时，其顶面可能在图像中占据的栅格比脚下地面更多；直接选最大
+    # 高度箱会把墙顶当成地面，并把真正地面反报为深坑。地面应是近场“最低且得到足够
+    # 连续支持”的表面：候选至少六格且达到最大箱的 20%。零散低飞点达不到门限，真实
+    # 地面即使被障碍部分遮挡仍能胜出；机器人已经位于平台时，近场没有更低支持层，
+    # 自然仍选择平台。该规则不假定 base_link 的绝对安装高度。
+    support_threshold = max(6, int(math.ceil(float(np.max(counts)) * 0.20)))
+    supported = values[counts >= support_threshold]
+    dominant = int(np.min(supported)) if len(supported) else values[int(np.argmax(counts))]
     # 相邻一个高度箱也纳入拟合，容许缓坡和深度噪声。
     return np.abs(bins - dominant) <= 1
 
@@ -250,6 +259,63 @@ def _region_has_support(
     ) >= max(4, int(min_region_points))
 
 
+def obstacle_front_heading(
+    selected_cells: np.ndarray,
+    distance: float,
+    cell_size: float,
+) -> tuple[float, float]:
+    """Estimate the traversal normal of the nearest obstacle edge.
+
+    A flat bridge or stair has almost no plane gradient, so slope pitch/roll
+    cannot tell the mission which way to face.  The nearest boundary, however,
+    is normally a line across the obstacle entrance.  PCA finds that line's
+    tangent and the perpendicular is the desired crossing direction.  The
+    normal is folded toward the robot's forward half-plane, yielding a body
+    relative correction in ``[-pi/2, pi/2]``.
+
+    Only a narrow band behind the measured front is used.  This deliberately
+    ignores the full platform footprint: its long axis can be distorted by
+    occlusion, T-shaped geometry, or a neighbouring obstacle.  Ambiguous,
+    nearly point-like, or isotropic samples return zero confidence so downstream
+    code falls back to centring rather than inventing an orientation.
+    """
+    cells = np.asarray(selected_cells, dtype=np.float64)
+    if cells.ndim != 2 or cells.shape[1] < 2 or len(cells) < 4:
+        return 0.0, 0.0
+    band_depth = max(0.16, 3.5 * max(0.02, float(cell_size)))
+    front = cells[
+        (cells[:, 0] >= float(distance) - max(0.02, float(cell_size)))
+        & (cells[:, 0] <= float(distance) + band_depth)
+    ]
+    if len(front) < 4:
+        return 0.0, 0.0
+    xy = front[:, :2]
+    centered = xy - np.mean(xy, axis=0)
+    covariance = centered.T @ centered / max(1, len(centered) - 1)
+    values, vectors = np.linalg.eigh(covariance)
+    major_value = max(0.0, float(values[1]))
+    minor_value = max(0.0, float(values[0]))
+    tangent = vectors[:, 1]
+    tangent_span = float(np.ptp(centered @ tangent))
+    normal = np.asarray((-tangent[1], tangent[0]), dtype=np.float64)
+    # Both normals describe the same entrance line.  Select the one that points
+    # most forward, then fold numerical boundary cases into the documented range.
+    if normal[0] < 0.0:
+        normal = -normal
+    heading = math.atan2(float(normal[1]), float(normal[0]))
+    while heading > math.pi * 0.5:
+        heading -= math.pi
+    while heading < -math.pi * 0.5:
+        heading += math.pi
+    anisotropy = (major_value - minor_value) / max(major_value, 1e-9)
+    span_score = min(1.0, tangent_span / 0.45)
+    sample_score = min(1.0, len(front) / 10.0)
+    confidence = float(np.clip(anisotropy * span_score * sample_score, 0.0, 1.0))
+    if tangent_span < max(0.15, 2.5 * float(cell_size)) or confidence < 0.25:
+        return 0.0, 0.0
+    return heading, confidence
+
+
 def analyze_terrain_geometry(
     xyz: np.ndarray,
     *,
@@ -262,6 +328,7 @@ def analyze_terrain_geometry(
     min_cells: int = 12,
     min_region_cells: int = 3,
     min_region_points: int = 12,
+    ground_height_prior: float | None = None,
 ) -> GeometryEstimate:
     """分割地面并识别台阶、坑洞、墙面、横杆和立柱。
 
@@ -279,6 +346,36 @@ def analyze_terrain_geometry(
     if np.count_nonzero(ground_mask) < max(6, min_cells // 2):
         return GeometryEstimate(valid_points=len(points))
     a, b, c, roughness = _fit_plane(cells[ground_mask])
+    # 在连续运行中，base_link 下的脚下地面高度不会在一帧内突变 20～30 cm。若近场
+    # 被墙顶或平台前缘完全遮住，当前直方图可能只剩障碍表面；使用上一段明确可通行
+    # 地面的高度作短期锚点，可把该表面恢复为“正高度障碍”而不是倒置成坑。prior 仅由
+    # TerrainAnalyzer 的 CLEAR 帧更新，离线纯函数调用不提供时保持原有无状态行为。
+    prior_is_valid = (
+        ground_height_prior is not None
+        and math.isfinite(float(ground_height_prior))
+    )
+    if prior_is_valid and abs(c - float(ground_height_prior)) > max(
+        0.10, 3.0 * ground_bin_size
+    ):
+        prior_mask = np.abs(cells[:, 3] - float(ground_height_prior)) <= max(
+            0.04, 2.0 * ground_bin_size
+        )
+        if np.count_nonzero(prior_mask) >= 6:
+            ground_mask = prior_mask
+            a, b, c, roughness = _fit_plane(cells[ground_mask])
+        else:
+            # 地面被完全遮挡时不能拟合坡度；保留先验高度并把坡度置零是比虚构深坑更
+            # 保守且可解释的选择，随后正障碍仍需连通格/原始点数门限才能成立。
+            a, b, c, roughness = 0.0, 0.0, float(ground_height_prior), 0.0
+    # 当相机贴近墙面启动、地面完全不可见时，高度栅格可能把近乎竖直的墙面错拟合成
+    # “地面”，从而在 2.5 m ROI 内外推出几十米相对高度。比赛坡面远低于 45°；超过
+    # 该物理上限时，有可靠 CLEAR 历史就退回水平高度先验，否则本帧直接判无效并由
+    # 上层 fail-closed 停车，绝不发布荒谬尺寸参与语义识别。
+    if math.hypot(float(a), float(b)) > 1.0:
+        if prior_is_valid:
+            a, b, c, roughness = 0.0, 0.0, float(ground_height_prior), 0.0
+        else:
+            return GeometryEstimate(valid_points=len(points))
     # 用首次平面把同一坡面上落入其他高度箱的地面格吸收回来，再稳健重拟合。
     # 这一步可避免长坡因直方图被切成多个高度层而只使用一小段地面。
     initial_plane = a * cells[:, 0] + b * cells[:, 1] + c
@@ -304,6 +401,8 @@ def analyze_terrain_geometry(
     width = 0.0
     lateral_offset = 0.0
     clearance = 0.0
+    structure_heading = 0.0
+    structure_heading_confidence = 0.0
 
     negative_region = _largest_connected_region(cells, negative, cell_size)
     positive_region = _largest_connected_region(cells, positive, cell_size)
@@ -341,6 +440,9 @@ def analyze_terrain_geometry(
         # 和只看到障碍一侧更稳定，后续可直接计算入口对正角。
         lateral_offset = float(np.median(selected[:, 1]))
         width = float(np.ptp(selected[:, 1]) + cell_size)
+        structure_heading, structure_heading_confidence = obstacle_front_heading(
+            selected, distance, cell_size
+        )
         confidence = min(0.96, 0.42 + 0.07 * len(selected))
     elif positive_supported or narrow_positive_supported:
         narrow_only = narrow_positive_supported and not positive_supported
@@ -352,6 +454,9 @@ def analyze_terrain_geometry(
         distance = float(np.quantile(selected_cells[:, 0], 0.10))
         lateral_offset = float(np.median(selected_cells[:, 1]))
         width = float(np.ptp(selected_cells[:, 1]) + cell_size)
+        structure_heading, structure_heading_confidence = obstacle_front_heading(
+            selected_cells, distance, cell_size
+        )
         # 宽连续凸起还可能是从平地开始的 10° 主斜坡或 14° 木桥引坡。只拟合最近的
         # 0.9 m 候选表面，并同时要求足够 x/y 跨度和低残差；阶梯的离散高度平台即使
         # 总体呈上升趋势，也会因平面残差过大而继续进入 STEP 分支。
@@ -385,7 +490,12 @@ def analyze_terrain_geometry(
                     slope_pitch=surface_pitch,
                     slope_roll=surface_roll,
                     roughness=surface_roughness,
-                    distance=float(np.max(points[:, 0])),
+                    # 坡面仍然需要一个真实入口距离供任务层对正和 Action 交接。旧值
+                    # 使用 ROI 最远点（通常恒为 2.5 m），机器人即使抵达坡脚也不会
+                    # 进入 READY，只会反复提交同一个 Nav2 目标直至超时。
+                    distance=max(0.0, distance),
+                    structure_heading=structure_heading,
+                    structure_heading_confidence=structure_heading_confidence,
                     valid_points=len(points),
                 )
         # 只看障碍前缘附近的原始点，利用垂直/横向跨度区分几何类别。
@@ -398,7 +508,47 @@ def analyze_terrain_geometry(
         )
         elevated_front = front[front_relative >= step_height]
         elevated_relative = front_relative[front_relative >= step_height]
-        if len(elevated_front) >= 8:
+        # 正视薄墙时 RGB-D 可能只能返回墙顶而缺少垂直立面，导致下面的 z_span 不足。
+        # 高度图仍能可靠看出“达到墙高、横向连续、沿前进方向很薄”；台阶/平台的踏面
+        # 在 x 方向明显更深。该补充判据解决规则 0.30 m 高墙被降级成 STEP 的实测样本。
+        positive_x_span = float(np.ptp(selected_cells[:, 0]))
+        # 仅用 x 方向厚度只能识别“正对”薄墙：机器人斜看墙面时，墙的长边同时投影到
+        # x/y，positive_x_span 会随视角增大并被错误降级成 STEP。对正高度连通区的 XY
+        # 做 PCA，最小主轴上的跨度就是与朝向无关的物体厚度。平台/台阶在两个方向都
+        # 有明显面积，最小跨度较大；规则高墙约 0.10 m 厚，斜视时仍保持薄轮廓。
+        xy = selected_cells[:, :2]
+        oriented_thickness = float("inf")
+        if len(xy) >= 3:
+            centered_xy = xy - np.mean(xy, axis=0)
+            covariance = centered_xy.T @ centered_xy / max(1, len(xy) - 1)
+            _values, vectors = np.linalg.eigh(covariance)
+            minor_axis = vectors[:, 0]
+            oriented_thickness = float(np.ptp(centered_xy @ minor_axis))
+        # 横杆下方仍能看到地面，同一 XY 格的低分位接近地平面；实体墙会遮挡其脚下
+        # 地面，正回波格的低分位也被抬高。该可见性差异可区分“薄墙顶边”和悬空横杆。
+        ground_coexistence = float(
+            np.mean(
+                np.abs(low_relative[positive_region])
+                <= max(0.04, 2.0 * ground_bin_size)
+            )
+        )
+        thin_wall_profile = (
+            obstacle_height >= wall_height
+            and width >= 0.25
+            and min(positive_x_span, oriented_thickness)
+            <= max(0.18, 3.0 * cell_size)
+            and supporting_points >= min_region_points
+            and ground_coexistence < 0.35
+        )
+        if thin_wall_profile:
+            obstacle_type = WALL
+            confidence = min(
+                0.96,
+                0.62
+                + min(0.18, obstacle_height * 0.45)
+                + min(0.12, width * 0.12),
+            )
+        elif len(elevated_front) >= 8:
             # 只在高于地面的物体回波中估计净空；否则同一 x 切片的地面点会把横杆
             # low_clearance 拉到零，导致比赛中的悬空细杆被误判为墙。
             z_span = float(np.ptp(elevated_front[:, 2]))
@@ -445,6 +595,9 @@ def analyze_terrain_geometry(
                     and peak_prominence >= 1.80
                     and band_y_span >= 0.25
                     and band_x_span <= 0.20
+                    # 横杆整体沿前进方向也必须很薄。台阶顶面可能在最前切片形成同样
+                    # 的单高度峰值，但其正高度连通区会向后延伸数十厘米。
+                    and positive_x_span <= 0.25
                 )
                 if horizontal_band:
                     band_clearance = float(np.quantile(band_relative, 0.10))
@@ -475,6 +628,7 @@ def analyze_terrain_geometry(
                 obstacle_height >= 0.12
                 and y_span >= 0.25
                 and low_clearance >= max(step_height, bar_min_clearance)
+                and positive_x_span <= 0.25
             ):
                 obstacle_type = BAR
                 clearance = max(0.0, low_clearance)
@@ -534,6 +688,8 @@ def analyze_terrain_geometry(
         distance=max(0.0, distance),
         lateral_offset=lateral_offset,
         width=max(0.0, width),
+        structure_heading=structure_heading,
+        structure_heading_confidence=structure_heading_confidence,
         clearance_height=max(0.0, clearance),
         valid_points=len(points),
     )

@@ -5,8 +5,14 @@ uint8 OBSTACLE_STEP=2
 uint8 OBSTACLE_PIT=3
 uint8 OBSTACLE_WALL=4
 uint8 OBSTACLE_BAR=5
+# 直角绕杆同样属于一项完整比赛障碍。任务层只在确认看到规则要求的高立柱时使用此值；
+# 低矮的限高杆支柱仍保持普通导航线索，不能误触发绕杆流程。
+uint8 OBSTACLE_POLE=6
 uint8 OBSTACLE_SLOPE=7
 uint8 obstacle_type
+# 稳定比赛语义 ID（如 wooden_bridge_b / high_wall）。粗几何类型可能一对多：木桥 B
+# 的板间隙和砂砾坑都可能是 PIT，因此底层控制器不能只靠 obstacle_type 选择完整流程。
+string obstacle_id
 float32 confidence
 float32 distance
 float32 lateral_offset

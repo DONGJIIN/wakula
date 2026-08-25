@@ -9,7 +9,12 @@ import yaml
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
-from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
+from lifecycle_msgs.msg import State, Transition
+
+from slam.nav2_readiness_monitor import (
+    Nav2ReadinessMonitor,
+    slam_transition_for_state,
+)
 from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
 
 
@@ -108,6 +113,26 @@ def test_navigation_health_parameters_are_versioned_with_nav2():
         "expected_odom_frame",
     ):
         assert readiness[key] == health[key]
+    assert readiness["recover_slam_toolbox"] is True
+    assert readiness["slam_lifecycle_node"] == "/slam_toolbox"
+    assert readiness["slam_recovery_period"] >= 1.0
+    assert readiness["slam_recovery_startup_grace"] >= 3.0
+    readiness_source = (
+        PACKAGE_ROOT / "slam" / "nav2_readiness_monitor.py"
+    ).read_text(encoding="utf-8")
+    assert "time.monotonic()" in readiness_source
+
+
+def test_slam_lifecycle_recovery_only_moves_forward_to_active():
+    """Recovery must repair startup races without stopping a healthy mapper."""
+    assert slam_transition_for_state(State.PRIMARY_STATE_UNCONFIGURED) == (
+        Transition.TRANSITION_CONFIGURE
+    )
+    assert slam_transition_for_state(State.PRIMARY_STATE_INACTIVE) == (
+        Transition.TRANSITION_ACTIVATE
+    )
+    assert slam_transition_for_state(State.PRIMARY_STATE_ACTIVE) is None
+    assert slam_transition_for_state(State.PRIMARY_STATE_FINALIZED) is None
 
 
 def test_bt_navigator_declares_every_custom_tree_error_code():
@@ -206,7 +231,9 @@ def test_traversal_handoff_precedes_inflated_costmap_boundary():
         local["robot_radius"] + local["inflation_layer"]["inflation_radius"]
     )
     assert handoff == hard_stop
-    assert handoff >= inflated_boundary + 0.10
+    # 深度点云的障碍前缘会随视角移动数十厘米；仅比静态膨胀边界多 10 cm 仍会让
+    # DWB 在任务进入 READY 前停滞。联调要求保留至少 35 cm 动态余量。
+    assert handoff >= inflated_boundary + 0.35
 
 
 def test_navigation_launch_description_is_constructible():

@@ -22,6 +22,8 @@ float32 roughness
 float32 distance
 float32 lateral_offset     # 障碍中心横向偏移，左正右负，m
 float32 width
+float32 structure_heading  # 点云估计的障碍前缘法线方向，base_link 下左转为正，rad
+float32 structure_heading_confidence # 方向证据可信度 0..1
 float32 clearance_height
 float32 time_skew          # 本次配对的图像/点云 Header 时间差，s
 uint32 valid_points        # 点云 ROI 的有效原始点数

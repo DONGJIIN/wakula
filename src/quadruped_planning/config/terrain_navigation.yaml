@@ -22,17 +22,23 @@ terrain_safety_assessor:
     # STOP 立即生效；较低危险与恢复到 WALK 都需要连续帧确认。
     clear_confirmation_frames: 5
     hazard_confirmation_frames: 3
+    # 比赛专名需连续多帧一致才切换；清空旧障碍需要更多安全帧，避免深度缺帧造成闪烁。
+    # 感知无效不经过迟滞，仍会立即显示无效并停车。
+    name_confirmation_frames: 3
+    name_clear_frames: 4
     # 单目视觉只能在等待深度证据时降低 WALK 速度，不能独立批准越障。
     vision_assist_enabled: true
     vision_timeout: 0.6
     vision_min_confidence: 0.55
     vision_center_margin: 0.20
     vision_speed_scale: 0.35
-    # 已由点云确认的越障目标在远处保留低速，让 Nav2 到达并对正入口；进入 0.90 m
+    # 已由点云确认的越障目标在远处保留低速，让 Nav2 到达并对正入口；进入 1.20 m
     # 交接区后归零，等待未来运动控制器接管。该参数绝不表示让 Nav2 绕开比赛障碍。
-    # 0.90 m 大于当前 0.30 m 机器人半径 + 0.45 m inflation 边界，避免 DWB 在可交接
-    # 之前先被局部代价地图卡住。真机 footprint 确定后必须联动重标定这两个参数。
-    hard_stop_distance: 0.90
+    # 1.20 m 为 0.30 m 机器人半径 + 0.45 m inflation 边界再留 0.45 m 的点云前缘
+    # 漂移余量。联合运行实测 0.90 m 入口会落入膨胀代价区，DWB 在 1.4～1.6 m 处
+    # 正确停车但任务层尚未交接，表现为“走到一半停下”。真机 footprint 确定后必须
+    # 联动重标定 robot_radius、inflation_radius 与本参数。
+    hard_stop_distance: 1.20
     hazard_approach_speed: 0.25
     # 正前方类别变化立即打印；未变化时按该周期刷新，避免终端按感知帧率刷屏。
     status_log_period: 1.0
@@ -54,13 +60,20 @@ navigation_speed_gate:
     emergency_stop_distance: 0.22
     emergency_sector_half_angle: 0.60
     require_emergency_scan: true
+    # 进入越障入口后禁止线速度，但允许 Nav2 以有限 yaw 角速度完成机身对正；只有新鲜且
+    # 有效的 TraversalGuidance ALIGN 状态能打开该权限，感知断流仍然全停。
+    alignment_guidance_timeout: 0.8
+    alignment_max_angular_speed: 0.30
+    # STOP 状态仍允许 Nav2 的纯原地转向，以便离开未知轮廓并继续探索；线速度始终为零，
+    # 且最终还需通过导航健康、命令超时、外部停车和全向 22 cm 雷达急停。
+    stopped_rotation_linear_tolerance: 0.02
 
 # 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。
 traversal_guidance:
   ros__parameters:
     input_timeout: 0.8
-    approach_start_distance: 1.50
-    handoff_distance: 0.90
+    approach_start_distance: 1.80
+    handoff_distance: 1.20
     alignment_tolerance: 0.10
     max_lateral_target: 0.45
     approach_speed_limit: 0.25

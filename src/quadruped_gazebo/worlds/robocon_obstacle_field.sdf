@@ -56,11 +56,18 @@
     -->
     <frame name="layout_right_angle_poles"><pose>-5.20 -1.55 0 0 0 0</pose></frame>
     <frame name="layout_gravel_wood_pit"><pose>-5.50 1.50 0 0 0 0</pose></frame>
-    <frame name="layout_height_bar"><pose>-2.75 1.75 0 0 0 0</pose></frame>
-    <frame name="layout_main_slope"><pose>0.20 1.50 0 0 0 0</pose></frame>
-    <frame name="layout_wooden_bridge_a"><pose>4.75 1.85 0 0 0 0</pose></frame>
-    <frame name="layout_wooden_bridge_b"><pose>3.20 0.00 0 0 0 0</pose></frame>
-    <frame name="layout_t_shaped_stairs"><pose>2.35 -1.00 0 0 0 0</pose></frame>
+    <!-- 正式坐标尚未发布。当前参考位姿在保持图示分区关系的同时，为 0.75 m 测试
+         机身和长桥出口保留净空；此前两座桥贴近 +X 边界，完整按规则长度通过后模型
+         必然越界，无法形成可信的 8 障碍全场回归。后续仍只改本布局区。 -->
+    <!-- 独立于官方坐标，仅用于仿真回归可复现。比赛场地坐标可在后续版本中替换。 -->
+    <frame name="layout_height_bar"><pose>-3.30 -1.90 0 0 0 0</pose></frame>
+    <frame name="layout_main_slope"><pose>-1.20 1.70 0 0 0 0</pose></frame>
+    <frame name="layout_wooden_bridge_a"><pose>3.60 1.85 0 0 0 0</pose></frame>
+    <frame name="layout_wooden_bridge_b"><pose>2.15 0.00 0 0 0 0</pose></frame>
+    <!-- T 台原参考 y=-1.00 时，其北侧出口与木桥 B 的南边界几乎相接；测试狗越过
+         T 台会直接落进下一障碍碰撞区，无法验证“逐障碍继续探索”。向南平移 0.55 m
+         后仍完全位于 14×6 m 赛台内，结构尺寸/颜色不变。正式坐标公布后仍只改本行。 -->
+    <frame name="layout_t_shaped_stairs"><pose>2.35 -1.55 0 0 0 0</pose></frame>
     <frame name="layout_high_wall"><pose>-0.55 -1.35 0 0 0 0</pose></frame>
     <!-- ====================== END REFERENCE LAYOUT ====================== -->
 
@@ -156,11 +163,17 @@
       <static>true</static>
       <pose relative_to="layout_height_bar">0 0 0 0 0 0</pose>
       <link name="bar">
+        <!-- 规则图明确画出两只圆形落地底座，但未公布直径；采用 180 mm 参考直径。
+             底座属于 world 外观/碰撞细节，正式尺寸公布后只需在这里改，不影响算法。 -->
+        <collision name="left_base"><pose>0 -0.5 0.01 0 0 0</pose><geometry><cylinder><radius>0.09</radius><length>0.02</length></cylinder></geometry></collision>
+        <collision name="right_base"><pose>0 0.5 0.01 0 0 0</pose><geometry><cylinder><radius>0.09</radius><length>0.02</length></cylinder></geometry></collision>
         <collision name="left_post"><pose>0 -0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry></collision>
         <collision name="right_post"><pose>0 0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry></collision>
         <collision name="crossbar"><pose>0 0 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.02</radius><length>1.0</length></cylinder></geometry></collision>
         <visual name="visual_left_post"><pose>0 -0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
         <visual name="visual_right_post"><pose>0 0.5 0.16 0 0 0</pose><geometry><cylinder><radius>0.025</radius><length>0.32</length></cylinder></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_left_base"><pose>0 -0.5 0.011 0 0 0</pose><geometry><cylinder><radius>0.09</radius><length>0.022</length></cylinder></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <visual name="visual_right_base"><pose>0 0.5 0.011 0 0 0</pose><geometry><cylinder><radius>0.09</radius><length>0.022</length></cylinder></geometry><material><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
         <!-- 十段 100 mm 圆柱首尾相接，蓝白相间；整体碰撞仍由上面的 1 m 圆柱负责。 -->
         <visual name="bar_01"><pose>0 -0.45 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>0.121569 0.254902 0.623529 1</diffuse></material></visual>
         <visual name="bar_02"><pose>0 -0.35 0.32 1.570796 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.10</length></cylinder></geometry><material><diffuse>1 1 1 1</diffuse></material></visual>
@@ -280,9 +293,11 @@
       </link>
     </model>
 
-    <!-- 地面可选启动区：规则只给图示未给尺寸；按图 2 标注采用 1×1 m 参考值。 -->
+    <!-- 地面可选启动区：规则只给图示未给尺寸；按图 2 标注采用 1×1 m 参考值。
+         中心与 robocon_field.launch.py 默认测试狗位置完全一致，避免场地标线和实际
+         起点错位。默认机头朝西，远离主斜坡侧边；该朝向只属于 Gazebo 参考布局。 -->
     <model name="ground_start_zone_reference">
-      <static>true</static><pose>-2.20 0.20 0 0 0 0</pose>
+      <static>true</static><pose>-2.50 -0.20 0 0 0 0</pose>
       <link name="outline">
         <visual name="n"><pose>0 0.49 0.004 0 0 0</pose><geometry><box><size>1 0.025 0.008</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>
         <visual name="s"><pose>0 -0.49 0.004 0 0 0</pose><geometry><box><size>1 0.025 0.008</size></box></geometry><material><diffuse>0.85 0.03 0.03 1</diffuse></material></visual>

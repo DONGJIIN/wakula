@@ -13,6 +13,7 @@ from math import isfinite, pi
 
 import rclpy
 from geometry_msgs.msg import Twist
+from quadruped_interfaces.msg import TraversalGuidance
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -50,6 +51,39 @@ def gated_twist(
     output.angular.y = source.angular.y * safe_limit
     output.angular.z = source.angular.z * safe_limit
     return output
+
+
+def alignment_twist(source: Twist, angular_limit: float) -> Twist:
+    """生成只允许原地对正的命令。
+
+    越障入口已经进入硬停车距离时，点云安全层会把普通导航限速置零。这时仍必须允许
+    Nav2 的有限角速度把 ``base_link`` 对准障碍法向，否则引导状态会永久停在 ALIGN。
+    该辅助函数故意丢弃全部线速度和 roll/pitch 角速度，不能被用于向障碍继续前进。
+    """
+    output = Twist()
+    if not isfinite(angular_limit) or angular_limit <= 0.0:
+        return output
+    output.angular.z = max(
+        -abs(float(angular_limit)),
+        min(abs(float(angular_limit)), float(source.angular.z)),
+    )
+    return output
+
+
+def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.02) -> bool:
+    """识别 Nav2 的原地转向请求，供停车状态安全脱困。
+
+    当前方障碍不具备稳定比赛语义时，引导层不会进入 ``ALIGN``；若速度门又把所有 yaw
+    一并归零，机器人就永远保持同一视角，无法转身探索其他方向。这里只接受几乎为零
+    的平移且确有 yaw 的命令，后续仍经过导航健康、超时、外部停车和 360° 雷达急停。
+    """
+    tolerance = max(0.0, float(linear_tolerance))
+    return bool(
+        abs(float(source.linear.x)) <= tolerance
+        and abs(float(source.linear.y)) <= tolerance
+        and abs(float(source.linear.z)) <= tolerance
+        and abs(float(source.angular.z)) > 1e-4
+    )
 
 
 def scan_allows_command(
@@ -111,6 +145,9 @@ class NavigationSpeedGate(Node):
         self.declare_parameter("emergency_stop_distance", 0.22)
         self.declare_parameter("emergency_sector_half_angle", 0.60)
         self.declare_parameter("require_emergency_scan", True)
+        self.declare_parameter("alignment_guidance_timeout", 0.8)
+        self.declare_parameter("alignment_max_angular_speed", 0.30)
+        self.declare_parameter("stopped_rotation_linear_tolerance", 0.02)
 
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value
@@ -173,6 +210,8 @@ class NavigationSpeedGate(Node):
         self.last_health_time = None
         self.latest_scan = None
         self.last_scan_time = None
+        self.alignment_requested = False
+        self.last_guidance_time = None
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
@@ -198,6 +237,12 @@ class NavigationSpeedGate(Node):
             "/navigation/autonomy_stop",
             self.autonomy_stop_callback,
             stop_qos,
+        )
+        self.create_subscription(
+            TraversalGuidance,
+            "/traversal/guidance",
+            self.guidance_callback,
+            10,
         )
         self.timer = self.create_timer(0.05, self.publish_safe_command)
         self.get_logger().info(f"Velocity gate: {input_topic} -> {output_topic}")
@@ -227,6 +272,16 @@ class NavigationSpeedGate(Node):
         self.latest_scan = msg
         self.last_scan_time = self.get_clock().now()
 
+    def guidance_callback(self, msg: TraversalGuidance) -> None:
+        """仅在点云有效、确需越障且处于 ALIGN 阶段时请求原地对正权限。"""
+        self.alignment_requested = bool(
+            msg.perception_valid
+            and msg.traversal_required
+            and msg.phase == TraversalGuidance.PHASE_ALIGN
+            and not msg.ready_for_handoff
+        )
+        self.last_guidance_time = self.get_clock().now()
+
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
@@ -242,6 +297,11 @@ class NavigationSpeedGate(Node):
             if self.last_scan_time is None
             else (now - self.last_scan_time).nanoseconds / 1e9
         )
+        guidance_age = (
+            float("inf")
+            if self.last_guidance_time is None
+            else (now - self.last_guidance_time).nanoseconds / 1e9
+        )
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
             self.latest_cmd,
@@ -253,6 +313,32 @@ class NavigationSpeedGate(Node):
             or health_age <= self.health_timeout,
             self.external_stop,
         )
+        # 硬停车只负责禁止继续接近障碍；明确 ALIGN 或 Nav2 的纯原地转向仍保留一个
+        # 有界 yaw。后者用于从“未知但很近的轮廓”转身换视角，否则分类不稳定时会形成
+        # STOP→无法旋转→永远无法重新分类的闭环。健康、超时、外部停车仍具有否决权。
+        alignment_fresh = guidance_age <= max(
+            0.1, float(self.get_parameter("alignment_guidance_timeout").value)
+        )
+        safe_rotation_requested = is_pure_rotation_request(
+            self.latest_cmd,
+            float(self.get_parameter("stopped_rotation_linear_tolerance").value),
+        )
+        if (
+            self.speed_limit <= 0.0
+            and (
+                (self.alignment_requested and alignment_fresh)
+                or safe_rotation_requested
+            )
+            and command_age <= self.command_timeout
+            and assessment_age <= self.assessment_timeout
+            and self.navigation_healthy
+            and (not self.require_navigation_health or health_age <= self.health_timeout)
+            and not self.external_stop
+        ):
+            output = alignment_twist(
+                self.latest_cmd,
+                float(self.get_parameter("alignment_max_angular_speed").value),
+            )
         # 导航健康监控负责完整的 scan/odom/TF 校验；这里再保留一个局部、可解释的最终
         # 防撞条件。扫描断流或命令方向 22 cm 内有物体时，只把本周期输出置零。
         if self.require_emergency_scan and (

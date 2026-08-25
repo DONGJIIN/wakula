@@ -1,7 +1,13 @@
 """越障入口引导的纯逻辑回归测试。"""
 
+import math
+
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
-from quadruped_planning.traversal_guidance import GuidanceStabilizer, compute_guidance
+from quadruped_planning.traversal_guidance import (
+    GuidanceStabilizer,
+    compute_guidance,
+    surface_axis_heading,
+)
 
 
 PARAMETERS = {
@@ -82,12 +88,18 @@ def test_close_but_misaligned_target_is_not_ready():
     assert not decision.ready_for_handoff
 
 
-def test_pole_remains_nav2_navigation_object_not_motion_handoff():
-    decision = compute_guidance(
-        safety(NavigationSafety.OBSTACLE_POLE, 0.60), **PARAMETERS
-    )
+def test_only_rule_height_pole_enters_competition_course_handoff():
+    low_support = safety(NavigationSafety.OBSTACLE_POLE, 0.60)
+    low_support.obstacle_height = 0.32
+    decision = compute_guidance(low_support, **PARAMETERS)
     assert decision.phase == TraversalGuidance.PHASE_CLEAR
     assert not decision.traversal_required
+
+    rule_pole = safety(NavigationSafety.OBSTACLE_POLE, 0.60)
+    rule_pole.obstacle_height = 0.55
+    decision = compute_guidance(rule_pole, **PARAMETERS)
+    assert decision.phase == TraversalGuidance.PHASE_READY
+    assert decision.traversal_required
 
 
 def test_confirmed_slope_can_request_handoff_without_fake_obstacle_type():
@@ -169,3 +181,40 @@ def test_geometry_type_flicker_does_not_reset_same_entry():
     assert first.obstacle_type == NavigationSafety.OBSTACLE_STEP
     assert second.obstacle_type == NavigationSafety.OBSTACLE_STEP
     assert third.phase == TraversalGuidance.PHASE_READY
+
+
+def test_surface_axis_aligns_diagonal_ramp_before_handoff():
+    """斜看 10° 坡时应先转到坡轴，不能沿可见轮廓中心斜穿场地。"""
+    heading = surface_axis_heading(math.radians(7.1), math.radians(7.1))
+    assert heading is not None
+    assert math.radians(40.0) <= heading <= math.radians(50.0)
+
+    msg = safety(NavigationSafety.OBSTACLE_STEP, 0.70, 0.0)
+    msg.slope_pitch = math.radians(7.1)
+    msg.slope_roll = math.radians(7.1)
+    decision = compute_guidance(msg, **PARAMETERS)
+    assert decision.phase == TraversalGuidance.PHASE_ALIGN
+    assert decision.heading_error > math.radians(40.0)
+
+
+def test_surface_axis_ignores_flat_plane_noise():
+    assert surface_axis_heading(math.radians(1.0), math.radians(1.0)) is None
+
+
+def test_flat_bridge_uses_confident_front_edge_heading():
+    """平桥无坡度时仍应按点云前缘法线对正，而非斜穿桥面。"""
+    msg = safety(NavigationSafety.OBSTACLE_STEP, 0.70, 0.02)
+    msg.structure_heading = math.radians(-28.0)
+    msg.structure_heading_confidence = 0.82
+    decision = compute_guidance(msg, **PARAMETERS)
+    assert decision.phase == TraversalGuidance.PHASE_ALIGN
+    assert math.radians(-31.0) < decision.heading_error < math.radians(-24.0)
+
+
+def test_uncertain_front_edge_keeps_centre_fallback():
+    """低可信方向不能覆盖稳定的连通域中心对正。"""
+    msg = safety(NavigationSafety.OBSTACLE_STEP, 0.70, 0.20)
+    msg.structure_heading = math.radians(70.0)
+    msg.structure_heading_confidence = 0.20
+    decision = compute_guidance(msg, **PARAMETERS)
+    assert abs(decision.heading_error) < math.radians(20.0)

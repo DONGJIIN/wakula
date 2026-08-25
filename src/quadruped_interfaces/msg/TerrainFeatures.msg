@@ -22,5 +22,7 @@ float32 roughness          # 地面拟合残差，m
 float32 distance           # 最近有效障碍前向距离，m
 float32 lateral_offset     # 障碍连通区域中心相对 base_link 的横向偏移，左正右负，m
 float32 width              # 障碍横向连通宽度，m
+float32 structure_heading  # 障碍前缘法线相对机身前向的夹角，左转为正，rad
+float32 structure_heading_confidence # 前缘方向可信度 0..1；低值时下游必须忽略该角度
 float32 clearance_height   # 横杆下沿相对地面净空，m
 uint32 valid_points        # 当前 ROI 内参与判断的有效原始点数

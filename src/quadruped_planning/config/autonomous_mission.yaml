@@ -7,29 +7,104 @@ autonomous_mission:
     frontier_minimum_distance: 0.55
     frontier_maximum_distance: 7.0
     frontier_exclusion_radius: 0.65
+    # 导航目标不直接放在未知区边缘，而是退回已知自由区并保留局部代价地图净空。
+    frontier_goal_standoff: 0.45
+    frontier_goal_clearance: 0.20
+    # 2D 激光可能提前把全场变成 known；前沿耗尽后继续覆盖尚未走近的自由区，保证
+    # 相机和深度点云真正近距观察每项障碍。参数均为地图尺度，不含比赛坐标。
+    coverage_goal_spacing: 0.60
+    coverage_goal_clearance: 0.30
+    coverage_visit_radius: 0.75
+    coverage_record_spacing: 0.40
     # 在线地图边界可能比越障后的机体位置滞后几厘米；仅容忍小范围滞后，定位大跳变仍等待。
     map_boundary_tolerance: 0.30
     # 小于 Nav2 goal checker 容差的入口不再作为导航目标，避免“挪一下就成功”。
-    minimum_approach_goal_distance: 0.35
+    # Nav2 xy_goal_tolerance=0.10 m；只跳过 0.15 m 内的伪平移目标，避免 0.15～0.35 m
+    # 之间既不接近也不对正的死区。
+    minimum_approach_goal_distance: 0.15
+    # 小于该角度的原地旋转会被 Nav2 立即判成功；改走严格交接或语义换视角复核。
+    # 略高于 Nav2 yaw_goal_tolerance=0.12 rad，确保原地目标不会被立即判成功。
+    minimum_alignment_command_angle: 0.14
+    # 已确认障碍先原地对准再接近：大于约 10° 才触发，每次最多修正 30°。
+    # 转后等待 0.6 s 新点云，防止重复使用旋转前的旧方向数据。
+    pre_alignment_trigger_angle: 0.18
+    pre_alignment_max_step: 0.523599
+    pre_alignment_settle_time: 0.60
     # Nav2 lifecycle 尚未 ACTIVE 时 Action 会短暂拒绝目标；退避重试而非误记为不可达。
     nav_rejection_retry_delay: 1.0
     # 规划中止/取消后留给 costmap、行为树和 SLAM 地图边界的恢复时间，避免高频重发。
     nav_failure_retry_delay: 1.0
     # 严格 READY 被点云前缘抖动漏掉时的三重守卫：Nav2 已到入口、最新障碍仍是同一
     # map 位置、且距离/横偏均受限。不是“看见障碍就越”的宽松触发器。
-    handoff_fallback_max_distance: 1.50
+    handoff_fallback_max_distance: 1.45
     handoff_fallback_max_lateral: 0.50
     handoff_fallback_spatial_tolerance: 0.90
+    # Action 前最终航向必须在约 7° 内，不使用下面仅供停滞恢复的宽松门限。
+    handoff_alignment_tolerance: 0.12
+    # 坑沿/墙脚/台阶立面会被 Nav2 正确视为不可通行。对同一语义目标连续两次入口停滞，
+    # 且点云仍确认其位于正前方时，任务层切换到越障 Action，避免永久重发不可达目标。
+    approach_stall_handoff_count: 2
+    # 若 Nav2 连续停在更远的膨胀边界，允许把“最后一段接近”也交给 TraverseObstacle。
+    # Action 目标携带实测 entry_distance，真机控制器仍须自行完成低速接近和姿态闭环。
+    approach_stall_handoff_max_distance: 1.85
+    approach_stall_handoff_max_lateral: 0.75
+    approach_stall_handoff_max_heading_error: 0.18
+    # 连续停滞但没有通过越障交接门限的入口先短暂让路，避免无限重试同一假目标。
+    obstacle_failure_cooldown: 12.0
+    obstacle_failure_radius: 0.90
+    # 场地外沿斜视时会出现伪坡；目标必须位于在线 SLAM 地图外框内侧，内部障碍会随
+    # 建图扩展自动满足。该值不包含正式场地尺寸或坐标。
+    obstacle_map_edge_margin: 0.05
     # 宽视场同时看到台阶、坑沿和横杆时锁定已确认入口；只有同一 map 邻域的更新才允许
     # 刷新目标，避免 Nav2 每两秒在多个障碍之间取消/重发。
-    obstacle_lock_radius: 0.75
+    # 长坡/长桥斜视时“最近前缘”会沿结构移动超过 1 m。扩大空间锁可保留远场连续
+    # 坡度证据，防止近场只看到侧边便把同一目标改叫 T 台。
+    obstacle_lock_radius: 1.50
     goal_timeout: 45.0
     # 包含较长坡/桥的保守上限；真机控制器仍应自行实现更短的内部超时。
-    traversal_timeout: 25.0
+    # Long competition structures (especially the segmented wooden bridge)
+    # need more time than a single step.  Keep this above the longest adapter
+    # duration so a valid traverse is not cancelled halfway across.
+    traversal_timeout: 45.0
     minimum_obstacle_confidence: 0.55
     obstacle_confirmation_frames: 3
+    # 2.5 m 内先累计同一 map 入口的语义历史，避免坡面接近后因局部裁剪误变为台阶；
+    # 只有进入 1.2 m 近场且距离/横偏/航向均通过时才能真正触发 Action。
+    semantic_observation_distance: 2.50
+    semantic_confirmation_distance: 1.20
+    semantic_confirmation_votes: 3
+    semantic_recent_window: 5
+    # 结构已确认但专名仍有歧义时，仅原地小角度换视角；四次仍不能确认则暂时跳过。
+    # 0.30 rad 与 Nav2 最小有效旋转一致；交替视角的第三次可覆盖约 50° 的坡侧误差。
+    semantic_verification_turn_angle: 0.30
+    semantic_verification_max_attempts: 4
+    # 点云换视角时障碍前缘可沿长结构移动超过普通入口锁半径。验证计数使用更大的
+    # 独立半径，确保四次失败后真正让路，而不是因前缘漂移每次又从 1/4 开始。
+    semantic_verification_lock_radius: 1.50
+    # 原地换视角结束后等待至少六帧 5 Hz 深度数据，禁止使用旋转残影立即交接。
+    semantic_post_turn_settle_time: 1.20
     # 只对同类别、同位置的已完成障碍去重，避免密集场地中顺带屏蔽相邻的另一类障碍。
     completed_obstacle_radius: 0.65
     post_traversal_cooldown: 3.0
-    # 连续 5 秒找不到前沿才结束，避免 SLAM 刚启动或回环更新期间误判任务完成。
-    empty_frontier_confirmations: 20
+    # 无前沿不是结束条件：连续约 1 秒无候选后原地转 90° 补扫，四次补扫后重新尝试
+    # 暂时失败的前沿。只有八项完成或总任务超时才返航。
+    empty_frontier_confirmations: 4
+    search_turn_angle: 1.570796
+    # Nav2 Action 尚未结束但 map 位姿连续 8 秒既没有 8 cm 平移，也没有 0.10 rad 转动，
+    # 视为局部停滞并取消重规划，避免表现成“自动导航走到一半自己停下”。
+    nav_stall_timeout: 8.0
+    nav_progress_translation: 0.08
+    nav_progress_rotation: 0.10
+    # 规则比赛时长尚可能调整；该软件上限用于保证异常情况下仍会带已有成绩返航。
+    mission_timeout: 900.0
+    return_home_tolerance: 0.40
+    front_name_timeout: 1.2
+    expected_obstacle_ids:
+      - right_angle_poles
+      - gravel_wood_pit
+      - height_bar
+      - main_slope
+      - wooden_bridge_a
+      - wooden_bridge_b
+      - t_shaped_stairs
+      - high_wall

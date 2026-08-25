@@ -5,6 +5,7 @@
 """
 
 import importlib.util
+import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -38,6 +39,13 @@ def assert_close(actual: list[float], expected: list[float], tolerance: float = 
     assert all(abs(a - e) <= tolerance for a, e in zip(actual, expected)), (actual, expected)
 
 
+def layout_pose(name: str) -> list[float]:
+    """读取集中式参考布局；只用于检查模型互不重叠，不把坐标带进算法。"""
+    node = WORLD.find(f"frame[@name='layout_{name}']/pose")
+    assert node is not None and node.text
+    return [float(value) for value in node.text.split()]
+
+
 def test_all_eight_rule_obstacles_exist():
     expected = {
         "right_angle_poles",
@@ -64,6 +72,38 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     mux = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(encoding="utf-8")
     assert '"/navigation/autonomy_stop"' in mux
     assert "if autonomy_stop:" in mux
+
+
+def test_sim_traversal_executor_yields_cpu_after_action_completion():
+    """The replaceable simulation backend must not starve SLAM health heartbeats."""
+    backend = (PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "executor.spin_once(timeout_sec=0.05)" in backend
+    assert "time.sleep(0.020)" in backend
+    # A/B 尚未由局部视角分清时仍使用统一 STEP 合同，但仿真替身只能跨当前横向结构，
+    # 不能错误套用 B 桥全长并移出场地。
+    assert '"wooden_bridge_unknown_span", 5.00' in backend
+    assert '"wooden_bridge_unknown_duration", 14.0' in backend
+    assert '"long_structure_exit_clearance", 0.75' in backend
+
+
+def test_sim_traversal_rejects_large_unrelated_heading_change():
+    """无法沿已确认入口安全落地时应重观察，不能横穿场地伪造一次越障。"""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    yaw = module.choose_safe_traversal_heading(
+        -5.46, -2.63, -0.69, 7.67, 7.0, 3.0, 0.35
+    )
+    assert yaw is None
+    # 小角度即可避开边界时仍可在对正误差范围内修正。
+    yaw = module.choose_safe_traversal_heading(
+        4.8, 0.0, 0.0, 1.5, 7.0, 3.0, 0.75, maximum_adjustment=0.35
+    )
+    assert yaw is not None
+    assert abs(yaw) <= 0.35
 
 
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
@@ -116,6 +156,10 @@ def test_height_bar_and_pole_geometry():
         for i in range(1, 4)
     ]
     assert_close([poses[1][0] - poses[0][0], poses[2][1] - poses[1][1]], [1.0, 1.0])
+    # 规则参考图中的两只圆形底座也应存在，不能只画两根悬空细柱。
+    height_bar = model("height_bar")
+    assert height_bar.find(".//collision[@name='left_base']/geometry/cylinder") is not None
+    assert height_bar.find(".//collision[@name='right_base']/geometry/cylinder") is not None
 
 
 def test_pit_fill_has_physical_collision_samples():
@@ -158,6 +202,29 @@ def test_obstacle_poses_are_centralized_in_layout_frames():
         assert pose.attrib.get("relative_to") == f"layout_{name}"
         assert pose.text.strip() == "0 0 0 0 0 0"
         assert f"layout_{name}" in world_frames
+
+
+def test_t_stairs_exit_does_not_land_inside_bridge_b():
+    """参考布局必须允许逐障碍测试；T 台北缘与桥 B 南缘之间保留机身通道。"""
+    stair_y = layout_pose("t_shaped_stairs")[1]
+    bridge_y = layout_pose("wooden_bridge_b")[1]
+    stair_north = stair_y + 0.50  # T 顶台/横臂的北缘。
+    bridge_south = bridge_y - 0.50
+    assert bridge_south - stair_north >= 0.50
+
+
+def test_long_bridge_reference_layout_keeps_full_traversal_inside_arena():
+    """非正式参考布局也必须能完成整桥回归，而不是在桥尾越出 14 m 场地。"""
+    # Action 在距入口 1.20 m 处交接，跨结构后留 0.75 m；测试狗中心必须仍处于
+    # 7.0-0.75=6.25 m 的安全内缩边界。坐标仍只从 world 的集中 frame 读取。
+    spans = {"wooden_bridge_a": 4.35, "wooden_bridge_b": 5.70}
+    local_west = {"wooden_bridge_a": -2.5645, "wooden_bridge_b": -2.451}
+    for name, span in spans.items():
+        centre_x = layout_pose(name)[0]
+        entry_edge = centre_x + local_west[name]
+        handoff_x = entry_edge - 1.20
+        landing_x = handoff_x + 1.20 + span + 0.75
+        assert landing_x <= 6.25, (name, landing_x)
 
 
 def test_simulation_launch_stays_out_of_algorithm_launch():
@@ -255,6 +322,51 @@ def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     )
     assert "self.autonomous_stamp = None" in mux_source
     assert "self.publisher.publish(Twist())" in mux_source
+    # 测试狗没有腿部动力学，第三条自主任务中的仿真 Action 只可通过这一标准
+    # Gazebo 服务跨越实体碰撞；场地 launch 本身仍不启动任何越障节点。
+    assert "/world/robocon_obstacle_field/set_pose@" in launch_source
+    assert "ros_gz_interfaces/srv/SetEntityPose" in launch_source
+
+
+def test_simulated_traversal_path_is_layout_independent_and_ends_aligned():
+    """仿真越障只使用实时起点/航向，不得硬编码八个 world 坐标。"""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    x, y, yaw = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 1.0)
+    assert_close([x, y, yaw], [4.0, 2.0, 0.0])
+    # 绕杆轨迹中点存在横向位移，但终点回到中心线并恢复原航向。
+    middle = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 0.25, pole=True)
+    finish = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 1.0, pole=True)
+    assert abs(middle[1] - 2.0) > 0.20
+    assert_close(list(finish), [4.0, 2.0, 0.0], tolerance=1e-5)
+    # L 形坑先沿入口方向走 60%，再右转；终点航向也必须沿第二条臂。
+    corner = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 0.60, l_turn=-1)
+    l_finish = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 1.0, l_turn=-1)
+    assert_close(list(corner), [3.0, 0.0, 0.0], tolerance=1e-5)
+    assert_close(list(l_finish), [3.0, -2.0, -math.pi / 2.0], tolerance=1e-5)
+    safe_l = module.choose_safe_l_traversal(
+        -5.85, -0.57, math.pi / 2.0, 4.33, 7.0, 3.0, 0.75
+    )
+    assert safe_l is not None
+    assert safe_l[1] == -1  # 北向进入后向东（机体右侧）离开参考 L 形坑。
+    assert module.pose_inside_arena(0.0, 0.0, 7.0, 3.0, 0.35)
+    assert module.pose_inside_arena(6.64, 2.64, 7.0, 3.0, 0.35)
+    assert not module.pose_inside_arena(6.66, 0.0, 7.0, 3.0, 0.35)
+    assert not module.pose_inside_arena(0.0, -2.66, 7.0, 3.0, 0.35)
+    source = path.read_text(encoding="utf-8")
+    assert "layout_" not in source
+    assert "robocon_obstacle_field.sdf" not in source
+    assert "handle.request.distance" in source
+    # 简化越障的落点必须同时越过机身半长和 Nav2 inflation layer，不能把下一次
+    # 规划的起点留在障碍物致命代价区内。
+    assert '"exit_clearance", 1.20' in source
+    assert '"right_angle_poles_span", 1.00' in source
+    assert '"t_shaped_stairs_span", 2.80' in source
+    assert '"wooden_bridge_b_span", 5.70' in source
+    assert "+ semantic_span" in source
 
 
 def test_gui_field_opens_remapped_keyboard_without_loading_algorithms():
@@ -266,6 +378,16 @@ def test_gui_field_opens_remapped_keyboard_without_loading_algorithms():
     assert '("cmd_vel", "/cmd_vel_teleop")' in launch_source
     assert '"keyboard_teleop"' in launch_source
     assert "gnome-terminal --wait" in launch_source
+
+
+def test_field_launch_rejects_a_duplicate_named_gazebo_world():
+    """重复同名服务会混接机器人/传感器，入口必须在启动前显式拒绝。"""
+    launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def _reject_duplicate_world" in launch_source
+    assert "/world/robocon_obstacle_field/scene/info" in launch_source
+    assert "OpaqueFunction(function=_reject_duplicate_world)" in launch_source
 
 
 def test_generic_rgbd_resolution_is_bounded_for_realtime_integration():

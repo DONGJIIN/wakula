@@ -9,6 +9,7 @@ import pytest
 from quadruped_perception.terrain_analyzer import (
     bounded_point_sample,
     compute_terrain_features,
+    filter_roi_points,
     transform_xyz,
 )
 from quadruped_perception.terrain_geometry import (
@@ -22,6 +23,7 @@ from quadruped_perception.terrain_geometry import (
     WALL,
     analyze_terrain_geometry,
     navigation_obstacle_points,
+    obstacle_front_heading,
 )
 from quadruped_perception.topic_selection import should_accept_source
 from quadruped_perception.vision_obstacle_detector import (
@@ -438,6 +440,25 @@ def test_numpy_terrain_features_and_minimum_points():
     assert sparse is None
 
 
+def test_vertical_roi_rejects_finite_depth_sentinel_values():
+    """Drivers may encode no-return pixels as huge finite numbers, not NaN/Inf."""
+    points = np.asarray(
+        [
+            [0.5, 0.0, 0.0],
+            [0.6, 0.1, -0.4],
+            [0.7, 0.0, 87.7],
+            [0.8, 0.0, -50.0],
+        ],
+        dtype=np.float32,
+    )
+    filtered = filter_roi_points(
+        points, 0.1, 1.5, 0.45, 100, z_min=-1.0, z_max=2.0
+    )
+    assert filtered.shape == (2, 3)
+    assert np.max(filtered[:, 2]) <= 2.0
+    assert np.min(filtered[:, 2]) >= -1.0
+
+
 def test_ground_envelope_separates_step_from_ground_slope():
     """A raised block must not turn a flat floor into a steep fitted slope."""
     rng = np.random.default_rng(7)
@@ -471,6 +492,22 @@ def test_ground_envelope_separates_step_from_ground_slope():
     assert abs(features[4]) < 0.02
     assert 0.10 <= features[2] <= 0.14
     assert 0.60 <= features[7] <= 0.90
+
+
+def test_near_vertical_surface_is_not_accepted_as_ground_plane():
+    """A wall-only startup must fail closed instead of extrapolating huge heights."""
+    rng = np.random.default_rng(23)
+    x_values = rng.uniform(0.2, 1.0, 3000)
+    points = np.column_stack(
+        (
+            x_values,
+            rng.uniform(-0.4, 0.4, 3000),
+            2.0 * x_values + rng.normal(0.0, 0.002, 3000),
+        )
+    )
+    estimate = analyze_terrain_geometry(points, min_cells=8)
+    assert not estimate.valid
+    assert estimate.obstacle_height == 0.0
 
 
 def test_sensor_topic_selection_locks_and_fails_over():
@@ -520,6 +557,38 @@ def _dense_floor(z=0.0):
         for y in np.arange(-0.4, 0.41, 0.05):
             rows.extend(((x, y, z - 0.001), (x, y, z + 0.001)))
     return np.asarray(rows, dtype=np.float64)
+
+
+def test_front_edge_heading_recovers_oblique_crossing_normal():
+    """斜置台阶前缘应给出法线方向，避免越障 Action 沿边缘斜穿。"""
+    expected = np.deg2rad(32.0)
+    normal = np.asarray((np.cos(expected), np.sin(expected)))
+    tangent = np.asarray((-normal[1], normal[0]))
+    centre = np.asarray((0.75, 0.0))
+    cells = []
+    for along in np.linspace(-0.45, 0.45, 19):
+        for depth in (0.00, 0.04, 0.08):
+            xy = centre + tangent * along + normal * depth
+            cells.append((xy[0], xy[1], 0.0, 0.0, 0.12, 4.0))
+    heading, confidence = obstacle_front_heading(
+        np.asarray(cells), float(np.min(np.asarray(cells)[:, 0])), 0.05
+    )
+    assert abs(heading - expected) < np.deg2rad(6.0)
+    assert confidence >= 0.45
+
+
+def test_front_edge_heading_rejects_isotropic_blob():
+    """近圆形小斑块没有唯一入口方向，必须回退到中心对正。"""
+    cells = np.asarray(
+        [
+            (0.70 + dx, dy, 0.0, 0.0, 0.12, 3.0)
+            for dx in (-0.05, 0.0, 0.05)
+            for dy in (-0.05, 0.0, 0.05)
+        ]
+    )
+    heading, confidence = obstacle_front_heading(cells, 0.65, 0.05)
+    assert heading == 0.0
+    assert confidence == 0.0
 
 
 def test_vectorized_grid_statistics_match_linear_quantile_reference():
@@ -644,6 +713,113 @@ def test_grid_ground_segmentation_detects_wall_without_biasing_plane():
     assert abs(result.slope_pitch) < 0.03
 
 
+def test_thin_wall_top_returns_are_not_downgraded_to_step():
+    """正视薄墙只返回顶边时，XY 厚度仍足以区别墙和深踏面。"""
+    floor = _dense_floor()
+    # 实体墙遮挡脚下地面；横杆测试则保留同一 XY 格中的地面回波。
+    floor = floor[
+        ~(
+            (floor[:, 0] >= 0.55)
+            & (floor[:, 0] <= 0.65)
+            & (np.abs(floor[:, 1]) <= 0.32)
+        )
+    ]
+    wall_top = np.asarray(
+        [
+            (x, y, 0.30 + noise)
+            for x in (0.59, 0.61)
+            for y in np.arange(-0.30, 0.31, 0.035)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, wall_top)))
+    assert result.valid
+    assert result.obstacle_type == WALL
+    assert result.obstacle_height >= 0.28
+
+
+def test_oblique_thin_wall_uses_orientation_independent_thickness():
+    """斜视 0.10 m 薄墙时，PCA 短轴厚度应防止它被错误当成深台面。"""
+    floor = _dense_floor()
+    tangent = np.asarray((1.0, 0.75), dtype=np.float64)
+    tangent /= np.linalg.norm(tangent)
+    normal = np.asarray((-tangent[1], tangent[0]), dtype=np.float64)
+    center = np.asarray((0.85, 0.0), dtype=np.float64)
+    wall_xy = []
+    for along in np.arange(-0.45, 0.46, 0.035):
+        for thick in (-0.04, 0.0, 0.04):
+            wall_xy.append(center + tangent * along + normal * thick)
+    wall_xy = np.asarray(wall_xy)
+    # 实体墙遮住自身投影下的地面，否则 ground_coexistence 会正确把它视为悬空结构。
+    relative_floor = floor[:, :2] - center
+    along_floor = relative_floor @ tangent
+    normal_floor = relative_floor @ normal
+    floor = floor[
+        ~((np.abs(along_floor) <= 0.48) & (np.abs(normal_floor) <= 0.07))
+    ]
+    wall_top = np.asarray(
+        [
+            (xy[0], xy[1], 0.30 + noise)
+            for xy in wall_xy
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, wall_top)))
+    assert result.valid
+    assert result.obstacle_type == WALL
+
+    # 同高度但具有二维纵深的踏面必须仍是 STEP，不能被薄墙分支吞掉。
+    platform = np.asarray(
+        [
+            (x, y, 0.30 + noise)
+            for x in np.arange(0.60, 1.41, 0.04)
+            for y in np.arange(-0.35, 0.36, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    platform_result = analyze_terrain_geometry(np.vstack((_dense_floor(), platform)))
+    assert platform_result.valid
+    assert platform_result.obstacle_type == STEP
+
+
+def test_occluding_wall_top_cannot_become_ground_and_invert_into_pit():
+    """墙顶栅格多于可见地面时，最低受支持近场层仍应锚定真实地面。"""
+    floor = np.asarray(
+        [
+            (x, y, z)
+            for x in np.arange(0.10, 0.41, 0.05)
+            for y in np.arange(-0.20, 0.21, 0.05)
+            for z in (-0.002, 0.0, 0.002)
+        ]
+    )
+    # 两排墙顶横跨更宽视场，因此旧“最大高度箱”算法会错误选择 z=0.30 m。
+    wall_top = np.asarray(
+        [
+            (x, y, 0.30 + noise)
+            for x in (0.59, 0.61)
+            for y in np.arange(-0.45, 0.46, 0.035)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, wall_top)))
+    assert result.valid
+    assert result.obstacle_type == WALL
+    assert result.ground_height < 0.03
+    assert result.pit_depth < 0.03
+
+    # 最坏情况下墙顶完全遮住地面；连续运行时上一 CLEAR 帧的地面高度仍能恢复墙。
+    prior_only = analyze_terrain_geometry(
+        wall_top,
+        ground_height_prior=0.0,
+        min_cells=8,
+        min_region_cells=3,
+        min_region_points=12,
+    )
+    assert prior_only.valid
+    assert prior_only.obstacle_type == WALL
+    assert prior_only.ground_height < 0.03
+
+
 def test_grid_ground_segmentation_detects_competition_height_bar_clearance():
     """离地约 0.30 m 的细横杆不能被同一切片中的地面点误判为墙。"""
     floor = _dense_floor()
@@ -659,6 +835,23 @@ def test_grid_ground_segmentation_detects_competition_height_bar_clearance():
     assert result.valid
     assert result.obstacle_type == BAR
     assert 0.25 <= result.clearance_height <= 0.33
+
+
+def test_extended_stair_top_is_not_mistaken_for_a_suspended_bar():
+    """只看到 0.30 m 台面时仍可用纵深排除限高杆，覆盖整场联调的 T 台样本。"""
+    floor = _dense_floor()
+    platform = np.asarray(
+        [
+            (x, y, 0.30 + noise)
+            for x in np.arange(0.60, 1.41, 0.04)
+            for y in np.arange(-0.35, 0.36, 0.04)
+            for noise in (-0.006, 0.0, 0.006)
+        ]
+    )
+    result = analyze_terrain_geometry(np.vstack((floor, platform)))
+    assert result.valid
+    assert result.obstacle_type == STEP
+    assert result.clearance_height == 0.0
 
 
 def test_near_field_ground_anchor_keeps_stairs_out_of_pit_class():
@@ -709,6 +902,9 @@ def test_near_field_ground_anchor_recognizes_bridge_approach_as_ramp():
     assert result.obstacle_type == CLEAR
     assert abs(np.rad2deg(result.slope_pitch) - 14.0) < 1.0
     assert result.pit_depth == 0.0
+    # 连通正高度区从坡面超过 7 cm 门限处开始，因此入口距离会比几何坡脚稍远，
+    # 但必须显著小于 ROI 的固定 2.5 m 远端，才能随接近过程进入交接范围。
+    assert 0.70 <= result.distance <= 1.60
 
 
 def test_height_bar_with_grounded_supports_uses_crossbar_clearance():

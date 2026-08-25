@@ -18,15 +18,27 @@ def package_file(package, folder, filename):
 
 
 def _clock_is_available() -> bool:
-    """短窗口自动识别仿真时钟；第三个命令不再固定等待 2 秒。"""
-    for _attempt in range(2):
+    """Detect Gazebo's clock without making the third command unreliable.
+
+    ``ros2 topic list --no-daemon`` needs roughly two seconds for DDS graph
+    discovery on this workstation.  The former 1.2 s subprocess timeout
+    therefore killed a healthy query and silently selected the hardware path,
+    so the simulation TraverseObstacle server was never started.  Query the
+    already-running ROS daemon first (normally <0.5 s), then use one bounded
+    daemon-free fallback for clean machines.
+    """
+    commands = (
+        ["ros2", "topic", "list"],
+        ["ros2", "topic", "list", "--no-daemon", "--spin-time", "1.0"],
+    )
+    for command in commands:
         try:
             result = subprocess.run(
-                ["ros2", "topic", "list", "--no-daemon", "--spin-time", "0.50"],
+                command,
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=1.2,
+                timeout=3.0,
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None

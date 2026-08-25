@@ -4,8 +4,14 @@ from geometry_msgs.msg import Twist
 from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
 from sensor_msgs.msg import LaserScan
 
-from quadruped_planning.cmd_vel_gate import gated_twist, scan_allows_command
+from quadruped_planning.cmd_vel_gate import (
+    alignment_twist,
+    gated_twist,
+    is_pure_rotation_request,
+    scan_allows_command,
+)
 from quadruped_planning.terrain_safety_assessor import (
+    ObstacleNameStabilizer,
     ConservativeAssessmentFilter,
     apply_distance_aware_constraint,
     apply_geometry_classification,
@@ -25,6 +31,25 @@ from quadruped_planning.terrain_safety_assessor import (
     visual_obstacle_name_zh,
     visual_evidence_in_path,
 )
+
+
+def test_competition_name_requires_repeated_frames_and_invalid_clears_immediately():
+    """类别边界抖动不能刷屏或污染任务投票，断流仍必须立即显式失效。"""
+    filter_ = ObstacleNameStabilizer(
+        confirmation_frames=3,
+        clear_frames=4,
+    )
+    assert filter_.update("高墙", True) == "感知数据无效"
+    assert filter_.update("T 字形台阶", True) == "感知数据无效"
+    assert filter_.update("高墙", True) == "感知数据无效"
+    assert filter_.update("高墙", True) == "感知数据无效"
+    assert filter_.update("高墙", True) == "高墙"
+
+    # 一帧近裁剪误分类不允许覆盖已确认名称。
+    assert filter_.update("T 字形台阶", True) == "高墙"
+    assert filter_.update("高墙", True) == "高墙"
+    # 但感知断流不能因时序滤波继续显示旧障碍。
+    assert filter_.update("高墙", False) == "感知数据无效"
 
 
 def test_front_obstacle_names_and_status_are_human_readable():
@@ -82,9 +107,8 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.obstacle_type = NavigationSafety.OBSTACLE_CLEAR
     safety.slope_pitch = 0.174533  # 规则主斜坡 10°
     assert front_obstacle_name_zh(safety) == "主斜坡（10°坡面）"
-    safety.slope_pitch = 0.244346  # 两座木桥的 14° 引坡
-    assert "木桥引坡" in front_obstacle_name_zh(safety)
-    assert "A/B 待结构确认" in front_obstacle_name_zh(safety)
+    safety.slope_pitch = 0.244346  # 规则木桥 A 的连续 14° 入口坡
+    assert front_obstacle_name_zh(safety) == "木桥 A（14°入口坡）"
 
     safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
     safety.slope_pitch = 0.0
@@ -105,6 +129,8 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     assert "直角绕杆" in front_obstacle_name_zh(safety)
     safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
     safety.obstacle_height = 0.15
+    safety.pit_depth = 0.10
+    safety.slope_pitch = 0.0
     safety.width = 0.42
     safety.roughness = 0.047
     assert front_obstacle_name_zh(safety) == "砂砾与碎木坑"
@@ -115,6 +141,244 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.roughness = 0.07
     assert front_obstacle_name_zh(safety) == "木桥 B（桥板间隙）"
     safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.30
+    safety.width = 1.0
+    assert front_obstacle_name_zh(safety) == "高墙"
+
+    # 近距离相机只覆盖 T 台一级踏面的一部分，仍应以高度+宽度+粗糙度联合识别。
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.30
+    safety.width = 0.51
+    safety.roughness = 0.06
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
+
+
+def test_flat_arena_edge_is_not_named_as_the_competition_pit():
+    """规则场地边缘的平整负台阶不能为砂砾坑任务增加一次完成计数。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.pit_depth = 0.128
+    safety.obstacle_height = 0.012
+    safety.roughness = 0.028
+    safety.width = 1.10
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "场地边界（禁止越界）"
+    # 真实坑入口具有护栏/碎料起伏，仍保留比赛语义。
+    safety.obstacle_height = 0.15
+    safety.roughness = 0.055
+    assert front_obstacle_name_zh(safety) == "砂砾与碎木坑"
+
+    # Gazebo 联合回归的实际量测：护栏/坑深/宽度均吻合规则，即使体素化后的表面
+    # 残差只有约 2.5 cm，也必须确认坑区而不是让自动任务永久重试入口。
+    safety.obstacle_height = 0.14975
+    safety.pit_depth = 0.10094
+    safety.roughness = 0.02518
+    safety.width = 0.54998
+    assert front_obstacle_name_zh(safety) == "砂砾与碎木坑"
+
+
+def test_tall_platform_with_negative_gaps_is_not_named_as_gravel_pit():
+    """木桥/T 台侧视的高平台与负间隙组合必须等待结构确认。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.pit_depth = 0.31
+    safety.obstacle_height = 0.43
+    safety.roughness = 0.08
+    safety.width = 1.02
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "台阶或木桥踏板（待结构确认）"
+
+
+def test_ambiguous_pit_without_rule_guard_rail_is_not_actionable_gravel():
+    """PIT 粗分类若缺少坑区护栏/碎料证据，只能继续观察而不能增加任务计数。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.pit_depth = 0.18
+    safety.width = 1.0
+    safety.slope_pitch = 0.0
+
+    # 高平台侧面会在 PIT/STEP 间跳变；0.24 m 已高于规则坑区 0.15 m 护栏。
+    safety.obstacle_height = 0.24
+    safety.roughness = 0.06
+    assert front_obstacle_name_zh(safety) == "台阶或木桥踏板（待结构确认）"
+
+    # 只有负回波、没有任何正凸起时也不能称作比赛砂砾坑。
+    safety.obstacle_height = 0.0
+    safety.roughness = 0.08
+    assert front_obstacle_name_zh(safety) == "坑洞（结构待确认）"
+
+    # 明确看到规则尺寸附近的护栏、坑深和碎料粗糙度后才给出比赛专名。
+    safety.obstacle_height = 0.15
+    safety.pit_depth = 0.10
+    safety.roughness = 0.055
+    assert front_obstacle_name_zh(safety) == "砂砾与碎木坑"
+
+
+def test_partial_oblique_arena_edge_is_still_boundary():
+    """横偏视角只能看到窄边缘时也不能把场外落差当成比赛砂砾坑。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.obstacle_height = 0.020
+    safety.pit_depth = 0.101
+    safety.slope_pitch = 0.0
+    safety.roughness = 0.028
+    safety.width = 0.437
+    assert front_obstacle_name_zh(safety) == "场地边界（禁止越界）"
+
+    # 南侧边缘联调样本：落差接近桥板间隙，但没有任何高于地面的桥板，不能报木桥 B。
+    safety.obstacle_height = 0.006
+    safety.pit_depth = 0.150
+    safety.roughness = 0.030
+    safety.width = 0.80
+    assert front_obstacle_name_zh(safety) == "场地边界（禁止越界）"
+
+    # 北侧斜视联调样本：深度相机会看到更深的外围参考地面，但仍没有坑区护栏或碎料。
+    safety.obstacle_height = 0.0
+    safety.pit_depth = 0.205
+    safety.roughness = 0.0001
+    safety.width = 1.10
+    assert front_obstacle_name_zh(safety) == "场地边界（禁止越界）"
+    # 靠近边缘时看向更低参考地面会产生远大于真实 0.10 m 坑深的负落差；只要没有
+    # 护栏/填料正凸起和粗糙度，仍应判为不可越界边缘。
+    safety.pit_depth = 0.48
+    assert front_obstacle_name_zh(safety) == "场地边界（禁止越界）"
+
+
+def test_low_flat_arena_side_is_not_a_high_wall():
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.257
+    safety.width = 0.692
+    safety.roughness = 0.039
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "场地边界（禁止越界）"
+
+
+def test_segmented_bridge_b_is_not_named_as_the_gravel_pit():
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.261
+    safety.width = 1.113
+    safety.roughness = 0.093
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "木桥 B（分段桥板）"
+
+
+def test_main_slope_side_is_not_segmented_bridge_b():
+    """整场联调实测的主坡侧边不得再次触发长桥 Action。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.2772
+    safety.width = 0.8880
+    safety.roughness = 0.0590
+    safety.slope_pitch = 0.0
+    safety.pit_depth = 0.0
+    assert "木桥 B" not in front_obstacle_name_zh(safety)
+
+
+def test_crossbar_vision_preserves_height_bar_during_near_step_crop():
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.34
+    safety.width = 1.12
+    safety.roughness = 0.05
+    assert front_obstacle_name_zh(safety, "横杆") == "限高杆"
+
+
+def test_full_height_t_stair_sample_is_not_left_generic():
+    """正对 T 台顶面时约 0.455 m 的带噪量测仍应保持规则语义。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.455
+    safety.width = 1.12
+    safety.roughness = 0.037
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
+
+
+def test_clear_fourteen_degree_ramp_is_bridge_a():
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_CLEAR
+    safety.slope_pitch = 0.244
+    safety.slope_roll = 0.0
+    assert front_obstacle_name_zh(safety) == "木桥 A（14°入口坡）"
+
+
+def test_field_calibration_disambiguates_slope_side_stairs_and_bridge_entries():
+    """Lock the geometry combinations observed in the complete Gazebo field run."""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+
+    # Looking at the long side of the 10-degree ramp is a tall vertical edge, not
+    # a T-shaped stair traversal entry.
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.473
+    safety.width = 1.11
+    safety.roughness = 0.058
+    safety.slope_pitch = 0.0
+    safety.slope_roll = 0.1745
+    assert "T 字形" not in front_obstacle_name_zh(safety)
+
+    # 即使侧面只量到 0.40 m（落入普通 T 台高度范围），10° 横向坡仍必须阻止误交接。
+    safety.obstacle_height = 0.40
+    safety.roughness = 0.042
+    assert "T 字形" not in front_obstacle_name_zh(safety)
+
+    # Close T-stair samples can be coarsely labelled PIT after the high tread is
+    # absorbed into the ground fit; its ordered 20-degree profile restores semantics.
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.slope_roll = 0.0
+    safety.obstacle_height = 0.068
+    safety.pit_depth = 0.292
+    safety.slope_pitch = 0.352
+    safety.roughness = 0.040
+    safety.width = 0.93
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
+
+    # Bridge A's partial approach ramp must not look like a flat arena drop.
+    safety.obstacle_height = 0.026
+    safety.pit_depth = 0.146
+    safety.slope_pitch = 0.154
+    safety.roughness = 0.019
+    safety.width = 1.02
+    assert "木桥 A" in front_obstacle_name_zh(safety)
+
+    # A low wall can occlude the floor and transiently look like a deep negative
+    # step. Its depth/width/profile must restore wall semantics without world pose.
+    safety.obstacle_height = 0.0
+    safety.pit_depth = 0.390
+    safety.slope_pitch = -0.299
+    safety.roughness = 0.047
+    safety.width = 0.98
+    assert front_obstacle_name_zh(safety) == "高墙（遮挡轮廓）"
+
+
+def test_field_calibration_disambiguates_bridge_platform_and_pit_guardrail():
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.255
+    safety.roughness = 0.014
+    safety.width = 1.09
+    assert "木桥平台" in front_obstacle_name_zh(safety)
+
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.18
+    safety.roughness = 0.057
+    safety.width = 0.60
+    assert front_obstacle_name_zh(safety) == "坑区护栏（后方地形待确认）"
+    safety.width = 0.98
     assert front_obstacle_name_zh(safety) == "高墙"
 
 
@@ -129,12 +393,16 @@ def test_front_name_disambiguates_bar_support_and_pit_guardrail():
 
     safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
     safety.obstacle_height = 0.25
-    safety.width = 0.88
+    safety.width = 0.60
     safety.clearance_height = 0.25
     assert front_obstacle_name_zh(safety) == "坑区护栏（后方地形待确认）"
 
+    # 高墙侧视时可能只量到顶部边缘，粗分类会短暂成为 BAR；其连续横宽仍接近 1 m。
+    safety.width = 0.98
+    assert front_obstacle_name_zh(safety) == "高墙（顶边轮廓）"
+
     safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
-    safety.obstacle_height = 0.25
+    safety.obstacle_height = 0.18
     safety.roughness = 0.057
     safety.width = 0.59
     safety.clearance_height = 0.0
@@ -336,6 +604,32 @@ def test_velocity_gate_requires_fresh_command_and_assessment():
     assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
     assert gated_twist(command, float("nan"), True, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, True, True, True, True).linear.x == 0.0
+
+
+def test_alignment_twist_never_preserves_translation():
+    """近障碍对正权限只能放行有界 yaw，不能重新放开向前运动。"""
+    command = Twist()
+    command.linear.x = 0.8
+    command.linear.y = -0.2
+    command.angular.z = 0.7
+    output = alignment_twist(command, 0.3)
+    assert output.linear.x == 0.0
+    assert output.linear.y == 0.0
+    assert output.angular.z == 0.3
+    command.angular.z = -0.8
+    assert alignment_twist(command, 0.3).angular.z == -0.3
+    assert alignment_twist(command, 0.0).angular.z == 0.0
+
+
+def test_only_pure_yaw_can_escape_a_zero_speed_limit():
+    command = Twist()
+    command.angular.z = 0.5
+    assert is_pure_rotation_request(command)
+    command.linear.x = 0.10
+    assert not is_pure_rotation_request(command)
+    command.linear.x = 0.0
+    command.linear.y = 0.03
+    assert not is_pure_rotation_request(command, 0.02)
 
 
 def test_final_velocity_gate_checks_only_the_command_direction():

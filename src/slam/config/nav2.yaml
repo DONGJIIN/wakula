@@ -250,3 +250,9 @@ nav2_readiness_monitor:
     minimum_scan_field_of_view: 3.14
     max_xy_covariance: 1.0
     expected_odom_frame: odom
+    # 快速重启后 slam_toolbox 偶发停在 inactive；监控器只在 scan/odom 健康且
+    # map TF 缺失时尝试 configure/activate，不会关闭或重置外部定位节点。
+    recover_slam_toolbox: true
+    slam_lifecycle_node: /slam_toolbox
+    slam_recovery_period: 2.0
+    slam_recovery_startup_grace: 4.0

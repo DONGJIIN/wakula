@@ -32,5 +32,7 @@ float32 roughness
 float32 distance
 float32 lateral_offset     # 障碍中心横向偏移，供入口对正使用，左正右负，m
 float32 width
+float32 structure_heading  # 障碍前缘法线相对机身前向的夹角，左转为正，rad
+float32 structure_heading_confidence # 方向证据可信度 0..1，低值时不得用于交接
 float32 clearance_height
 uint32 valid_points

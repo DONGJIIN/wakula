@@ -89,6 +89,8 @@ def terrain_observation_valid(terrain) -> bool:
         terrain.distance,
         terrain.lateral_offset,
         terrain.width,
+        terrain.structure_heading,
+        terrain.structure_heading_confidence,
         terrain.clearance_height,
     )
     return (
@@ -103,6 +105,7 @@ def terrain_observation_valid(terrain) -> bool:
         and float(terrain.roughness) >= 0.0
         and float(terrain.distance) >= 0.0
         and float(terrain.width) >= 0.0
+        and 0.0 <= float(terrain.structure_heading_confidence) <= 1.0
         and float(terrain.clearance_height) >= 0.0
         and int(terrain.valid_points) > 0
     )
@@ -200,6 +203,10 @@ def fuse_observations(
     # 横向偏移有方向，不能用 nonnegative 清洗；NaN/Inf 仍安全归零并由有效性校验拒绝。
     result.lateral_offset = _finite_or_zero(terrain.lateral_offset)
     result.width = _nonnegative_finite_or_zero(terrain.width)
+    result.structure_heading = _finite_or_zero(terrain.structure_heading)
+    result.structure_heading_confidence = _nonnegative_finite_or_zero(
+        terrain.structure_heading_confidence
+    )
     result.clearance_height = _nonnegative_finite_or_zero(
         terrain.clearance_height
     )

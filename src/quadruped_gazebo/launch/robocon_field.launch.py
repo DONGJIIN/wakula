@@ -6,6 +6,7 @@
 """
 
 from pathlib import Path
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -14,12 +15,47 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     LogInfo,
+    OpaqueFunction,
     SetEnvironmentVariable,
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+
+
+def _reject_duplicate_world(_context):
+    """在启动前拒绝同名 Gazebo world，避免 ROS 话题连接到另一份旧场景。
+
+    Gazebo Transport 允许两个同名 world 同时存在，但 ROS bridge 只能看到同名服务和
+    话题，最终会形成“画面里机器人在 A、里程计来自 B”的隐蔽故障。这里不擅自杀进程，
+    而是让第二次启动给出明确错误，用户 Ctrl-C 旧 Gazebo 后再执行同一条命令即可。
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gz",
+                "service",
+                "-i",
+                "-s",
+                "/world/robocon_obstacle_field/scene/info",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            # Transport discovery on a busy ROS/Gazebo workstation commonly needs 2～3 s.
+            # A too-short query would silently miss the exact duplicate this guard prevents.
+            timeout=5.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # 缺少 gz 时后续 ros_gz_sim 会给出标准依赖错误；查询超时也不能据此误判重复。
+        return []
+    if "tcp://" in result.stdout:
+        raise RuntimeError(
+            "A robocon_obstacle_field Gazebo server is already running. "
+            "Stop the old Gazebo launch with Ctrl-C before starting a new one."
+        )
+    return []
 
 
 def generate_launch_description():
@@ -106,6 +142,20 @@ def generate_launch_description():
                 ],
                 # ROS 侧只接收仲裁后的唯一速度；Gazebo 侧仍保持模型插件默认 /cmd_vel。
                 remappings=[("/cmd_vel", "/cmd_vel_gazebo")],
+                parameters=[use_sim_time],
+            ),
+            # 仅暴露 Gazebo 的标准模型位姿服务。第三条“自动导航”命令中的仿真
+            # TraverseObstacle adapter 用它越过测试狗无法靠平面轮式插件跨越的实体
+            # 碰撞；SLAM、Nav2 和真机控制器均不订阅或调用此服务。
+            Node(
+                package="ros_gz_bridge",
+                executable="parameter_bridge",
+                name="robocon_pose_service_bridge",
+                output="screen",
+                arguments=[
+                    "/world/robocon_obstacle_field/set_pose@"
+                    "ros_gz_interfaces/srv/SetEntityPose",
+                ],
                 parameters=[use_sim_time],
             ),
             # 仿真专用速度仲裁：手动 /cmd_vel_teleop 短时优先，算法继续使用标准
@@ -265,7 +315,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("robot_x", default_value="-2.5"),
             DeclareLaunchArgument("robot_y", default_value="-0.2"),
-            DeclareLaunchArgument("robot_yaw", default_value="0.0"),
+            # 地面启动框西侧是当前参考布局中更开阔的自由区。默认朝西可避免相机启动
+            # 第一帧斜视主坡的长侧边（该轮廓会同时像台阶和墙）；正式坐标公布后仍可
+            # 用 robot_yaw:=... 覆盖，不影响 SLAM 或自动任务 launch。
+            DeclareLaunchArgument("robot_yaw", default_value="3.141593"),
+            OpaqueFunction(function=_reject_duplicate_world),
             gazebo_gui,
             gazebo_headless,
             robot_group,
