@@ -6,11 +6,13 @@ from nav_msgs.msg import OccupancyGrid
 
 from quadruped_planning.autonomous_mission import (
     Frontier,
+    ObservedObstacle,
     action_type_for_semantic,
     action_obstacle_type,
     bounded_alignment_delta,
     canonical_obstacle_id,
     choose_frontier,
+    choose_pending_obstacle,
     close_handoff_is_safe,
     distance_outside_grid,
     distance_inside_grid_edge,
@@ -21,10 +23,12 @@ from quadruped_planning.autonomous_mission import (
     frontier_goal_in_known_free_space,
     is_actionable_semantic_id,
     mission_score,
+    mission_inventory,
     nav_status_allows_guarded_handoff,
     normalized_angle,
     obstacle_was_completed,
     resolve_completed_semantics,
+    inventory_message,
     semantic_id_for_action,
     semantic_vote_is_confirmed,
     select_full_semantic_vote,
@@ -323,6 +327,42 @@ def test_competition_score_counts_unique_tasks_and_return_bonus():
     assert abs(normalized_angle(3.5)) <= 3.141593
 
 
+def test_inventory_lists_completed_and_pending_in_stable_rule_order():
+    expected = ["right_angle_poles", "height_bar", "high_wall"]
+    completed, pending = mission_inventory(
+        expected,
+        ["high_wall", "high_wall", "diagnostic_unknown"],
+    )
+    assert completed == ("high_wall",)
+    assert pending == ("right_angle_poles", "height_bar")
+    text = inventory_message(pending)
+    assert '"count":2' in text
+    assert '"ids":["right_angle_poles","height_bar"]' in text
+    assert "直角绕杆区" in text
+
+
+def test_active_search_prefers_one_near_known_unfinished_obstacle():
+    records = [
+        ObservedObstacle(
+            "high_wall", 5.0, 0.0, 3.0, 0.0, 0.0, 0.90, 10.0
+        ),
+        ObservedObstacle(
+            "height_bar", 1.5, 0.0, 1.0, 0.0, 0.0, 0.80, 11.0
+        ),
+    ]
+    selected = choose_pending_obstacle(records, [], (0.0, 0.0, 0.0), 12.0)
+    assert selected is not None
+    assert selected.semantic_id == "height_bar"
+    # 完成后必须选择下一项；冷却中的已知任务也应让位给可执行目标。
+    assert choose_pending_obstacle(
+        records, ["height_bar"], (0.0, 0.0, 0.0), 12.0
+    ).semantic_id == "high_wall"
+    records[0].retry_after = 20.0
+    assert choose_pending_obstacle(
+        records, ["height_bar"], (0.0, 0.0, 0.0), 12.0
+    ) is None
+
+
 def test_semantic_vote_converges_from_early_generic_guess():
     votes = ["wooden_bridge_unknown", "high_wall", "high_wall"]
     assert select_semantic_vote(votes) == "high_wall"
@@ -441,8 +481,13 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert '"/navigation/autonomy_stop"' in source
     assert "_publish_immediate_stop()" in source
     assert '"/perception/front_obstacle_name"' in source
-    assert '"RETURNING_HOME"' in source
+    assert '"RETURNING_TO_FINISH"' in source
     assert '"return_home"' in source
+    assert '"/autonomy/finish_pose"' in source
+    assert '"/autonomy/completed_obstacles"' in source
+    assert '"/autonomy/pending_obstacles"' in source
+    assert "choose_pending_obstacle" in source
+    assert '"SEEKING_PENDING_OBSTACLE"' in source
     assert "SEARCHING_MISSING_OBSTACLES" in source
     assert "_nav_is_stalled" in source
     cancel_body = source.split('def _cancel_nav(self, reason="replace"):', 1)[1].split(

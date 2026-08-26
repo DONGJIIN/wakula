@@ -86,8 +86,13 @@ autonomous_mission:
     # 只对同类别、同位置的已完成障碍去重，避免密集场地中顺带屏蔽相邻的另一类障碍。
     completed_obstacle_radius: 0.65
     post_traversal_cooldown: 3.0
+    # 多帧确认但尚未成功越过的障碍进入任务账本。空闲时优先回到当时的安全观察位置，
+    # 面向障碍重新采集实时证据；绝不把 Nav2 目标直接设在实体中心。
+    obstacle_revisit_position_tolerance: 0.30
+    # 一次回访后给感知/地图 8 秒更新，同时允许先探索其他方向，避免在单一误检处循环。
+    obstacle_revisit_cooldown: 8.0
     # 无前沿不是结束条件：连续约 1 秒无候选后原地转 90° 补扫，四次补扫后重新尝试
-    # 暂时失败的前沿。只有八项完成或总任务超时才返航。
+    # 暂时失败的前沿。只有八项完成或总任务超时才转向终点。
     empty_frontier_confirmations: 4
     search_turn_angle: 1.570796
     # Nav2 Action 尚未结束但 map 位姿连续 8 秒既没有 8 cm 平移，也没有 0.10 rad 转动，
@@ -95,7 +100,7 @@ autonomous_mission:
     nav_stall_timeout: 8.0
     nav_progress_translation: 0.08
     nav_progress_rotation: 0.10
-    # 规则比赛时长尚可能调整；该软件上限用于保证异常情况下仍会带已有成绩返航。
+    # 规则比赛时长尚可能调整；该软件上限保证异常时仍会携带已有清单前往终点。
     mission_timeout: 900.0
     return_home_tolerance: 0.40
     front_name_timeout: 1.2

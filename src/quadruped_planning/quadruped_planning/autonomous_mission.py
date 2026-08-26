@@ -7,26 +7,27 @@
 
 from __future__ import annotations
 
-from action_msgs.msg import GoalStatus
 from collections import deque
 from dataclasses import dataclass
+import json
 from math import atan2, ceil, cos, degrees, floor, hypot, isfinite, pi, sin
-import time
 import signal
-from typing import List, Optional, Sequence, Tuple
+import time
+from typing import Dict, List, Optional, Sequence, Tuple
 
+from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
+from nav2_msgs.action import NavigateToPose
 from quadruped_interfaces.action import TraverseObstacle
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
 import rclpy
-from rclpy.signals import SignalHandlerOptions
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -44,6 +45,58 @@ COMPETITION_OBSTACLE_IDS = (
     "t_shaped_stairs",
     "high_wall",
 )
+
+# 机器接口始终使用上面的稳定英文 ID；中文仅用于终端和任务清单，不能参与控制判断。
+# 这样其他队员或上位机可以可靠解析 ID，同时现场人员无需对照枚举表。
+COMPETITION_OBSTACLE_NAMES_ZH = {
+    "right_angle_poles": "直角绕杆区",
+    "gravel_wood_pit": "砂砾与碎木坑",
+    "height_bar": "限高杆",
+    "main_slope": "主斜坡",
+    "wooden_bridge_a": "木桥 A",
+    "wooden_bridge_b": "木桥 B",
+    "t_shaped_stairs": "T 字形台阶",
+    "high_wall": "高墙",
+}
+
+
+def mission_inventory(
+    expected_ids: Sequence[str], completed_ids: Sequence[str]
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """Return deterministic completed/pending lists in configured task order.
+
+    A set alone is sufficient for scoring but unsuitable for a dashboard: its order
+    changes between processes and duplicates can leak into display strings.  The
+    configured order is therefore the single presentation order, while unknown
+    diagnostic markers (for example an unresolved wooden bridge) remain internal.
+    """
+    expected = tuple(dict.fromkeys(str(item) for item in expected_ids if str(item)))
+    completed_set = set(str(item) for item in completed_ids)
+    completed = tuple(item for item in expected if item in completed_set)
+    pending = tuple(item for item in expected if item not in completed_set)
+    return completed, pending
+
+
+def inventory_message(ids: Sequence[str]) -> str:
+    """Serialize one obstacle list as UTF-8 JSON for humans and programs.
+
+    ``std_msgs/String`` keeps this optional reporting interface lightweight.  JSON is
+    deliberately used instead of an ad-hoc comma-separated sentence so a future UI,
+    referee bridge or logger can consume it without depending on Chinese punctuation.
+    """
+    stable_ids = [str(item) for item in ids]
+    return json.dumps(
+        {
+            "count": len(stable_ids),
+            "ids": stable_ids,
+            "names_zh": [
+                COMPETITION_OBSTACLE_NAMES_ZH.get(item, item)
+                for item in stable_ids
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def canonical_obstacle_id(name: str) -> str:
@@ -232,7 +285,7 @@ def resolve_completed_semantics(
 
 
 def normalized_angle(angle: float) -> float:
-    """把任意弧度折叠到 [-pi, pi]，供停滞检测和返航角度判断共用。"""
+    """把任意弧度折叠到 [-pi, pi]，供停滞检测和终点航向判断共用。"""
     return atan2(sin(float(angle)), cos(float(angle)))
 
 
@@ -432,6 +485,66 @@ class Frontier:
     cells: int
     distance: float
     score: float
+
+
+@dataclass
+class ObservedObstacle:
+    """One confirmed but not necessarily traversed competition obstacle.
+
+    ``obstacle_*`` is the filtered map position of the structure. ``view_*`` is a
+    known-safe robot pose from which the sensors actually observed it.  Revisit goals
+    go to the viewpoint, never to the solid obstacle coordinate; Nav2 therefore keeps
+    its normal collision semantics and the traversal controller receives control only
+    after the regular alignment/handoff gates pass again.
+
+    This record contains no Gazebo entity name or fixed arena coordinate.  It is built
+    entirely from map->base_link and live perception, so the same mission code can be
+    copied to another robot or an unknown real venue.
+    """
+
+    semantic_id: str
+    obstacle_x: float
+    obstacle_y: float
+    view_x: float
+    view_y: float
+    view_yaw: float
+    confidence: float
+    last_seen: float
+    retry_after: float = 0.0
+
+
+def choose_pending_obstacle(
+    records: Sequence[ObservedObstacle],
+    completed_ids: Sequence[str],
+    robot: Tuple[float, float, float],
+    now: float,
+) -> Optional[ObservedObstacle]:
+    """Choose one known unfinished obstacle for active reacquisition.
+
+    Only records whose retry cooldown expired are eligible.  The nearest previously
+    safe viewpoint wins; confidence and recency break distance ties.  This produces a
+    stable one-at-a-time policy and avoids abandoning a known task merely because a
+    farther frontier currently has more unknown cells.
+    """
+    completed = set(str(item) for item in completed_ids)
+    candidates = [
+        item
+        for item in records
+        if is_actionable_semantic_id(item.semantic_id)
+        and item.semantic_id not in completed
+        and float(item.retry_after) <= float(now)
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: (
+            hypot(item.view_x - robot[0], item.view_y - robot[1]),
+            -float(item.confidence),
+            -float(item.last_seen),
+            item.semantic_id,
+        ),
+    )
 
 
 def _origin_yaw(grid: OccupancyGrid) -> float:
@@ -1001,8 +1114,12 @@ class AutonomousMission(Node):
             # Action before the first stable cloud from the new view arrives.
             "semantic_post_turn_settle_time": 1.20,
             "completed_obstacle_radius": 0.65, "post_traversal_cooldown": 3.0,
+            # 已经从多帧感知确认、但还没有成功越过的障碍进入任务账本。探索空闲时优先
+            # 回到当时的安全观察位姿重新捕获它，而不是把目标直接放在实体障碍中心。
+            "obstacle_revisit_position_tolerance": 0.30,
+            "obstacle_revisit_cooldown": 8.0,
             # 没有前沿不等于比赛完成：先原地分段转向补扫，再重试曾被 Nav2 暂时拒绝
-            # 的方向；只有八项任务全部完成或总任务超时才进入返航。
+            # 的方向；只有八项任务全部完成或总任务超时才转向终点。
             "empty_frontier_confirmations": 4,
             "search_turn_angle": 1.570796,
             "nav_stall_timeout": 8.0,
@@ -1038,6 +1155,26 @@ class AutonomousMission(Node):
         self.state_pub = self.create_publisher(String, "/autonomy/state", 10)
         self.event_pub = self.create_publisher(String, "/autonomy/event", 10)
         self.progress_pub = self.create_publisher(String, "/autonomy/progress", 10)
+        # 两份清单使用 transient-local，监控程序或队友的终端即使晚启动，也能立即看到
+        # 最近任务状态。内容是带稳定英文 ID 和中文名称的 JSON，不参与运动控制。
+        inventory_qos = QoSProfile(depth=1)
+        inventory_qos.reliability = ReliabilityPolicy.RELIABLE
+        inventory_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.completed_pub = self.create_publisher(
+            String, "/autonomy/completed_obstacles", inventory_qos
+        )
+        self.pending_pub = self.create_publisher(
+            String, "/autonomy/pending_obstacles", inventory_qos
+        )
+        # 默认终点就是任务启动点，保持三条启动命令即可完整运行。若正式规则指定不同
+        # 终点，赛务/上位机可在运行前发布一个 map 坐标 PoseStamped 覆盖它；算法不需要
+        # 读取 Gazebo world 或修改任何场地坐标。
+        self.create_subscription(
+            PoseStamped,
+            "/autonomy/finish_pose",
+            self._finish_pose_callback,
+            inventory_qos,
+        )
         # 独立任务进程拥有自己的运动许可。TRANSIENT_LOCAL 让核心速度门记住最后状态：
         # 启动时解除自主停车，Ctrl-C 时先锁止，再取消异步 Action。核心 SLAM 不需要启动
         # 或管理本节点；它只把这一标准布尔量作为额外的失效安全输入。
@@ -1068,6 +1205,7 @@ class AutonomousMission(Node):
         # 导航，无法进入受保护的 Action 交接，只会反复提交同一个近距离目标。
         self.nav_cancel_reason = ""
         self.nav_purpose = ""
+        self.nav_revisit_id = ""
         self.nav_started = 0.0
         self.nav_target = None
         self.nav_progress_pose = None
@@ -1100,6 +1238,9 @@ class AutonomousMission(Node):
         # 的全是实时 map 位姿，不含规则图或 Gazebo 实体坐标。
         self.completed_traversal_segments = []
         self.completed_semantics = []
+        # semantic_id -> 最近一次可靠观察。比赛八项 ID 唯一，因此字典天然保证任务清单
+        # 不会因同一障碍多帧观测而膨胀；真正完成仍只能由 Action success 写入。
+        self.observed_obstacles: Dict[str, ObservedObstacle] = {}
         self.blocked_frontiers = []
         # 只记录本次自主任务实际经过的 map 位姿。当前沿消失后，覆盖目标会选择离这些
         # 轨迹最远的已知自由区，避免“雷达看完地图但相机没看完障碍”时原地转圈。
@@ -1127,6 +1268,7 @@ class AutonomousMission(Node):
         self.front_obstacle_name = ""
         self.front_name_received = 0.0
         self.home_pose = None
+        self.finish_pose = None
         self.returned_home = False
         self.return_attempts = 0
         self.search_turn_index = 0
@@ -1136,12 +1278,17 @@ class AutonomousMission(Node):
 
     def _publish_state(self, event=""):
         self.state_pub.publish(String(data=self.state))
-        expected = set(str(item) for item in self.params["expected_obstacle_ids"])
-        finished = expected.intersection(self.completed_semantics)
+        completed, pending = mission_inventory(
+            self.params["expected_obstacle_ids"], self.completed_semantics
+        )
+        self.completed_pub.publish(String(data=inventory_message(completed)))
+        self.pending_pub.publish(String(data=inventory_message(pending)))
         progress = (
-            f"state={self.state}; completed={len(finished)}/{len(expected)}; "
+            f"state={self.state}; completed={len(completed)}/"
+            f"{len(completed) + len(pending)}; "
             f"score={mission_score(self.completed_semantics, self.returned_home)}; "
-            f"ids={','.join(sorted(finished)) or 'none'}"
+            f"completed_ids={','.join(completed) or 'none'}; "
+            f"pending_ids={','.join(pending) or 'none'}"
         )
         self.progress_pub.publish(String(data=progress))
         if event:
@@ -1155,6 +1302,54 @@ class AutonomousMission(Node):
     def _map_callback(self, msg):
         self.map_msg = msg
         self.map_received = time.monotonic()
+
+    def _finish_pose_callback(self, msg: PoseStamped) -> None:
+        """Accept an optional map-frame finish pose without coupling to a venue.
+
+        The fallback terminal pose is the live start pose.  A separately deployed
+        referee/mission package may override it once official coordinates are known.
+        Invalid frames or non-finite values are ignored, because accepting them would
+        turn a reporting convenience into an unsafe navigation goal.
+        """
+        if str(msg.header.frame_id).lstrip("/") != "map":
+            self.get_logger().warning(
+                "Ignoring /autonomy/finish_pose: frame_id must be map"
+            )
+            return
+        position = msg.pose.position
+        orientation = msg.pose.orientation
+        values = (
+            position.x,
+            position.y,
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
+        )
+        if not all(isfinite(float(value)) for value in values):
+            self.get_logger().warning(
+                "Ignoring /autonomy/finish_pose: pose contains NaN/Inf"
+            )
+            return
+        norm = sum(float(value) ** 2 for value in values[2:])
+        if norm < 1e-6:
+            self.get_logger().warning(
+                "Ignoring /autonomy/finish_pose: quaternion is invalid"
+            )
+            return
+        # Pose producers should send a unit quaternion, but normalising here prevents a
+        # slightly scaled external value from changing the requested finish yaw.
+        scale = norm ** -0.5
+        qx, qy = float(orientation.x) * scale, float(orientation.y) * scale
+        qz, qw = float(orientation.z) * scale, float(orientation.w) * scale
+        yaw = atan2(
+            2.0 * (qw * qz + qx * qy),
+            1.0 - 2.0 * (qy * qy + qz * qz),
+        )
+        self.finish_pose = (float(position.x), float(position.y), float(yaw))
+        self._publish_state(
+            f"finish pose updated to ({position.x:.2f}, {position.y:.2f})"
+        )
 
     def _front_name_callback(self, msg: String) -> None:
         """缓存与最新感知同源的比赛名称；超时后绝不沿用上一处障碍。"""
@@ -1192,6 +1387,62 @@ class AutonomousMission(Node):
         if stamp - self.front_name_received > float(self.params["front_name_timeout"]):
             return ""
         return canonical_obstacle_id(self.front_obstacle_name)
+
+    def _remember_obstacle(
+        self,
+        semantic_id: str,
+        position: Tuple[float, float],
+        confidence: float,
+        now: float,
+    ) -> None:
+        """Update the active-search record for one repeatedly confirmed obstacle.
+
+        The observation pose is at the robot, not at the obstacle.  Repeated frames use
+        a low-pass update for obstacle position but retain the newest safe viewpoint,
+        allowing later exploration to deliberately reacquire an unfinished task while
+        Nav2 continues treating the physical structure as occupied space.
+        """
+        if (
+            not is_actionable_semantic_id(semantic_id)
+            or semantic_id in self.completed_semantics
+            or not isfinite(float(confidence))
+        ):
+            return
+        robot = self._robot_pose()
+        if robot is None:
+            return
+        previous = self.observed_obstacles.get(semantic_id)
+        obstacle_x, obstacle_y = float(position[0]), float(position[1])
+        retry_after = 0.0
+        if previous is not None:
+            # 相同比赛 ID 理论上只出现一次。用低通抑制深度边缘抖动；若位置发生大跳变，
+            # 保留新观察但不平均两处，避免假阳性把回访点落在它们中间。
+            if hypot(
+                obstacle_x - previous.obstacle_x,
+                obstacle_y - previous.obstacle_y,
+            ) <= float(self.params["obstacle_lock_radius"]):
+                obstacle_x = 0.8 * previous.obstacle_x + 0.2 * obstacle_x
+                obstacle_y = 0.8 * previous.obstacle_y + 0.2 * obstacle_y
+            retry_after = previous.retry_after
+        self.observed_obstacles[semantic_id] = ObservedObstacle(
+            semantic_id=semantic_id,
+            obstacle_x=obstacle_x,
+            obstacle_y=obstacle_y,
+            view_x=float(robot[0]),
+            view_y=float(robot[1]),
+            view_yaw=float(robot[2]),
+            confidence=max(0.0, min(1.0, float(confidence))),
+            last_seen=float(now),
+            retry_after=retry_after,
+        )
+
+    def _defer_obstacle_revisit(self, semantic_id: str, now: float) -> None:
+        """Bound retries for one known target without blocking other exploration."""
+        record = self.observed_obstacles.get(str(semantic_id))
+        if record is not None:
+            record.retry_after = float(now) + float(
+                self.params["obstacle_revisit_cooldown"]
+            )
 
     def _geometry_supports_obstacle_id(
         self,
@@ -1417,6 +1668,19 @@ class AutonomousMission(Node):
         else:
             self.obstacle_signature, self.obstacle_frames = signature, 1
 
+        # 任务账本只登记通过同一套 Action 语义门的多帧结果。单帧 OpenCV 名称或粗点云
+        # 类别仍可在终端显示，但不能变成主动回访目标；否则一个假阳性会让任务反复前往
+        # 错误位置。登记不代表完成，只有 TraverseObstacle success 才能移入完成清单。
+        if self.obstacle_frames >= int(self.params["obstacle_confirmation_frames"]):
+            remembered_id = self._resolved_obstacle_id(msg, current_id)
+            if is_actionable_semantic_id(remembered_id):
+                self._remember_obstacle(
+                    remembered_id,
+                    position,
+                    float(msg.confidence),
+                    now,
+                )
+
     def _obstacle_position(self, msg):
         pose = self._robot_pose()
         if pose is None:
@@ -1608,12 +1872,19 @@ class AutonomousMission(Node):
             self.nav_cancel_reason = str(reason)
             self.nav_handle.cancel_goal_async()
 
-    def _send_nav_goal(self, pose, purpose, guidance=None):
+    def _send_nav_goal(self, pose, purpose, guidance=None, revisit_id=""):
+        """Submit one Nav2 goal and bind all callback context before async send.
+
+        ``revisit_id`` is reporting/scheduling metadata only.  Nav2 still receives a
+        standard map-frame PoseStamped, so neither the planner nor a future base driver
+        needs to understand competition obstacle names.
+        """
         if self.nav_handle is not None or self.nav_send_pending or not self.nav_client.server_is_ready():
             return
         goal = NavigateToPose.Goal()
         goal.pose = pose
         self.nav_send_pending, self.nav_purpose = True, purpose
+        self.nav_revisit_id = str(revisit_id) if purpose == "revisit_obstacle" else ""
         self.nav_cancel_reason = ""
         self.nav_target = (pose.pose.position.x, pose.pose.position.y)
         self.nav_progress_pose = self._robot_pose()
@@ -1633,6 +1904,8 @@ class AutonomousMission(Node):
             # 路径规划失败，不能污染 blocked_frontiers；短暂退避后原目标可重新选择。
             self.nav_target = None
             self.nav_obstacle_position = None
+            self._defer_obstacle_revisit(self.nav_revisit_id, time.monotonic())
+            self.nav_revisit_id = ""
             self.nav_purpose = ""
             self.nav_retry_until = time.monotonic() + float(
                 self.params["nav_rejection_retry_delay"]
@@ -1652,11 +1925,13 @@ class AutonomousMission(Node):
         result = future.result()
         status = int(result.status) if result is not None else 0
         purpose, target = self.nav_purpose, self.nav_target
+        revisit_id = self.nav_revisit_id
         cancel_reason = self.nav_cancel_reason
         obstacle_position = self.nav_obstacle_position
         self.nav_handle, self.nav_target, self.nav_cancel_pending = None, None, False
         self.nav_progress_pose = None
         self.nav_obstacle_position = None
+        self.nav_revisit_id = ""
         self.nav_cancel_reason = ""
         succeeded = status == GoalStatus.STATUS_SUCCEEDED
         if purpose == "verify_obstacle":
@@ -1668,17 +1943,18 @@ class AutonomousMission(Node):
                 self.params["pre_alignment_settle_time"]
             )
         if purpose == "return_home":
-            if succeeded and self.home_pose is not None:
+            terminal_pose = self.finish_pose or self.home_pose
+            if succeeded and terminal_pose is not None:
                 pose = self._robot_pose()
                 arrived = pose is not None and hypot(
-                    pose[0] - self.home_pose[0], pose[1] - self.home_pose[1]
+                    pose[0] - terminal_pose[0], pose[1] - terminal_pose[1]
                 ) <= float(self.params["return_home_tolerance"])
                 if arrived:
                     self.returned_home = True
                     self.enabled = False
                     self.state = "COMPLETED"
                     self._publish_state(
-                        "returned to start; mission complete; "
+                        "reached mission finish; mission complete; "
                         f"score={mission_score(self.completed_semantics, True)}"
                     )
                     return
@@ -1686,11 +1962,15 @@ class AutonomousMission(Node):
             self.nav_retry_until = time.monotonic() + float(
                 self.params["nav_failure_retry_delay"]
             )
-            self.state = "RETURNING_HOME"
+            self.state = "RETURNING_TO_FINISH"
             self._publish_state(
-                f"return attempt {self.return_attempts} ended with status={status}; retrying"
+                f"finish attempt {self.return_attempts} ended with status={status}; retrying"
             )
             return
+        if purpose == "revisit_obstacle":
+            # 到达旧观察位后给相机/点云一个完整稳定窗口重新捕获。即使 Nav2 中止，也只
+            # 延迟该障碍，不妨碍任务继续选择前沿寻找其他未完成项。
+            self._defer_obstacle_revisit(revisit_id, time.monotonic())
         if purpose in ("frontier", "coverage") and not succeeded and target is not None:
             self.blocked_frontiers.append(target)
         if not succeeded:
@@ -1982,11 +2262,17 @@ class AutonomousMission(Node):
             self._reset_obstacle_lock()
             self.cooldown_until = time.monotonic() + float(self.params["post_traversal_cooldown"])
             self.state = "EXPLORING"
+            completed_inventory, pending_inventory = mission_inventory(
+                self.params["expected_obstacle_ids"], self.completed_semantics
+            )
             self._publish_state(
                 f"obstacle complete: {completed_id or 'unclassified'}; "
-                f"unique competition tasks={len(set(self.completed_semantics).intersection(COMPETITION_OBSTACLE_IDS))}/8"
+                f"unique competition tasks={len(completed_inventory)}/"
+                f"{len(completed_inventory) + len(pending_inventory)}; "
+                "continuing with next pending obstacle"
             )
         else:
+            self._defer_obstacle_revisit(completed_id, time.monotonic())
             if completed_position is not None:
                 # Action 后端明确失败时不能在下一 tick 对同一入口再次 handoff。将失败
                 # 位置放入与 Nav2 停滞共用的短期空间冷却；其他方向仍可继续探索，到期
@@ -2040,7 +2326,7 @@ class AutonomousMission(Node):
             self.coverage_visited.append((robot[0], robot[1]))
         if self.home_pose is None:
             # 起点必须来自任务启动时的实时 map->base_link，而不是规则图或 Gazebo pose。
-            # 这样选择地面启动区、T 台顶部启动区或未来任意正式坐标都能原路返航。
+            # 若没有外部 finish_pose，这个实时位姿就是默认终点；不依赖任何场地坐标。
             self.home_pose = robot
             self.mission_started = now
             self._publish_state(
@@ -2053,13 +2339,17 @@ class AutonomousMission(Node):
             self._arena_boundary_ahead(now)
             and self.nav_handle is not None
             and not self.nav_cancel_pending
-            and self.nav_purpose in ("frontier", "coverage", "approach")
+            and self.nav_purpose in (
+                "frontier", "coverage", "revisit_obstacle", "approach"
+            )
             # 相机仍看到旧边界时，侧后方的新目标正是脱离动作，必须允许 Nav2 先旋转；
             # 只有目标方向与当前边界方向一致时才取消。原地 search_turn 也始终放行。
             and target_is_in_heading_cone(robot, self.nav_target)
         ):
             if self.nav_purpose in ("frontier", "coverage") and self.nav_target is not None:
                 self.blocked_frontiers.append(self.nav_target)
+            if self.nav_purpose == "revisit_obstacle":
+                self._defer_obstacle_revisit(self.nav_revisit_id, now)
             self._cancel_nav("arena_boundary")
             self.nav_retry_until = now + float(self.params["nav_failure_retry_delay"])
             self._reset_obstacle_lock()
@@ -2077,6 +2367,8 @@ class AutonomousMission(Node):
             stalled_target = self.nav_target
             if stalled_purpose in ("frontier", "coverage") and stalled_target is not None:
                 self.blocked_frontiers.append(stalled_target)
+            if stalled_purpose == "revisit_obstacle":
+                self._defer_obstacle_revisit(self.nav_revisit_id, now)
             self._cancel_nav("stall")
             self.nav_retry_until = now + float(self.params["nav_failure_retry_delay"])
             self.state = "RECOVERY"
@@ -2122,8 +2414,9 @@ class AutonomousMission(Node):
                 self._start_traverse(self.pending_traverse)
             return
 
-        # 完成八项后立即返航；达到总任务时限也会携带已完成成绩返航，避免无前沿时永远
-        # 原地等待。返航仍走 Nav2，不读取仿真坐标，成功后才发布 COMPLETED。
+        # 完成八项后立即去终点；达到总任务时限也会携带已完成成绩结束，避免无前沿时
+        # 永远原地等待。默认终点是本次任务实时捕获的起点；若 /autonomy/finish_pose
+        # 提供正式终点则优先使用它。两种情况都不读取仿真 world。
         mission_timed_out = now - self.mission_started >= float(
             self.params["mission_timeout"]
         )
@@ -2134,16 +2427,18 @@ class AutonomousMission(Node):
                 return
             if self.nav_send_pending:
                 return
-            if self.home_pose is None:
+            terminal_pose = self.finish_pose or self.home_pose
+            if terminal_pose is None:
                 self.state = "WAITING_FOR_INPUTS"
                 return
-            self.state = "RETURNING_HOME"
+            self.state = "RETURNING_TO_FINISH"
             self._send_nav_goal(
-                self._make_pose(*self.home_pose),
+                self._make_pose(*terminal_pose),
                 "return_home",
             )
             reason = "all eight obstacles complete" if self._all_obstacles_complete() else "mission time limit reached"
-            self._publish_state(f"{reason}; returning to start")
+            destination = "configured finish" if self.finish_pose is not None else "start/finish"
+            self._publish_state(f"{reason}; navigating to {destination}")
             return
         target = None if now < self.cooldown_until else self._fresh_target()
         if target is not None:
@@ -2195,7 +2490,9 @@ class AutonomousMission(Node):
                 return
             if target.phase in (TraversalGuidance.PHASE_APPROACH, TraversalGuidance.PHASE_ALIGN):
                 approach = self._relative_approach_pose(target)
-                if self.nav_handle is not None and self.nav_purpose in ("frontier", "coverage"):
+                if self.nav_handle is not None and self.nav_purpose in (
+                    "frontier", "coverage", "revisit_obstacle"
+                ):
                     self._cancel_nav("approach")
                     return
                 if approach is not None:
@@ -2323,6 +2620,44 @@ class AutonomousMission(Node):
                     self._send_nav_goal(approach, "approach", target)
                 return
         if self.nav_handle is not None or self.nav_send_pending:
+            return
+
+        # 先处理“已经确认但尚未越过”的账本目标，再扩张未知前沿。回访目标是当时确认
+        # 障碍的安全观察位姿，并把机身朝向障碍中心；到达后仍必须重新通过实时感知、
+        # 对正和 Action 门，绝不会凭历史记录盲目越障。一次只提交一个 Nav2 goal。
+        pending_record = choose_pending_obstacle(
+            tuple(self.observed_obstacles.values()),
+            self.completed_semantics,
+            robot,
+            now,
+        )
+        if pending_record is not None:
+            distance_to_view = hypot(
+                pending_record.view_x - robot[0],
+                pending_record.view_y - robot[1],
+            )
+            if distance_to_view <= float(
+                self.params["obstacle_revisit_position_tolerance"]
+            ):
+                # 已在观察点附近时只转向，不生成小于 Nav2 位置容差的伪平移目标。
+                goal_x, goal_y = robot[0], robot[1]
+            else:
+                goal_x, goal_y = pending_record.view_x, pending_record.view_y
+            goal_yaw = atan2(
+                pending_record.obstacle_y - goal_y,
+                pending_record.obstacle_x - goal_x,
+            )
+            self._defer_obstacle_revisit(pending_record.semantic_id, now)
+            self.state = "SEEKING_PENDING_OBSTACLE"
+            self._send_nav_goal(
+                self._make_pose(goal_x, goal_y, goal_yaw),
+                "revisit_obstacle",
+                revisit_id=pending_record.semantic_id,
+            )
+            self._publish_state(
+                f"actively revisiting pending obstacle={pending_record.semantic_id}; "
+                f"view_distance={distance_to_view:.2f} m"
+            )
             return
         candidates = extract_frontiers(self.map_msg, (robot[0], robot[1]),
             minimum_cells=int(self.params["frontier_minimum_cells"]),

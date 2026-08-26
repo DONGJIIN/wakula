@@ -11,7 +11,7 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、224 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、226 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
 前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
@@ -33,6 +33,11 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 Gazebo + slam.launch.py 上验证 LaserScan、Odometry、Image、PointCloud2 实时数据、全部传感器
 TF、map 定位 TF、强类型算法输出和 /cmd_vel 消费者。检查器会容忍有界的 DDS discovery
 冷启动时间，但数据、类型或 TF 真正缺失仍返回非零；未接真实越障 Action 时只明确警告。
+
+2026-08-26 逐障碍账本短流程回归：三进程实跑完成直角绕杆区，先主动修正约 11.2°，再
+完成入口与 Action；清单从 0/8 更新为 1/8，并由 transient-local 话题向晚启动终端返回
+“已完成直角绕杆区、其余 7 项待完成”。随后识别砂砾坑并进入 SEEKING_PENDING_OBSTACLE，
+回到安全观察位重新面向它，同时继续前沿/覆盖探索，证明已知待完成目标不会被遗忘。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
@@ -111,6 +116,16 @@ SLAM 产生 map -> odom。启用地形感知还需：
 第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo；现实传感器和 Gazebo 传感器接口
 一致。在第三个终端按 Ctrl-C，会先锁住自动导航速度并停车，再取消 Action；第一、二条
 进程继续运行。键盘或手柄持续发布时仍可人工接管，不需要重新启动第三条。
+
+自主任务按“发现 → 多帧确认 → 主动对正 → 入口 → Action → 记录完成 → 下一项”串行执行。
+已知但尚未越过的障碍优先回到安全观察位重新识别，未知项继续由前沿和覆盖探索寻找；全部
+完成后默认回到启动点作为终点。运行中查看清单：
+
+  ros2 topic echo /autonomy/completed_obstacles
+  ros2 topic echo /autonomy/pending_obstacles
+
+正式终点不同，由独立赛务模块发布 /autonomy/finish_pose（PoseStamped、map frame）；不需要
+修改 Gazebo、SLAM、Nav2 或 OpenCV 源码。
 
 第一条在 GUI 模式下会自动打开 `Wakula Simulation Keyboard` 窗口；点击该窗口后使用
 i/k 前后、j/l 原地旋转、任意其他键停车。无需运行第四条键盘命令。
