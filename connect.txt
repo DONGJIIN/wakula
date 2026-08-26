@@ -367,13 +367,27 @@ LaserScan。相机和点云最好使用同一时间源；硬件同步优先，�
 
 未来硬件/状态估计团队必须提供：/scan、/odom、odom->base_link、传感器固定 TF，以及实际
 相机和点云话题；未来底盘/运动团队必须订阅最终 /cmd_vel。真机负责发布自身 URDF/TF 时，
-启动本项目须设置 robot_model:=false。算法启动后运行：
+启动本项目须设置 robot_model:=false。首次接入先只检查硬件输入：
 
-  ./scripts/check_integration.sh /实际图像话题 /实际点云话题
+  ./scripts/check_integration.sh --inputs-only \
+    --image /实际图像话题 --points /实际点云话题
 
-脚本只读检查标准类型、map/odom 到 base_link 的 TF、算法输出以及 /cmd_vel 是否有消费者，
-不会启动或驱动机器人；返回非零表示对接合同未满足。VS Code 中同样提供任务
-“ROS: check robot integration contract”。
+它会在 5 秒限时内实际读取 LaserScan、Odometry、Image、PointCloud2，检查消息类型和
+header.frame_id，并验证 base_link 到每个传感器及 odom->base_link 的 TF。只有这一层通过，
+才启动算法并执行完整检查：
+
+  ./scripts/check_integration.sh \
+    --image /实际图像话题 --points /实际点云话题
+
+完整模式继续检查 map->base_link、算法输出、/cmd_vel 消费者，并把未接真实
+/traverse_obstacle 服务端作为警告；正式联调动作控制时增加 --require-traverse-server 将其
+升级为失败。无视觉机器可用 --skip-vision，但 OpenCV/点云分类会失效。脚本只读，不启动、
+控制或发送速度；返回非零表示对接合同未满足。旧的两个位置参数仍兼容，完整参数见 --help。
+VS Code 中同样提供任务“ROS: check robot integration contract”。
+
+profile 与 launch 覆盖必须是 / 开头的绝对话题。内部固定使用标准消息类型，frame 默认遵循
+map -> odom -> base_link -> sensor_frame；若已有机器人使用其他 frame，可在检查脚本用
+--map-frame/--odom-frame/--base-frame 描述现状，但正式接入仍推荐在机器人适配层对齐标准名称。
 
 七、明确不存在的接口
 ----------------

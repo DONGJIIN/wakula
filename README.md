@@ -47,7 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，190 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，224 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -287,16 +287,22 @@ OpenCV 源码，只需完成以下合同：
    在真实姿态/接触闭环确认稳定落地后才能返回 `success=true`。
 4. 真机自身发布 URDF/TF 时使用 `robot_model:=false`，避免两个
    `robot_state_publisher` 同时发布传感器固定 TF。
-5. 全栈启动后执行 `./scripts/check_integration.sh`；若相机/点云名称不同，可将实际话题
-   作为两个参数传入。所有项通过后才算完成上层—真机最小对接。
+5. 接入时先运行 `check_integration.sh --inputs-only`，确认每个传感器确实在出数据、消息
+   带有效 `frame_id` 且 TF 可达；全栈启动后再运行默认完整检查，核验 `map` TF、算法输出、
+   `/cmd_vel` 消费者和可选越障 Action。所有项通过后才算完成上层—真机最小对接。
 
 ```bash
 ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
-./scripts/check_integration.sh /camera/image_raw /camera/depth/points
+./scripts/check_integration.sh --inputs-only --image /camera/image_raw --points /camera/depth/points
+./scripts/check_integration.sh --image /camera/image_raw --points /camera/depth/points
 ```
 
 接口的消息类型、字段、TF、超时与设备替换规则以 `connect.txt` 为准。未来可以在独立包中
 新增厂家 SDK、状态估计和运动控制，但不应反向让核心感知算法依赖厂家类型。
+
+这里的“可移植”是接口可移植，不是免标定：另一台机器仍要提供标准坐标方向和时间戳，测量
+传感器外参，并用实机 rosbag 重调高度、坡度、颜色和安全距离阈值。核心节点不读取 Gazebo
+模型名、比赛 world 坐标或厂家消息，因此仿真场、现实场和不同品牌驱动可使用同一套源码。
 
 ## 4. 默认与可替换传感器接口
 
@@ -371,6 +377,8 @@ RGB-D：  realsense_d400、orbbec_gemini2、zed2、oak_d
 
 profile 是常见驱动命名的起点，不绑定具体驱动版本；实际名称不同时用四个参数覆盖。
 配置集中在 `slam/config/sensor_profiles.yaml`，以后新增型号只需复制一个 YAML 段。
+profile 和命令行覆盖统一要求使用 `/` 开头的绝对话题，并在启动阶段拒绝空 namespace、
+空白字符及 substitution。这样错误配置会立即报出，而不会让节点在私有命名空间静默等数据。
 
 图像和点云使用 Sensor Data QoS；不指定 profile/显式话题时自动监听 ROS 常用默认话题：
 

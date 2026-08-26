@@ -278,7 +278,7 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 4. 用真机 rosbag 重调参数；上层算法无需绑定具体厂家 SDK。
 5. 真机模型接管 TF 时设置 robot_model:=false，避免重复发布固定变换。
 6. 底盘稳定输出 /odom、odom->base_link 并消费最终 /cmd_vel 后，运行
-   scripts/check_integration.sh 核验类型、TF 和消费者。
+   scripts/check_integration.sh 核验实时消息、frame_id、TF、算法输出和消费者。
 7. 未来运动/越障模块读取 /traversal/guidance，并用 /terrain/navigation_safety 复核
    perception_valid、时间戳和几何；两者只是入口/环境合同，动作执行、反馈、取消和硬件
    安全须由其独立实现。
@@ -294,6 +294,10 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 5. 新硬件先录 rosbag 离线调参，再断开执行器运行全栈，最后才由硬件团队低速接入 /cmd_vel。
 6. 查节点作用、归属和关键输入输出时，以 connect.txt 第二节为速查入口；消息字段、类型和
    真机要求继续查看该文件后续章节，不要只根据 ros2 topic list 猜测节点职责。
+7. profile 和 launch 覆盖都只接受以 / 开头的绝对话题；不要把节点 namespace 当作硬件适配
+   手段，否则同一条启动命令复制到另一台机器人后可能订阅到不同位置。
+8. 新机器先执行 scripts/check_integration.sh --inputs-only，只验证驱动层；算法启动后再执行
+   默认完整检查。需要把真实越障控制纳入验收时增加 --require-traverse-server。
 
 八、推荐代码阅读顺序
 ----------------

@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 from launch.actions import DeclareLaunchArgument
+import pytest
 import rclpy
 import yaml
 from nav_msgs.msg import Odometry
@@ -290,6 +291,40 @@ def test_sensor_profiles_cover_common_devices_and_allow_overrides():
     )
     assert resolved["scan_topic"] == "/front/scan"
     assert resolved["camera_topic"] == "/camera/camera/color/image_raw"
+
+
+@pytest.mark.parametrize(
+    "invalid_topic",
+    (
+        "front/scan",  # 相对话题会随节点 namespace 改变，破坏跨机器合同。
+        "/front//scan",  # 空 namespace token 常由字符串拼接错误产生。
+        "/front scan",  # Shell 参数缺少引号时可能引入空白。
+        "/front/scan/",  # 末尾分隔符容易形成肉眼难辨的不同话题。
+        "/front/{id}/scan", # profile 不允许运行期 substitution。
+    ),
+)
+def test_sensor_profile_overrides_reject_ambiguous_topic_names(invalid_topic):
+    """错误 remap 应在 launch 阶段失败，而不是让节点静默等待不存在的数据。"""
+    profiles = load_sensor_profiles(
+        str(PACKAGE_ROOT / "config" / "sensor_profiles.yaml")
+    )
+    with pytest.raises(ValueError):
+        resolve_sensor_topics(
+            profiles,
+            "ros_default",
+            {"scan_topic": invalid_topic},
+        )
+
+
+def test_sensor_profiles_keep_optional_vision_inputs_explicitly_empty():
+    """无视觉机器允许空输入，但必需的 scan/odom 绝不能被空字符串掩盖。"""
+    profiles = load_sensor_profiles(
+        str(PACKAGE_ROOT / "config" / "sensor_profiles.yaml")
+    )
+    assert profiles["ros_default"]["camera_topic"] == ""
+    assert profiles["ros_default"]["point_cloud_topic"] == ""
+    assert profiles["ros_default"]["scan_topic"].startswith("/")
+    assert profiles["ros_default"]["odom_topic"].startswith("/")
 
 
 def test_sensor_compat_launch_exposes_one_hardware_adaptation_point():

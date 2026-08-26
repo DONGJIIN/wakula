@@ -18,6 +18,41 @@ TOPIC_KEYS = (
 )
 
 
+def _validated_topic_name(
+    value: object,
+    *,
+    field: str,
+    allow_empty: bool,
+) -> str:
+    """Return one conservative, fully-qualified ROS 2 topic name.
+
+    The launch files deliberately use absolute names so a copied algorithm stack has
+    exactly the same public contract regardless of the node namespace chosen by the
+    hardware team.  This is not intended to reimplement all of ``rcl`` name
+    validation; it catches the integration mistakes that are both common and hard to
+    diagnose later: whitespace, relative names, repeated separators and substitutions.
+
+    Camera and point-cloud inputs may be empty because those sensors are optional.
+    LaserScan and odometry are mandatory and therefore pass ``allow_empty=False``.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    topic = value.strip()
+    if not topic:
+        if allow_empty:
+            return ""
+        raise ValueError(f"{field} must not be empty")
+    if not topic.startswith("/"):
+        raise ValueError(f"{field} must be an absolute ROS topic: {topic!r}")
+    if topic != "/" and topic.endswith("/"):
+        raise ValueError(f"{field} must not end with '/': {topic!r}")
+    if "//" in topic or any(character.isspace() for character in topic):
+        raise ValueError(f"{field} contains whitespace or an empty namespace token")
+    if any(character in topic for character in "~{}"):
+        raise ValueError(f"{field} must not contain ROS substitutions: {topic!r}")
+    return topic
+
+
 def load_sensor_profiles(path: str) -> Dict[str, Dict[str, str]]:
     """从一个 YAML 文件返回经过结构和必填项校验的话题 profile。
 
@@ -47,16 +82,10 @@ def load_sensor_profiles(path: str) -> Dict[str, Dict[str, str]]:
             )
         topics = {}
         for key in TOPIC_KEYS:
-            value = raw_topics[key]
-            if not isinstance(value, str):
-                raise ValueError(
-                    f"sensor profile '{profile_name}.{key}' must be a string"
-                )
-            topics[key] = value.strip()
-        if not topics["scan_topic"] or not topics["odom_topic"]:
-            raise ValueError(
-                f"sensor profile '{profile_name}' requires scan_topic and "
-                "odom_topic"
+            topics[key] = _validated_topic_name(
+                raw_topics[key],
+                field=f"sensor profile '{profile_name}.{key}'",
+                allow_empty=key in ("camera_topic", "point_cloud_topic"),
             )
         profiles[profile_name] = topics
     return profiles
@@ -67,7 +96,12 @@ def resolve_sensor_topics(
     profile_name: str,
     overrides: Mapping[str, str],
 ) -> Dict[str, str]:
-    """解析指定 profile，并用非空命令行参数覆盖相应话题。"""
+    """解析指定 profile，并用经过同等校验的非空启动参数覆盖话题。
+
+    覆盖值通常来自 launch 命令行。若只校验 YAML 而信任覆盖值，一个漏写的 ``/`` 会让
+    节点悄悄订阅私有命名空间，最终表现为“算法已启动但一直没有数据”。因此两条入口必须
+    使用完全相同的规则。
+    """
     if profile_name not in profiles:
         available = ", ".join(sorted(profiles))
         raise ValueError(
@@ -76,6 +110,14 @@ def resolve_sensor_topics(
     resolved = dict(profiles[profile_name])
     for key in TOPIC_KEYS:
         value = overrides.get(key, "")
-        if value and value.strip():
-            resolved[key] = value.strip()
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"topic override '{key}' must be a string")
+        if value.strip():
+            resolved[key] = _validated_topic_name(
+                value,
+                field=f"topic override '{key}'",
+                allow_empty=False,
+            )
     return resolved

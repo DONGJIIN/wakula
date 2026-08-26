@@ -11,7 +11,7 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、190 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、224 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
 前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
@@ -28,6 +28,11 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 与 4 帧清除迟滞；识别唯一障碍后先原地对准、再接近。斜看高墙时先修正约 14° 后完成
 交接，直角绕杆先修正约 11°。同时修复歧义换视角目标被提前取消和近入口小距离/小角度
 无命令死区；该结果仍只代表 Gazebo 上层流程，不代表真机腿部能力。
+
+2026-08-26 可移植接口回归：新增“硬件输入/完整算法链路”两级只读检查，已在独立无界面
+Gazebo + slam.launch.py 上验证 LaserScan、Odometry、Image、PointCloud2 实时数据、全部传感器
+TF、map 定位 TF、强类型算法输出和 /cmd_vel 消费者。检查器会容忍有界的 DDS discovery
+冷启动时间，但数据、类型或 TF 真正缺失仍返回非零；未接真实越障 Action 时只明确警告。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
@@ -357,13 +362,20 @@ odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组�
 
   ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
 
-全栈稳定后执行只读验收：
+先在算法未启动时验收硬件输入（真实消息、frame_id 与传感器 TF）：
 
-  ./scripts/check_integration.sh /camera/image_raw /camera/depth/points
+  ./scripts/check_integration.sh --inputs-only \
+    --image /camera/image_raw --points /camera/depth/points
 
-实际话题不同就替换两个参数，或先在 sensor_profiles.yaml 添加设备 profile。检查脚本验证
-话题类型、map/odom 到 base_link 的 TF、算法输出和 /cmd_vel 消费者；失败项按 connect.txt
-修正。它不发送速度，也不启动硬件。VS Code 命令面板可直接运行同名 ROS 对接检查任务。
+全栈稳定后再执行完整只读验收：
+
+  ./scripts/check_integration.sh \
+    --image /camera/image_raw --points /camera/depth/points
+
+实际话题不同就替换具名参数，或先在 sensor_profiles.yaml 添加设备 profile。profile/remap
+必须使用 / 开头的绝对话题。完整检查还验证 map/odom TF、算法输出和 /cmd_vel 消费者；
+真机越障服务端就绪后增加 --require-traverse-server。失败项按 connect.txt 修正。脚本不发送
+速度，也不启动硬件。VS Code 命令面板可直接运行同名 ROS 对接检查任务。
 
 十、RK3588 建议
 -------------
