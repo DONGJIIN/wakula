@@ -415,3 +415,21 @@ Nav2 障碍云最多 1800 点；离线对照时可设为 0，真机算力
 0.30 s。全栈 x86 实测核心进程峰值约 858 MiB、瞬时约 1.53 个 CPU 核，但 RK3588
 仍须单独记录温度、功耗、降频和端到端延迟。无显示器部署可令 vision.yaml 的
 publish_annotated_image=false，减少标注图复制和编码；不要为了省算力关闭安全数据链。
+
+十一、移植到已有机器人仓库速查
+--------------------------
+完整带走本项目 SLAM/Nav2/OpenCV：复制 interfaces、description、perception、planning、
+bringup、slam 六个源码包。目标已经有 SLAM/Nav2 时，只复制 interfaces、perception、planning；
+为了复用 launch 可再复制 bringup/description。不要复制 build/install/log、Gazebo、Xbox 或
+tools。源码放入目标工作空间 `src/` 后运行 rosdep，并先单独编译 quadruped_interfaces。
+
+保留目标现有地图、导航和底盘速度仲裁的推荐命令：
+
+  ros2 launch quadruped_bringup bringup.launch.py robot_model:=false \
+    speed_gate:=false camera_topic:=/实际image point_cloud_topic:=/实际points
+
+`speed_gate:=false` 很重要：它让算法只发布障碍和安全约束，不争用目标仓库的 `/cmd_vel`。
+如果改用本项目速度门，必须把 Nav2 串成 `/cmd_vel_nav -> /cmd_vel_smoothed -> /cmd_vel`，并
+确保最终话题只有一个发布者。自主任务另需标准 `/map`、TF、`/navigate_to_pose` 和真机
+`/traverse_obstacle` 服务端。详细复制、构建、Action 和验收步骤见 instruction.txt 第十节；
+接口所有权表见 connect.txt 第八节。

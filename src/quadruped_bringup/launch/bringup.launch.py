@@ -22,6 +22,7 @@ def generate_launch_description():
     """声明感知、地形安全评估和 Nav2 速度约束的公共启动入口。"""
     use_sim_time = LaunchConfiguration("use_sim_time")
     vision = LaunchConfiguration("vision")
+    speed_gate = LaunchConfiguration("speed_gate")
     robot_model = LaunchConfiguration("robot_model")
     camera_topic = LaunchConfiguration("camera_topic")
     point_cloud_topic = LaunchConfiguration("point_cloud_topic")
@@ -49,6 +50,13 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "vision", default_value="true", description="启动 OpenCV 与视觉/点云融合节点"
+            ),
+            DeclareLaunchArgument(
+                "speed_gate",
+                default_value="true",
+                description=(
+                    "启动 Wakula 最终 /cmd_vel 速度门；嵌入已有底盘速度仲裁时设为 false"
+                ),
             ),
             DeclareLaunchArgument(
                 "robot_model", default_value="true", description="发布仓库内占位 URDF 和固定 TF"
@@ -144,6 +152,9 @@ def generate_launch_description():
                 executable="navigation_speed_gate",
                 output="screen",
                 parameters=[terrain_navigation_params_file, common_time],
+                # 已有机器人通常已经拥有 twist_mux/急停/底盘安全层。移植时可只消费
+                # NavigationSafety，而不创建第二个 /cmd_vel 发布者。
+                condition=IfCondition(speed_gate),
             ),
         ]
     )

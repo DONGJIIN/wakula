@@ -47,7 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，226 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，228 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -312,6 +312,26 @@ ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
 传感器外参，并用实机 rosbag 重调高度、坡度、颜色和安全距离阈值。核心节点不读取 Gazebo
 模型名、比赛 world 坐标或厂家消息，因此仿真场、现实场和不同品牌驱动可使用同一套源码。
 
+### 3.2 移植到已有机器人代码仓库
+
+不要复制整个工作空间的 `build/`、`install/`、`log/`，也不要迁移 Gazebo、Xbox 和测试工具。
+按目标仓库已有能力选择最小集合：
+
+| 目标仓库现状 | 需要迁移 | 不需要迁移 |
+|---|---|---|
+| 缺少整套 SLAM/Nav2/感知 | `quadruped_interfaces`、`quadruped_description`、`quadruped_perception`、`quadruped_planning`、`quadruped_bringup`、`slam` | `quadruped_gazebo`、`quadruped_teleop`、`quadruped_tools` |
+| 已有 SLAM/Nav2、只缺障碍感知 | `quadruped_interfaces`、`quadruped_perception`、`quadruped_planning`；可选 `quadruped_bringup` 和占位 `quadruped_description` | `slam` 及仿真/手柄/工具包 |
+| 已有感知，只想使用任务编排 | `quadruped_interfaces`、`quadruped_planning`，并让现有感知发布本项目强类型消息 | 其他包均可不复制 |
+
+推荐将源码包复制到目标工作空间 `src/` 后由 `rosdep` 解析依赖，先单独构建接口包，再构建
+其余包。已有机器人继续拥有传感器驱动、`/odom`、TF、底盘安全和关节控制；本算法不接管
+这些模块。若目标已有 `/cmd_vel` 仲裁器，启动感知链时必须设置 `speed_gate:=false`，只消费
+`/terrain/navigation_safety`；若采用本项目速度门，则 Nav2 必须按
+`/cmd_vel_nav → /cmd_vel_smoothed → /cmd_vel` 串联，禁止两个节点同时发布最终 `/cmd_vel`。
+
+完整复制命令、嵌入式启动方式、Action 对接和验收清单见 `instruction.txt` 第十节；所有
+话题、消息和所有权冲突见 `connect.txt` 第八节。
+
 ## 4. 默认与可替换传感器接口
 
 ### 4.1 真机传感器选型与预留安装位置
@@ -503,6 +523,7 @@ ros2 launch slam slam.launch.py
 | `slam_enabled`、`nav2_enabled` | `true` | 分别启停 SLAM Toolbox 和 Nav2 |
 | `nav2_autostart` | `true` | 数据与 TF 就绪后是否自动激活 Nav2 |
 | `vision` | `true` | 是否启动 OpenCV 障碍识别 |
+| `speed_gate` | `true` | 是否由 Wakula 最终速度门发布 `/cmd_vel`；嵌入已有仲裁器时关闭 |
 | `robot_model` | `auto` | 自动在 Gazebo 关闭占位 TF、真机开启；也可显式覆盖 |
 | `rviz` | `true` | 是否启动 RViz |
 | `use_sim_time` | `auto` | 重试检测 `/clock`；也可显式设为 `true/false` |

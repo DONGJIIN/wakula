@@ -100,6 +100,7 @@ def _launch_complete_stack(context):
         launch_arguments={
             "use_sim_time": use_sim_time,
             "vision": LaunchConfiguration("vision"),
+            "speed_gate": LaunchConfiguration("speed_gate"),
             "robot_model": LaunchConfiguration("robot_model"),
             "camera_topic": topics["camera_topic"],
             "point_cloud_topic": topics["point_cloud_topic"],
@@ -217,6 +218,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "vision", default_value="true", description="是否启动 OpenCV 与相机/点云融合节点"
+            ),
+            DeclareLaunchArgument(
+                "speed_gate",
+                default_value="true",
+                description="是否由 Wakula 速度门发布最终 /cmd_vel；嵌入现有仲裁器时关闭",
             ),
             DeclareLaunchArgument(
                 "robot_model",

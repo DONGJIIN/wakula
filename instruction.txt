@@ -323,3 +323,101 @@ precision/recall/F1 和误差统计。不要只看总体准确率，危险类别
 观测/动作字段，再按平地、坡面、单障碍、连续障碍做课程训练与域随机化。策略部署到 RK3588
 前必须通过离线回放、限幅、超时停车和保护绳验证；策略负责运动控制，不替代现有
 SLAM、Nav2、OpenCV、任务编排及安全链。
+
+十、移植到已有机器人代码仓库
+--------------------------
+本节面向“底盘、状态估计、运动控制等其他部分已经写好，只缺本项目算法”的情况。迁移的是
+ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`install/`、`log/`、Gazebo
+场地、Xbox 和离线测试工具都不是目标机器人运行依赖。
+
+1. 先盘点目标仓库已有能力
+
+   - 已有驱动/状态估计必须继续提供 LaserScan、Odometry、Image、PointCloud2 和 TF。
+   - 已有 SLAM 若能发布 `/map` 与 `map -> odom`，不复制本项目 `slam` 包中的 SLAM Toolbox。
+   - 已有 Nav2 若提供标准 `/navigate_to_pose`，可继续使用；不需要替换全局/局部规划器。
+   - 已有底盘安全层或 twist_mux 时，它继续拥有最终速度和急停权限。
+   - 目标仓库若已经存在同名 `quadruped_interfaces`，只能保留一个版本；修改消息包名需要同步
+     修改所有 Python import、Action 客户端/服务端并全量重编，不能让两个同名接口混在 overlay。
+
+2. 选择迁移集合
+
+   完整算法栈复制以下六个源码目录：
+
+     src/quadruped_interfaces
+     src/quadruped_description
+     src/quadruped_perception
+     src/quadruped_planning
+     src/quadruped_bringup
+     src/slam
+
+   若目标已有 SLAM/Nav2，只复制 `quadruped_interfaces`、`quadruped_perception`、
+   `quadruped_planning`。为了直接复用公共感知 launch，可额外复制 `quadruped_bringup` 和
+   `quadruped_description`；运行时用 `robot_model:=false`，目标机器人的 URDF/TF 仍是唯一来源。
+   仅使用任务管理器时至少复制 interfaces + planning，并让现有感知适配成
+   NavigationSafety/TraversalGuidance 合同。`quadruped_gazebo` 不再是 slam 的硬依赖。
+
+3. 在目标工作空间构建
+
+     cd <目标工作空间>
+     source /opt/ros/jazzy/setup.bash
+     rosdep install --from-paths src --ignore-src -r -y
+     colcon build --symlink-install --packages-select quadruped_interfaces
+     source install/setup.bash
+     colcon build --symlink-install --packages-up-to \
+       quadruped_perception quadruped_planning quadruped_bringup slam
+     source install/setup.bash
+
+   只复制三个核心包时，从第二条 build 中删除 bringup/slam。建议记录迁移所用 Git commit，
+   上游 Action/msg 改动后必须让客户端、服务端和接口包使用同一版本重新构建。
+
+4. 两种推荐启动方式
+
+   完整迁移并采用本项目 SLAM/Nav2/速度门：
+
+     ros2 launch slam slam.launch.py robot_model:=false \
+       scan_topic:=/实际scan odom_topic:=/实际odom \
+       camera_topic:=/实际image point_cloud_topic:=/实际points
+
+   嵌入目标仓库已有 SLAM/Nav2/底盘仲裁器，只启动 OpenCV、点云、融合、地形决策和入口引导：
+
+     ros2 launch quadruped_bringup bringup.launch.py \
+       robot_model:=false speed_gate:=false \
+       camera_topic:=/实际image point_cloud_topic:=/实际points
+
+   第二种方式不会创建最终 `/cmd_vel` 发布者；目标仓库读取
+   `/terrain/navigation_safety` 的 `perception_valid`、`mode`、`speed_limit` 和几何字段，自行
+   接入现有安全仲裁。若决定采用本项目速度门，必须令 Nav2 controller 输出 `/cmd_vel_nav`、
+   velocity_smoother 输出 `/cmd_vel_smoothed`，本项目 gate 独占最终 `/cmd_vel`；同时迁移
+   navigation_health_monitor 或由目标仓库可靠发布 `/navigation/healthy`。不能把 Nav2 和
+   gate 都接在同名 `/cmd_vel`，否则会形成多个发布者甚至反馈环。
+
+5. 可选自主任务与越障控制
+
+   自主任务需要 `/map`、`map -> base_link`、标准 Nav2 `/navigate_to_pose`、实时
+   `/traversal/guidance` 和 `/perception/front_obstacle_name`。复制 `slam` 包时使用：
+
+     ros2 launch slam autonomous_navigation.launch.py \
+       use_sim_time:=false simulation_traversal_backend:=false
+
+   真机运动组必须提供 `/traverse_obstacle` Action 服务端；没有服务端时任务只会等待，不会
+   生成腿部动作。若目标仓库不复制 `slam`，可在自己的 launch 中直接启动
+   `quadruped_planning/autonomous_mission`，加载 `autonomous_mission.yaml` 并设置
+   `autostart=true`。目标仓库仍负责 Action 控制权仲裁、接触/姿态闭环和硬件急停。
+
+6. 对接验收顺序
+
+   - 断开电机，先验证 `/scan`、`/odom`、`odom -> base_link` 和所有传感器固定 TF。
+   - 验证 Image/PointCloud2 时间源一致、frame_id 正确，点云在 RViz 中与地面/墙面对齐。
+   - 核对 `/terrain/navigation_safety` 与 `/traversal/guidance` 持续更新，断流时必须失效。
+   - 用 `ros2 topic info /cmd_vel --verbose` 确认最终速度只有预期仲裁节点发布。
+   - 先录 rosbag 离线重调相机、点云和地形阈值，再连接低速底盘。
+   - 最后接入真实 `/traverse_obstacle`，以单障碍、保护绳和可人工急停方式验收。
+
+   若同时复制仓库根目录的 `scripts/check_integration.sh`，可依次运行：
+
+     ./scripts/check_integration.sh --inputs-only \
+       --scan /实际scan --odom /实际odom --image /实际image --points /实际points
+     ./scripts/check_integration.sh \
+       --scan /实际scan --odom /实际odom --image /实际image --points /实际points
+
+   完整检查全部通过只代表 ROS 接口和算法数据链对齐，不代表真机步态或越障安全已经验收。

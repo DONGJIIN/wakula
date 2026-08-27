@@ -26,4 +26,5 @@ def test_bringup_launch_description_is_constructible():
         "robot_model",
         "camera_topic",
         "point_cloud_topic",
+        "speed_gate",
     } <= arguments

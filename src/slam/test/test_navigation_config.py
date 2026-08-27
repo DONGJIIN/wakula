@@ -357,6 +357,7 @@ def test_slam_launch_is_the_complete_one_command_entry():
         "odom_topic",
         "camera_topic",
         "point_cloud_topic",
+        "speed_gate",
         "slam_enabled",
         "nav2_enabled",
         "nav2_autostart",
@@ -460,6 +461,10 @@ def test_autonomous_entry_keeps_field_separate_and_selects_sim_action_backend():
     assert 'package="quadruped_gazebo"' in compatibility
     assert 'executable="sim_traverse_obstacle"' in compatibility
     assert '"simulation_traversal_backend"' in compatibility
+    # 仿真 Action 仅按需解析，不能写成 slam 的硬依赖，否则把算法移植到真机仓库时
+    # rosdep/colcon 会无谓要求复制 Gazebo 包。
+    manifest = (PACKAGE_ROOT / "package.xml").read_text(encoding="utf-8")
+    assert "<exec_depend>quadruped_gazebo</exec_depend>" not in manifest
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():
