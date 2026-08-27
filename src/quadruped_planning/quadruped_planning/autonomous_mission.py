@@ -513,6 +513,63 @@ class ObservedObstacle:
     retry_after: float = 0.0
 
 
+@dataclass
+class TraversalVerification:
+    """Frozen evidence awaiting task-level confirmation after Action success.
+
+    The motion controller owns contact, attitude and actuator checks.  This task-level
+    record independently checks that the base actually moved from the entry side to
+    the far side and then became stationary.  Keeping the two layers independent
+    prevents either a stale TF or an incorrectly optimistic Action result from marking
+    a competition obstacle complete by itself.
+    """
+
+    semantic_id: str
+    obstacle_type: int
+    obstacle_position: Tuple[float, float]
+    robot_start: Tuple[float, float]
+    controller_message: str
+    started: float
+    last_pose: Optional[Tuple[float, float, float]] = None
+    stable_since: float = 0.0
+
+
+def traversal_crossing_evidence(
+    start: Tuple[float, float],
+    obstacle: Tuple[float, float],
+    end: Tuple[float, float],
+    *,
+    minimum_displacement: float,
+    beyond_obstacle_margin: float,
+) -> bool:
+    """Return whether map poses prove forward progress beyond the entry edge.
+
+    The direction is inferred online from the Action start towards the perceived
+    obstacle, never from a Gazebo/world layout.  The check intentionally does not claim
+    to prove foot contact or complete body clearance; those are mandatory duties of the
+    real ``TraverseObstacle`` server.  It catches the important upper-layer failure in
+    which a server reports success while the robot stayed in front of the obstacle.
+    """
+    values = (*start, *obstacle, *end, minimum_displacement, beyond_obstacle_margin)
+    if not all(isfinite(float(value)) for value in values):
+        return False
+    direction_x = float(obstacle[0]) - float(start[0])
+    direction_y = float(obstacle[1]) - float(start[1])
+    entry_distance = hypot(direction_x, direction_y)
+    if entry_distance < 0.10:
+        return False
+    unit_x, unit_y = direction_x / entry_distance, direction_y / entry_distance
+    displacement = hypot(float(end[0]) - start[0], float(end[1]) - start[1])
+    beyond = (
+        (float(end[0]) - obstacle[0]) * unit_x
+        + (float(end[1]) - obstacle[1]) * unit_y
+    )
+    return (
+        displacement >= max(0.0, float(minimum_displacement))
+        and beyond >= max(0.0, float(beyond_obstacle_margin))
+    )
+
+
 def choose_pending_obstacle(
     records: Sequence[ObservedObstacle],
     completed_ids: Sequence[str],
@@ -1114,6 +1171,14 @@ class AutonomousMission(Node):
             # Action before the first stable cloud from the new view arrives.
             "semantic_post_turn_settle_time": 1.20,
             "completed_obstacle_radius": 0.65, "post_traversal_cooldown": 3.0,
+            # Action success 只是底层声明，任务层还要用在线 TF 做后验验证：机体必须从
+            # 入口侧前进到障碍前缘另一侧，并在落地后保持一段时间近似静止。
+            "post_traversal_verification_timeout": 5.0,
+            "post_traversal_minimum_displacement": 0.45,
+            "post_traversal_beyond_margin": 0.12,
+            "post_traversal_stable_duration": 0.75,
+            "post_traversal_stable_translation": 0.06,
+            "post_traversal_stable_rotation": 0.10,
             # 已经从多帧感知确认、但还没有成功越过的障碍进入任务账本。探索空闲时优先
             # 回到当时的安全观察位姿重新捕获它，而不是把目标直接放在实体障碍中心。
             "obstacle_revisit_position_tolerance": 0.30,
@@ -1231,6 +1296,7 @@ class AutonomousMission(Node):
         self.traverse_cancel_pending = False
         self.traverse_handle = None
         self.traverse_started = 0.0
+        self.traversal_verification: Optional[TraversalVerification] = None
         self.obstacle_signature = None
         self.obstacle_frames = 0
         self.completed_obstacles = []
@@ -1580,6 +1646,7 @@ class AutonomousMission(Node):
             self.traverse_handle is not None
             or self.traverse_send_pending
             or self.pending_traverse is not None
+            or self.traversal_verification is not None
             or now < self.cooldown_until
         ):
             self.obstacle_signature, self.obstacle_frames = None, 0
@@ -2223,8 +2290,32 @@ class AutonomousMission(Node):
         handle.get_result_async().add_done_callback(self._traverse_result)
 
     def _traverse_result(self, future):
-        wrapped = future.result()
-        success = bool(wrapped and wrapped.result.success)
+        """Accept controller success only as a request for task-level verification.
+
+        ROS Action status, controller result, map displacement, crossing direction and
+        post-motion stability are separate pieces of evidence.  Completion is recorded
+        only after all available upper-layer checks pass; the real controller remains
+        responsible for feet/contact, body attitude and actuator-fault verification.
+        """
+        # DDS/服务器异常会让 result future 抛出异常，而不是返回一个失败 Result。任务节点
+        # 不能因此崩溃，也绝不能沿用上一次成功；统一降级为未证实并把本障碍留在待办。
+        try:
+            wrapped = future.result()
+            result_exception = ""
+        except Exception as exc:  # rclpy future exposes several middleware errors.
+            wrapped = None
+            result_exception = f"Action result exception: {exc}"
+            self.get_logger().error(result_exception)
+        action_succeeded = bool(
+            wrapped
+            and int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED
+            and wrapped.result.success
+        )
+        controller_message = (
+            str(wrapped.result.message)
+            if wrapped and wrapped.result
+            else result_exception
+        )
         completed_position = self.pending_traverse_position
         completed_robot_start = self.pending_traverse_robot_start
         completed_type = (
@@ -2245,50 +2336,145 @@ class AutonomousMission(Node):
         if not self.enabled:
             self.state = "STOPPED"
             return
-        if success and completed_position is not None:
-            self.completed_obstacles.append(
-                (completed_type, completed_position[0], completed_position[1])
+        if (
+            action_succeeded
+            and is_actionable_semantic_id(completed_id)
+            and completed_position is not None
+            and completed_robot_start is not None
+        ):
+            now = time.monotonic()
+            self.traversal_verification = TraversalVerification(
+                semantic_id=completed_id,
+                obstacle_type=completed_type,
+                obstacle_position=(
+                    float(completed_position[0]), float(completed_position[1])
+                ),
+                robot_start=(
+                    float(completed_robot_start[0]),
+                    float(completed_robot_start[1]),
+                ),
+                controller_message=controller_message,
+                started=now,
             )
-            self.completed_semantics = list(
-                resolve_completed_semantics(self.completed_semantics, completed_id)
-            )
-            robot_exit = self._robot_pose()
-            if completed_robot_start is not None and robot_exit is not None:
-                self.completed_traversal_segments.append((
-                    completed_id,
-                    completed_robot_start,
-                    (robot_exit[0], robot_exit[1]),
-                ))
             self._reset_obstacle_lock()
-            self.cooldown_until = time.monotonic() + float(self.params["post_traversal_cooldown"])
-            self.state = "EXPLORING"
-            completed_inventory, pending_inventory = mission_inventory(
-                self.params["expected_obstacle_ids"], self.completed_semantics
-            )
+            self.state = "VERIFYING_TRAVERSAL_RESULT"
             self._publish_state(
-                f"obstacle complete: {completed_id or 'unclassified'}; "
-                f"unique competition tasks={len(completed_inventory)}/"
-                f"{len(completed_inventory) + len(pending_inventory)}; "
-                "continuing with next pending obstacle"
+                f"controller reported success for {completed_id}; "
+                "verifying crossing displacement and landing stability"
             )
+            return
+        self._reject_traversal_completion(
+            completed_id,
+            completed_position,
+            "controller result/ROS Action status did not prove success",
+        )
+
+    def _reject_traversal_completion(self, semantic_id, position, reason: str) -> None:
+        """Keep an unverified obstacle pending and schedule a bounded later retry."""
+        now = time.monotonic()
+        self.traversal_verification = None
+        self._defer_obstacle_revisit(str(semantic_id), now)
+        if position is not None:
+            self.blocked_obstacles.append((
+                float(position[0]),
+                float(position[1]),
+                now + float(self.params["obstacle_failure_cooldown"]),
+            ))
+        self._reset_obstacle_lock()
+        self.cooldown_until = now + float(self.params["nav_failure_retry_delay"])
+        self.state = "RECOVERY"
+        self._publish_state(
+            f"traversal not counted: {reason}; obstacle remains pending"
+        )
+
+    def _confirm_traversal_completion(
+        self,
+        verification: TraversalVerification,
+        robot_exit: Tuple[float, float, float],
+    ) -> None:
+        """Commit one obstacle after controller and independent task checks pass."""
+        self.completed_obstacles.append((
+            verification.obstacle_type,
+            verification.obstacle_position[0],
+            verification.obstacle_position[1],
+        ))
+        self.completed_semantics = list(resolve_completed_semantics(
+            self.completed_semantics, verification.semantic_id
+        ))
+        self.completed_traversal_segments.append((
+            verification.semantic_id,
+            verification.robot_start,
+            (float(robot_exit[0]), float(robot_exit[1])),
+        ))
+        self.traversal_verification = None
+        self.cooldown_until = time.monotonic() + float(
+            self.params["post_traversal_cooldown"]
+        )
+        self.state = "EXPLORING"
+        completed_inventory, pending_inventory = mission_inventory(
+            self.params["expected_obstacle_ids"], self.completed_semantics
+        )
+        self._publish_state(
+            f"obstacle verified complete: {verification.semantic_id}; "
+            f"tasks={len(completed_inventory)}/"
+            f"{len(completed_inventory) + len(pending_inventory)}; "
+            "continuing with next pending obstacle"
+        )
+
+    def _verify_traversal_completion(
+        self, robot: Tuple[float, float, float], now: float
+    ) -> None:
+        """Accumulate bounded stillness and geometric crossing evidence."""
+        verification = self.traversal_verification
+        if verification is None:
+            return
+        if verification.last_pose is None:
+            verification.last_pose = robot
+            verification.stable_since = now
         else:
-            self._defer_obstacle_revisit(completed_id, time.monotonic())
-            if completed_position is not None:
-                # Action 后端明确失败时不能在下一 tick 对同一入口再次 handoff。将失败
-                # 位置放入与 Nav2 停滞共用的短期空间冷却；其他方向仍可继续探索，到期
-                # 后也允许从新视角重试，兼容真机偶发打滑或控制器暂态故障。
-                self.blocked_obstacles.append((
-                    float(completed_position[0]),
-                    float(completed_position[1]),
-                    time.monotonic() + float(self.params["obstacle_failure_cooldown"]),
-                ))
-            self._reset_obstacle_lock()
-            self.cooldown_until = time.monotonic() + float(
-                self.params["nav_failure_retry_delay"]
+            translation = hypot(
+                robot[0] - verification.last_pose[0],
+                robot[1] - verification.last_pose[1],
             )
-            self.state = "RECOVERY"
-            self._publish_state(
-                "traversal failed; entry temporarily excluded; resume exploration"
+            rotation = abs(normalized_angle(robot[2] - verification.last_pose[2]))
+            if (
+                translation > float(self.params["post_traversal_stable_translation"])
+                or rotation > float(self.params["post_traversal_stable_rotation"])
+            ):
+                # Start a fresh stability window anchored at the new pose.  Do not
+                # update the anchor for tiny per-tick motion, otherwise slow drift
+                # could incorrectly appear stable forever.
+                verification.last_pose = robot
+                verification.stable_since = now
+        crossed = traversal_crossing_evidence(
+            verification.robot_start,
+            verification.obstacle_position,
+            (robot[0], robot[1]),
+            minimum_displacement=float(
+                self.params["post_traversal_minimum_displacement"]
+            ),
+            beyond_obstacle_margin=float(
+                self.params["post_traversal_beyond_margin"]
+            ),
+        )
+        stable = now - verification.stable_since >= float(
+            self.params["post_traversal_stable_duration"]
+        )
+        if crossed and stable:
+            self._confirm_traversal_completion(verification, robot)
+            return
+        if now - verification.started >= float(
+            self.params["post_traversal_verification_timeout"]
+        ):
+            reason = (
+                "robot did not cross the observed entry plane"
+                if not crossed
+                else "robot did not become stable after landing"
+            )
+            self._reject_traversal_completion(
+                verification.semantic_id,
+                verification.obstacle_position,
+                reason,
             )
 
     def _tick(self):
@@ -2315,6 +2501,13 @@ class AutonomousMission(Node):
         robot = self._robot_pose()
         if robot is None:
             self.state = "WAITING_FOR_INPUTS"
+            return
+        # Action 返回成功后禁止立即恢复探索。先用独立的 map->base_link 轨迹证明机体已
+        # 越过感知到的入口平面，并等待落地静止窗口；否则错误的控制器 success 会把未越过
+        # 的障碍从待办清单删除。验证期不发 Nav2 目标，也不采纳新的障碍语义。
+        if self.traversal_verification is not None:
+            self.state = "VERIFYING_TRAVERSAL_RESULT"
+            self._verify_traversal_completion(robot, now)
             return
         if (
             not self.coverage_visited

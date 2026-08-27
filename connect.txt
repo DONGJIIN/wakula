@@ -96,6 +96,11 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
         返回观察位并朝向障碍重新识别；历史记录不能直接触发 Action，8 秒冷却避免循环。
   去重：完成记录使用“障碍几何类别 + map 坐标”，只屏蔽 0.65 m 内的同类旧目标；不同
         类别的相邻比赛障碍仍会独立进入引导和 Action。
+  成功判定：`/traverse_obstacle` 必须同时得到 ROS `SUCCEEDED` 和 Result `success=true`；随后
+        节点进入 VERIFYING_TRAVERSAL_RESULT，以实时 map -> base_link 检查机体确实越过入口
+        平面，并连续稳定 0.75 s。失败或 5 s 内无法证实则不计完成，障碍继续留在待办清单。
+        足端接触、机身姿态、关节/驱动故障和完整离开障碍由真机 Action 服务端负责；仅仅
+        接受 Goal、走到入口或播放完动作序列都不能返回 success=true。
 
 2.3 SLAM 与导航监控节点
 

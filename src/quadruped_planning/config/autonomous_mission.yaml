@@ -86,6 +86,15 @@ autonomous_mission:
     # 只对同类别、同位置的已完成障碍去重，避免密集场地中顺带屏蔽相邻的另一类障碍。
     completed_obstacle_radius: 0.65
     post_traversal_cooldown: 3.0
+    # “越障成功”采用双层证据：底层 Action 必须以 SUCCEEDED+success 返回，任务层还要
+    # 从实时 map->base_link 验证机体已经越过障碍入口平面，并在落地后保持稳定。
+    # 阈值不依赖 Gazebo 坐标；真机只需按机身长度、定位噪声和实际落地时间小幅标定。
+    post_traversal_verification_timeout: 5.0
+    post_traversal_minimum_displacement: 0.45
+    post_traversal_beyond_margin: 0.12
+    post_traversal_stable_duration: 0.75
+    post_traversal_stable_translation: 0.06
+    post_traversal_stable_rotation: 0.10
     # 多帧确认但尚未成功越过的障碍进入任务账本。空闲时优先回到当时的安全观察位置，
     # 面向障碍重新采集实时证据；绝不把 Nav2 目标直接设在实体中心。
     obstacle_revisit_position_tolerance: 0.30

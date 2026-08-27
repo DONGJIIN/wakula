@@ -184,8 +184,9 @@ wakula/
   目标，READY 后再交给运动控制器。
 - `autonomous_mission`：从 `/map` 的已知—未知边界提取真实自由前沿，在 Nav2 处于活动状态
   后逐个探索；连续确认比赛障碍时冻结其 `map` 坐标，先到达入口，再调用
-  `/traverse_obstacle`。Action 成功后记录已完成障碍并选择下一前沿；Action 拒绝、超时、
-  Nav2 取消及运行中 STOP 均有显式状态，不读取 Gazebo 模型名或 world 坐标。
+  `/traverse_obstacle`。只有 ROS Action 终态为 `SUCCEEDED`、控制器返回 `success=true`、实时
+  TF 证明机体已越过所观测的入口平面且落地后连续稳定，才记录为已完成并选择下一前沿；
+  任一证据失败均保留在待完成清单。算法不读取 Gazebo 模型名或 world 坐标。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、协方差
   和里程计突跳；跳变会锁存到连续稳定样本确认恢复。
 - `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2。
@@ -269,6 +270,11 @@ Xbox /joy ─> xbox_teleop ─> /cmd_vel_joy ─> 未来 twist_mux/底盘仲裁
 7. **自主任务节点** 只使用 `/map`、TF 和感知输出决定“去哪里、何时交接”，不包含步态；
    停止服务会取消当前 Nav2/越障目标并发布零速，之后可以继续启动。
 
+这里把“成功”分成两个层级。单项障碍成功是：控制器完成该类障碍的足端/接触/姿态闭环，
+无取消、超时或安全故障；任务层随后独立确认机器人确实从入口侧移动到另一侧，并稳定
+`0.75 s`。整场任务成功则还要求八项障碍分别完成、清单无漏项且最终到达终点。仅看到障碍、
+Nav2 到达入口、Action 被接受或动作序列播放完，都不算越障成功。
+
 OpenCV 不估计真实距离，也不能独立触发抬腿或跳跃。只有视觉和点云时间上有效、且
 点云确认几何条件后，才进入对应越障模式；点云缺失、无效或超时默认 `STOP`。
 
@@ -284,7 +290,9 @@ OpenCV 源码，只需完成以下合同：
 3. 运动/越障团队实现 `/traverse_obstacle` Action 服务端，并用
    `/terrain/navigation_safety` 复核同一时间戳的模式、限速、有效性和障碍几何；两者都
    是输入合同，不得在未完成动作仲裁和硬件安全的情况下直接转成关节命令。服务端只有
-   在真实姿态/接触闭环确认稳定落地后才能返回 `success=true`。
+   在目标障碍的完整路径结束、关节和驱动无故障、预期足端接触成立且真实姿态闭环确认
+   稳定落地后才能返回 `success=true`。任务层收到后还会进入
+   `VERIFYING_TRAVERSAL_RESULT`，核对 map 位移、越过入口平面和落地稳定；它不会直接计分。
 4. 真机自身发布 URDF/TF 时使用 `robot_model:=false`，避免两个
    `robot_state_publisher` 同时发布传感器固定 TF。
 5. 接入时先运行 `check_integration.sh --inputs-only`，确认每个传感器确实在出数据、消息

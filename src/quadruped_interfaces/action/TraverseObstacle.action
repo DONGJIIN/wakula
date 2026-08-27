@@ -18,7 +18,12 @@ float32 distance
 float32 lateral_offset
 float32 heading_error
 ---
-# success=true 仅表示底层控制器确认完成本次跨越，不代表整个探索任务完成。
+# success=true 是底层越障控制器的严格承诺，不等同于“动作序列已经播放完”：
+# 1) 指定 obstacle_id 的越障流程已完整执行，期间没有取消、内部超时或安全故障；
+# 2) 关节/驱动无故障，机身姿态和预期足端接触均满足控制器阈值；
+# 3) 越障后的支撑状态已连续稳定一段时间。
+# 任务层仍会独立核对 ROS Action 状态、map 位移、是否到达障碍另一侧以及落地稳定性；
+# 两层证据都通过后，障碍才会进入“已完成”清单。
 bool success
 string message
 ---

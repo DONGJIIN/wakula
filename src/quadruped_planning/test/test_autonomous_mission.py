@@ -34,6 +34,7 @@ from quadruped_planning.autonomous_mission import (
     select_full_semantic_vote,
     select_semantic_vote,
     target_is_in_heading_cone,
+    traversal_crossing_evidence,
     world_to_cell,
 )
 from action_msgs.msg import GoalStatus
@@ -216,6 +217,30 @@ def test_boundary_guard_allows_targets_that_turn_away():
 def test_completed_long_obstacle_corridor_suppresses_its_far_edge():
     assert distance_to_segment((5.3, 0.1), (0.8, 0.0), (6.2, 0.2)) < 0.2
     assert distance_to_segment((3.0, 1.0), (0.8, 0.0), (6.2, 0.2)) > 0.8
+
+
+def test_traversal_completion_requires_reaching_far_side_of_entry():
+    """只前进到入口或横向绕到旁边，都不能被误记为成功越障。"""
+    limits = dict(minimum_displacement=0.45, beyond_obstacle_margin=0.12)
+    assert traversal_crossing_evidence(
+        (0.0, 0.0), (1.0, 0.0), (1.25, 0.08), **limits
+    )
+    assert not traversal_crossing_evidence(
+        (0.0, 0.0), (1.0, 0.0), (0.95, 0.0), **limits
+    )
+    assert not traversal_crossing_evidence(
+        (0.0, 0.0), (1.0, 0.0), (0.0, 1.5), **limits
+    )
+
+
+def test_traversal_crossing_evidence_rejects_invalid_or_degenerate_pose():
+    limits = dict(minimum_displacement=0.45, beyond_obstacle_margin=0.12)
+    assert not traversal_crossing_evidence(
+        (0.0, 0.0), (0.05, 0.0), (1.0, 0.0), **limits
+    )
+    assert not traversal_crossing_evidence(
+        (0.0, 0.0), (1.0, 0.0), (float("nan"), 0.0), **limits
+    )
 
 
 def test_slope_handoff_has_an_unambiguous_action_type():
@@ -469,7 +494,7 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert "approach_stall_handoff_max_heading_error" in source
     assert "obstacle_failure_cooldown" in source
     assert "blocked_obstacles" in source
-    assert "entry temporarily excluded" in source
+    assert "temporarily excluding" in source
     # Ambiguous geometry may be approached for a better view, but all actual
     # TraverseObstacle construction paths must still reject an unconfirmed ID.
     assert source.count("is_actionable_semantic_id") >= 4
@@ -509,6 +534,12 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert 'in ("verify_obstacle", "prealign_obstacle")' in source
     assert "semantic_observation_distance" in source
     assert "if is_actionable_semantic_id(stable_lock):" in source
+    # 控制器 success 不能直接改任务账本：必须同时检查 ROS Action 终态，并在主循环
+    # 独立验证越过入口平面与落地稳定后，才调用唯一的完成提交函数。
+    assert "int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED" in source
+    assert '"VERIFYING_TRAVERSAL_RESULT"' in source
+    assert "_verify_traversal_completion(robot, now)" in source
+    assert "traversal not counted" in source
     start_traverse = source.split("def _start_traverse", 1)[1].split(
         "def _hold_for_traversal_controller", 1
     )[0]
