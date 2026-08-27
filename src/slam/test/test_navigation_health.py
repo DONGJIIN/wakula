@@ -1,9 +1,12 @@
 """Pure runtime navigation health checks."""
 
 import math
+from pathlib import Path
 
 from nav_msgs.msg import Odometry
+import pytest
 from sensor_msgs.msg import LaserScan
+import yaml
 
 from slam.navigation_health_monitor import (
     navigation_failures,
@@ -13,6 +16,53 @@ from slam.navigation_health_monitor import (
     scan_is_valid,
     source_stamp_is_current,
 )
+from slam.parameter_validation import (
+    validate_nav2_readiness_parameters,
+    validate_navigation_health_parameters,
+)
+
+
+def _shipped_monitor_parameters(node_name):
+    """Load the installed-equivalent source YAML for pure contract tests."""
+    path = Path(__file__).parents[1] / "config" / "nav2.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))[node_name]["ros__parameters"]
+
+
+def test_shipped_navigation_monitor_parameters_are_valid():
+    """Keep both launch-time monitor sections synchronized with their startup contracts."""
+    validate_navigation_health_parameters(
+        _shipped_monitor_parameters("navigation_health_monitor")
+    )
+    validate_nav2_readiness_parameters(
+        _shipped_monitor_parameters("nav2_readiness_monitor")
+    )
+
+
+def test_navigation_contract_reports_all_related_configuration_errors():
+    """One failed launch should expose the timeout, ratio, frame, and sample mistakes together."""
+    values = _shipped_monitor_parameters("navigation_health_monitor")
+    values.update(
+        sensor_timeout=-1.0,
+        minimum_scan_valid_ratio=0.0,
+        minimum_scan_samples=1,
+        global_frame="/map",
+    )
+    with pytest.raises(ValueError) as error:
+        validate_navigation_health_parameters(values)
+    message = str(error.value)
+    assert "sensor_timeout" in message
+    assert "minimum_scan_valid_ratio" in message
+    assert "minimum_scan_samples" in message
+    assert "global_frame" in message
+
+
+def test_readiness_contract_rejects_bad_topic_and_lifecycle_names():
+    """Relative sensor/service names would otherwise leave Nav2 waiting without a clear cause."""
+    values = _shipped_monitor_parameters("nav2_readiness_monitor")
+    values["scan_topic"] = "scan"
+    values["lifecycle_service"] = "/"
+    with pytest.raises(ValueError, match="scan_topic.*lifecycle_service"):
+        validate_nav2_readiness_parameters(values)
 
 
 def test_scan_health_accepts_inf_but_rejects_nan_stream():

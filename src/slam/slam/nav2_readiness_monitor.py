@@ -21,6 +21,10 @@ from slam.navigation_health_monitor import (
     scan_is_valid,
     source_stamp_is_current,
 )
+from slam.parameter_validation import (
+    READINESS_PARAMETER_NAMES,
+    validate_nav2_readiness_parameters,
+)
 
 
 def slam_transition_for_state(state_id: int):
@@ -43,9 +47,9 @@ def slam_transition_for_state(state_id: int):
 class Nav2ReadinessMonitor(Node):
     """把 Nav2 激活条件集中到一个节点，避免各服务器在输入缺失时反复报错。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """订阅雷达/里程计心跳并建立生命周期管理服务客户端。"""
-        super().__init__("nav2_readiness_monitor")
+        super().__init__("nav2_readiness_monitor", **node_kwargs)
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("scan_topic", "/scan")
@@ -65,6 +69,11 @@ class Nav2ReadinessMonitor(Node):
         self.declare_parameter("slam_lifecycle_node", "/slam_toolbox")
         self.declare_parameter("slam_recovery_period", 2.0)
         self.declare_parameter("slam_recovery_startup_grace", 4.0)
+        # Readiness owns lifecycle activation, so invalid topics/frames must stop here rather
+        # than leave Nav2 waiting forever with a misleading "missing input" message.
+        validate_nav2_readiness_parameters(
+            {name: self.get_parameter(name).value for name in READINESS_PARAMETER_NAMES}
+        )
         self.global_frame = str(self.get_parameter("global_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         scan_topic = str(self.get_parameter("scan_topic").value)

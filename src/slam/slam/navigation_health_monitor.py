@@ -15,6 +15,11 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformListener
 
+from slam.parameter_validation import (
+    HEALTH_PARAMETER_NAMES,
+    validate_navigation_health_parameters,
+)
+
 
 def scan_contract_is_valid(
     msg: LaserScan,
@@ -211,13 +216,13 @@ class OdometryJumpFilter:
 class NavigationHealthMonitor(Node):
     """持续发布可锁存的导航健康状态；任何必需输入断流都变为 false。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """建立导航输入健康状态和 transient-local 健康话题。
 
         transient-local 使稍后启动的速度门能立即获得最近状态，而不必在未知状态下等待一个
         完整检测周期；内部默认值仍为 false，满足失效安全原则。
         """
-        super().__init__("navigation_health_monitor")
+        super().__init__("navigation_health_monitor", **node_kwargs)
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("sensor_timeout", 1.0)
@@ -229,6 +234,12 @@ class NavigationHealthMonitor(Node):
         self.declare_parameter("max_odom_jump", 0.75)
         self.declare_parameter("odom_jump_recovery_samples", 3)
         self.declare_parameter("future_stamp_tolerance", 0.10)
+        # This node gates autonomous motion.  Reject the raw YAML before clamping values or
+        # creating a transient-local health publisher, otherwise a bad configuration can look
+        # like a valid safety decision to late subscribers.
+        validate_navigation_health_parameters(
+            {name: self.get_parameter(name).value for name in HEALTH_PARAMETER_NAMES}
+        )
         self.global_frame = str(self.get_parameter("global_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.timeout = max(0.1, float(self.get_parameter("sensor_timeout").value))

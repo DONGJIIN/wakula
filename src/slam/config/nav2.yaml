@@ -250,6 +250,8 @@ nav2_readiness_monitor:
     minimum_scan_field_of_view: 3.14
     max_xy_covariance: 1.0
     expected_odom_frame: odom
+    # readiness 只通过该服务激活 Nav2；改命名空间时必须同步修改此绝对服务名。
+    lifecycle_service: /lifecycle_manager_navigation/manage_nodes
     # 快速重启后 slam_toolbox 偶发停在 inactive；监控器只在 scan/odom 健康且
     # map TF 缺失时尝试 configure/activate，不会关闭或重置外部定位节点。
     recover_slam_toolbox: true

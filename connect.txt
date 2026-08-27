@@ -119,13 +119,15 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   作用：校验 /scan 的 frame/角度/样本/回波和 /odom 的时间/frame/数值，再等待定位 TF
         就绪并激活 Nav2。
   输入：/scan、/odom、map -> base_link TF。
-  输出：调用 Nav2 生命周期管理服务，不发布运动话题。
+  输出：调用 /lifecycle_manager_navigation/manage_nodes，不发布运动话题。
+  注意：传感器话题和生命周期服务均要求绝对 ROS 名称；frame 不带前导 `/`。
 
 /navigation_health_monitor（slam / navigation_health_monitor）
   作用：运行中继续检查上述数据合同、里程计突跳、时间戳和 TF 是否可靠。
   输入：/scan、/odom、map -> base_link TF。
   输出：/navigation/healthy、/diagnostics。
   注意：任何关键输入断流或异常都会将健康状态置为 false；里程计跳变需连续稳定样本后恢复。
+        雷达有效率必须在 (0, 1]，扫描样本数至少 2，传感器超时必须大于 0。
 
 2.4 Nav2 节点组
 
