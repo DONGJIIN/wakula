@@ -177,6 +177,20 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
 perception_bag_evaluator（离线工具，不随一键启动运行）
   作用：读取 rosbag 和人工标签，统计识别准确率、召回率及连续量误差。
 
+/algorithm_debug_dashboard（quadruped_tools，独立可选调试进程）
+  作用：在本机 http://127.0.0.1:8088 集中显示相机标注图、当前障碍、SLAM/Nav2、越障引导、
+        自主任务清单以及话题频率/断流，并导出 JSON/截图用于复盘。
+  输入：/vision/annotated_image、/camera/camera_info、/scan、/odom、/map、/plan、
+        /navigation/healthy、/terrain/navigation_safety、/traversal/guidance、
+        /perception/front_obstacle_name 和 /autonomy/* 状态话题。
+  输出：仅本机 HTTP 页面和用户点击后生成的 reports/debug_dashboard 文件；无 ROS publisher、
+        无 Action client，不启动/停止 Gazebo、SLAM、Nav2 或自主任务，不会指挥机器人运动。
+
+camera_calibrator（离线命令，不是 ROS 节点）
+  作用：从棋盘格图片计算相机内参/畸变和重投影误差，输出 ROS CameraInfo YAML。
+  注意：只解决单相机像素几何；不生成 base_link -> camera_link 或雷达—相机外参，也不调
+        HSV。外参与时间同步仍需在最终安装位置单独验收。
+
 stack_regression（测试工具，不随一键启动运行）
   作用：在 Gazebo 中验证旋转/倒退回环、多目标、1 m 窄通道、恢复行为和资源占用。
   接口：显式 --allow-motion 后发布 /cmd_vel_teleop；订阅 /map、/scan、/odom、

@@ -8,10 +8,11 @@ Wakula 后续开发快速上手
 离线评估、强弱光/高光/模糊防御、强类型 NavigationSafety/TraversalGuidance 对接合同、
 Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 未知地图前沿探索、Nav2 入口接近、TraverseObstacle Action 编排、独立任务进程启停、Xbox
-手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
+手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、浏览器算法调试台、相机内参标定、
+长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、228 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、234 项自动测试通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
 前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
@@ -41,7 +42,8 @@ TF、map 定位 TF、强类型算法输出和 /cmd_vel 消费者。检查器会�
 
 2026-08-27 越障成功合同回归：三进程实跑中，直角绕杆 Action 返回后任务先进入
 VERIFYING_TRAVERSAL_RESULT，用独立 map TF 核对跨过入口与落地稳定，约 0.9 s 后才将
-清单从 0/8 更新为 1/8，随后继续前沿探索。全工作区 228 项测试同步通过。
+清单从 0/8 更新为 1/8，随后继续前沿探索。该版本后续加入调试/标定工具，全工作区现为
+234 项测试通过。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
@@ -138,6 +140,14 @@ SLAM 产生 map -> odom。启用地形感知还需：
 
 第一条在 GUI 模式下会自动打开 `Wakula Simulation Keyboard` 窗口；点击该窗口后使用
 i/k 前后、j/l 原地旋转、任意其他键停车。无需运行第四条键盘命令。
+
+可选只读调试软件不属于上述三条正式命令；核心算法启动后单独运行：
+
+  ros2 run quadruped_tools algorithm_debug_dashboard
+
+浏览器默认打开 http://127.0.0.1:8088，可同时看相机标注、当前障碍、SLAM/Nav2、越障
+阶段、任务清单和话题频率，并导出 reports/debug_dashboard 下的 JSON/截图。它不发布
+任何 ROS 运动消息；无桌面环境增加 `--ros-args -p open_browser:=false`。
 
 真机要求运动组提供 /traverse_obstacle Action 服务端。仿真时第三个命令检测到 /clock 后
 自动启动通用测试狗的 Action 替身，不再需要第四个常规命令。Gazebo 场地仍独立启动：
@@ -342,6 +352,17 @@ POLE 由 Nav2 低速绕杆。相机证据不能触发腿部动作。`/navigation
   ./scripts/record_bag.sh
   ros2 bag info bags/<bag名>
   ros2 run quadruped_tools perception_bag_evaluator --help
+
+相机换镜头、焦距、分辨率或最终安装后，采集 15～30 张覆盖画面四角/远近/倾斜姿态的
+棋盘格照片，再做内参标定（9×6 是内角点，格长示例为 0.025 m）：
+
+  ros2 run quadruped_tools camera_calibrator --images 'calibration/*.png' \
+    --board-cols 9 --board-rows 6 --square-size 0.025 \
+    --camera-name front_camera --output config/front_camera_intrinsics.yaml
+
+当前 OpenCV 颜色/轮廓分类对内参误差不敏感，光照和负样本数据更影响准确率；但 RGB 与
+深度/点云融合、广角边缘和几何测量必须有正确内参。优先使用 RGB-D 驱动已 rectified/
+aligned 的图像与点云。该命令不完成相机—雷达/机身外参；外参和时间同步必须另行标定。
 
 每种障碍至少采集不同距离、角度、速度、明暗、逆光和背景；还要采集大量无障碍负样本。
 视觉集必须额外覆盖全黑/全白、局部阴影、顶灯频闪、金属高光、镜头污渍、运动模糊和
