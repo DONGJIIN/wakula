@@ -422,27 +422,31 @@ Isaac Lab 训练/策略接口同样尚未定义。应在真机关节、状态估
 
 八、移植时的通信所有权
 ------------------
-把算法嵌入已有机器人时，最容易出错的不是话题名称，而是同一接口被两个模块同时拥有：
+本次采用完整算法移植：目标机器人没有 SLAM/Nav2，本项目负责 SLAM Toolbox、Nav2、OpenCV、
+点云、融合和任务层；目标机器人负责传感器驱动、状态估计、TF、运动控制与硬件安全。最容易
+出错的不是话题名称，而是同一接口被两个模块同时拥有：
 
 | 接口 | 唯一生产者 | 本算法角色 |
 |---|---|---|
 | `/scan`、Image、PointCloud2 | 目标机器人的传感器驱动 | 只订阅，可用 remap/profile 对齐 |
 | `/odom`、`odom -> base_link` | 目标机器人的状态估计 | 只订阅，算法不得重复发布 |
-| `map -> odom`、`/map` | 目标已有 SLAM 或本项目 SLAM Toolbox 二选一 | 不得同时启动两套 SLAM |
+| `map -> odom`、`/map` | 本项目 SLAM Toolbox | 目标端不得再启动另一套 SLAM |
 | `base_link -> sensor_frame` | 目标机器人的 URDF/静态 TF | 移植时 `robot_model:=false` |
 | `/cmd_vel` | 目标 twist_mux/安全层，或本项目 speed gate 二选一 | 已有仲裁器时 `speed_gate:=false` |
-| `/navigate_to_pose` | 一套 Nav2 bt_navigator | autonomous_mission 仅为客户端 |
+| `/navigate_to_pose` | 本项目 Nav2 bt_navigator | autonomous_mission 为客户端 |
 | `/traverse_obstacle` | 真机运动/越障控制器 | 本项目只提供 Action 客户端与合同 |
 
-最小感知迁移包为 quadruped_interfaces + quadruped_perception + quadruped_planning。直接复用
-公共 launch 时再带 quadruped_bringup + quadruped_description，并执行：
+必须迁移 quadruped_interfaces、quadruped_description、quadruped_perception、
+quadruped_planning、quadruped_bringup、slam 六个包。传感器、里程计和 TF 启动后执行：
 
-  ros2 launch quadruped_bringup bringup.launch.py robot_model:=false \
-    speed_gate:=false camera_topic:=/实际image point_cloud_topic:=/实际points
+  ros2 launch slam slam.launch.py robot_model:=false \
+    scan_topic:=/实际scan odom_topic:=/实际odom \
+    camera_topic:=/实际image point_cloud_topic:=/实际points
 
-此模式继续发布 `/terrain/navigation_safety`、`/traversal/guidance` 和障碍名称，但不会发布
-最终 `/cmd_vel`。目标安全层应把 `perception_valid=false` 或数据超时视为停车条件，并对
-`speed_limit` 做上限约束，不能把 STEP/CLIMB/READY 直接解释成关节动作。
+该入口同时启动 SLAM、Nav2 和感知算法。若目标已有 twist_mux/底盘安全层，在命令中增加
+`speed_gate:=false`，让目标安全层消费 `/terrain/navigation_safety` 并独占最终 `/cmd_vel`；
+这不表示复用目标 SLAM/Nav2。目标端应把 `perception_valid=false` 或数据超时视为停车条件，
+不能把 STEP/CLIMB/READY 直接解释成关节动作。
 
 若采用本项目完整速度链，所有权必须是：Nav2 controller -> `/cmd_vel_nav` -> velocity
 smoother -> `/cmd_vel_smoothed` -> navigation_speed_gate -> `/cmd_vel`。迁移完成后执行

@@ -330,16 +330,20 @@ SLAM、Nav2、OpenCV、任务编排及安全链。
 ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`install/`、`log/`、Gazebo
 场地、Xbox 和离线测试工具都不是目标机器人运行依赖。
 
+本次对接前提已经确定：目标机器人没有 SLAM、Nav2 和本项目 OpenCV/点云感知，因此采用
+完整移植，不使用“只复制感知包”的精简方案。目标机器人仍负责驱动、里程计/状态估计、
+本体与传感器 TF、底层运动控制、急停及真实越障 Action 服务端。
+
 1. 先盘点目标仓库已有能力
 
    - 已有驱动/状态估计必须继续提供 LaserScan、Odometry、Image、PointCloud2 和 TF。
-   - 已有 SLAM 若能发布 `/map` 与 `map -> odom`，不复制本项目 `slam` 包中的 SLAM Toolbox。
-   - 已有 Nav2 若提供标准 `/navigate_to_pose`，可继续使用；不需要替换全局/局部规划器。
+   - 目标没有 SLAM：由本项目 SLAM Toolbox 发布 `/map` 与 `map -> odom`。
+   - 目标没有 Nav2：由本项目 Nav2 提供地图规划、局部规划和 `/navigate_to_pose`。
    - 已有底盘安全层或 twist_mux 时，它继续拥有最终速度和急停权限。
    - 目标仓库若已经存在同名 `quadruped_interfaces`，只能保留一个版本；修改消息包名需要同步
      修改所有 Python import、Action 客户端/服务端并全量重编，不能让两个同名接口混在 overlay。
 
-2. 选择迁移集合
+2. 固定迁移集合
 
    完整算法栈复制以下六个源码目录：
 
@@ -350,11 +354,10 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
      src/quadruped_bringup
      src/slam
 
-   若目标已有 SLAM/Nav2，只复制 `quadruped_interfaces`、`quadruped_perception`、
-   `quadruped_planning`。为了直接复用公共感知 launch，可额外复制 `quadruped_bringup` 和
-   `quadruped_description`；运行时用 `robot_model:=false`，目标机器人的 URDF/TF 仍是唯一来源。
-   仅使用任务管理器时至少复制 interfaces + planning，并让现有感知适配成
-   NavigationSafety/TraversalGuidance 合同。`quadruped_gazebo` 不再是 slam 的硬依赖。
+   六个目录必须一起维护版本；其中 `slam` 提供目标机器人缺少的 SLAM Toolbox 和 Nav2，
+   perception/planning 提供 OpenCV、点云、融合、地形判断和任务层。真机运行使用
+   `robot_model:=false`，由目标机器人的 URDF/robot_state_publisher 提供本体及传感器 TF。
+   `quadruped_gazebo` 不是 `slam` 的硬依赖，不需要随算法迁移。
 
 3. 在目标工作空间构建
 
@@ -367,26 +370,22 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
        quadruped_perception quadruped_planning quadruped_bringup slam
      source install/setup.bash
 
-   只复制三个核心包时，从第二条 build 中删除 bringup/slam。建议记录迁移所用 Git commit，
-   上游 Action/msg 改动后必须让客户端、服务端和接口包使用同一版本重新构建。
+   不要从第二条 build 中删除 `bringup` 或 `slam`。建议记录迁移所用 Git commit；上游
+   Action/msg 改动后必须让客户端、服务端和接口包使用同一版本重新构建。
 
-4. 两种推荐启动方式
+4. 完整算法启动方式
 
-   完整迁移并采用本项目 SLAM/Nav2/速度门：
+   目标传感器、里程计和 TF 已经启动后，一条命令启动本项目 SLAM、Nav2、OpenCV、点云、
+   融合和安全决策：
 
      ros2 launch slam slam.launch.py robot_model:=false \
        scan_topic:=/实际scan odom_topic:=/实际odom \
        camera_topic:=/实际image point_cloud_topic:=/实际points
 
-   嵌入目标仓库已有 SLAM/Nav2/底盘仲裁器，只启动 OpenCV、点云、融合、地形决策和入口引导：
-
-     ros2 launch quadruped_bringup bringup.launch.py \
-       robot_model:=false speed_gate:=false \
-       camera_topic:=/实际image point_cloud_topic:=/实际points
-
-   第二种方式不会创建最终 `/cmd_vel` 发布者；目标仓库读取
-   `/terrain/navigation_safety` 的 `perception_valid`、`mode`、`speed_limit` 和几何字段，自行
-   接入现有安全仲裁。若决定采用本项目速度门，必须令 Nav2 controller 输出 `/cmd_vel_nav`、
+   不要另外启动目标仓库中的 SLAM/Nav2，也不要只运行 `quadruped_bringup` 代替上述完整入口。
+   若目标已有底盘 twist_mux/安全仲裁器，在同一命令末尾增加 `speed_gate:=false`，由目标安全层
+   消费 `/terrain/navigation_safety`；这只改变最终速度所有权，不会关闭 SLAM/Nav2/感知。
+   若采用本项目速度门，必须令 Nav2 controller 输出 `/cmd_vel_nav`、
    velocity_smoother 输出 `/cmd_vel_smoothed`，本项目 gate 独占最终 `/cmd_vel`；同时迁移
    navigation_health_monitor 或由目标仓库可靠发布 `/navigation/healthy`。不能把 Nav2 和
    gate 都接在同名 `/cmd_vel`，否则会形成多个发布者甚至反馈环。
@@ -400,9 +399,7 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
        use_sim_time:=false simulation_traversal_backend:=false
 
    真机运动组必须提供 `/traverse_obstacle` Action 服务端；没有服务端时任务只会等待，不会
-   生成腿部动作。若目标仓库不复制 `slam`，可在自己的 launch 中直接启动
-   `quadruped_planning/autonomous_mission`，加载 `autonomous_mission.yaml` 并设置
-   `autostart=true`。目标仓库仍负责 Action 控制权仲裁、接触/姿态闭环和硬件急停。
+   生成腿部动作。目标仓库仍负责 Action 控制权仲裁、接触/姿态闭环和硬件急停。
 
 6. 对接验收顺序
 

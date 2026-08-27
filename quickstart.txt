@@ -418,18 +418,18 @@ publish_annotated_image=false，减少标注图复制和编码；不要为了省
 
 十一、移植到已有机器人仓库速查
 --------------------------
-完整带走本项目 SLAM/Nav2/OpenCV：复制 interfaces、description、perception、planning、
-bringup、slam 六个源码包。目标已经有 SLAM/Nav2 时，只复制 interfaces、perception、planning；
-为了复用 launch 可再复制 bringup/description。不要复制 build/install/log、Gazebo、Xbox 或
-tools。源码放入目标工作空间 `src/` 后运行 rosdep，并先单独编译 quadruped_interfaces。
+本次目标机器人没有 SLAM/Nav2，固定采用完整移植：复制 interfaces、description、perception、
+planning、bringup、slam 六个源码包，缺少任何一个都不算完整算法。不要复制
+build/install/log、Gazebo、Xbox 或 tools。源码放入目标工作空间 `src/` 后运行 rosdep，先
+单独编译 quadruped_interfaces，再用 `--packages-up-to slam` 构建其余包。
 
-保留目标现有地图、导航和底盘速度仲裁的推荐命令：
+启动目标机器人的传感器、里程计和 TF 后，使用完整算法入口：
 
-  ros2 launch quadruped_bringup bringup.launch.py robot_model:=false \
-    speed_gate:=false camera_topic:=/实际image point_cloud_topic:=/实际points
+  ros2 launch slam slam.launch.py robot_model:=false \
+    scan_topic:=/实际scan odom_topic:=/实际odom \
+    camera_topic:=/实际image point_cloud_topic:=/实际points
 
-`speed_gate:=false` 很重要：它让算法只发布障碍和安全约束，不争用目标仓库的 `/cmd_vel`。
-如果改用本项目速度门，必须把 Nav2 串成 `/cmd_vel_nav -> /cmd_vel_smoothed -> /cmd_vel`，并
-确保最终话题只有一个发布者。自主任务另需标准 `/map`、TF、`/navigate_to_pose` 和真机
-`/traverse_obstacle` 服务端。详细复制、构建、Action 和验收步骤见 instruction.txt 第十节；
-接口所有权表见 connect.txt 第八节。
+该命令由本项目启动 SLAM、Nav2、OpenCV、点云、融合和安全决策。目标已有底盘速度仲裁器时
+追加 `speed_gate:=false`；这只保留目标的 `/cmd_vel` 所有权，不会关闭本项目 SLAM/Nav2。
+自主越障另需真机运动控制提供 `/traverse_obstacle` 服务端。详细复制、构建、启动和验收步骤
+见 instruction.txt 第十节；接口所有权表见 connect.txt 第八节。

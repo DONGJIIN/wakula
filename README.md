@@ -314,14 +314,20 @@ ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
 
 ### 3.2 移植到已有机器人代码仓库
 
-不要复制整个工作空间的 `build/`、`install/`、`log/`，也不要迁移 Gazebo、Xbox 和测试工具。
-按目标仓库已有能力选择最小集合：
+本项目确定采用**完整移植**：目标机器人已有驱动、状态估计和运动控制，但没有 SLAM、Nav2
+及本项目的 OpenCV/点云感知。因此必须复制以下六个源码包，不能省略 `slam`：
 
-| 目标仓库现状 | 需要迁移 | 不需要迁移 |
-|---|---|---|
-| 缺少整套 SLAM/Nav2/感知 | `quadruped_interfaces`、`quadruped_description`、`quadruped_perception`、`quadruped_planning`、`quadruped_bringup`、`slam` | `quadruped_gazebo`、`quadruped_teleop`、`quadruped_tools` |
-| 已有 SLAM/Nav2、只缺障碍感知 | `quadruped_interfaces`、`quadruped_perception`、`quadruped_planning`；可选 `quadruped_bringup` 和占位 `quadruped_description` | `slam` 及仿真/手柄/工具包 |
-| 已有感知，只想使用任务编排 | `quadruped_interfaces`、`quadruped_planning`，并让现有感知发布本项目强类型消息 | 其他包均可不复制 |
+| 必须迁移 | 作用 |
+|---|---|
+| `quadruped_interfaces` | 障碍、安全、引导和越障 Action 接口 |
+| `quadruped_description` | 启动依赖和调试占位模型；真机运行时不发布该占位模型 |
+| `quadruped_perception` | OpenCV、点云几何、融合与地形安全评估 |
+| `quadruped_planning` | 障碍入口引导、任务编排和速度安全门 |
+| `quadruped_bringup` | 感知与规划公共启动入口 |
+| `slam` | SLAM Toolbox、Nav2 参数/行为树及完整启动入口 |
+
+不要复制整个工作空间的 `build/`、`install/`、`log/`，也不要迁移
+`quadruped_gazebo`、`quadruped_teleop` 和 `quadruped_tools`。
 
 推荐将源码包复制到目标工作空间 `src/` 后由 `rosdep` 解析依赖，先单独构建接口包，再构建
 其余包。已有机器人继续拥有传感器驱动、`/odom`、TF、底盘安全和关节控制；本算法不接管
@@ -329,7 +335,7 @@ ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
 `/terrain/navigation_safety`；若采用本项目速度门，则 Nav2 必须按
 `/cmd_vel_nav → /cmd_vel_smoothed → /cmd_vel` 串联，禁止两个节点同时发布最终 `/cmd_vel`。
 
-完整复制命令、嵌入式启动方式、Action 对接和验收清单见 `instruction.txt` 第十节；所有
+完整复制命令、真机启动方式、Action 对接和验收清单见 `instruction.txt` 第十节；所有
 话题、消息和所有权冲突见 `connect.txt` 第八节。
 
 ## 4. 默认与可替换传感器接口
