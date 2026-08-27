@@ -433,3 +433,24 @@ build/install/log、Gazebo、Xbox 或 tools。源码放入目标工作空间 `sr
 追加 `speed_gate:=false`；这只保留目标的 `/cmd_vel` 所有权，不会关闭本项目 SLAM/Nav2。
 自主越障另需真机运动控制提供 `/traverse_obstacle` 服务端。详细复制、构建、启动和验收步骤
 见 instruction.txt 第十节；接口所有权表见 connect.txt 第八节。
+
+真机首次调试不要直接运行自主任务。最短安全顺序是：
+
+  # 1. 电机禁用，只检查硬件消息与 TF
+  ./scripts/check_integration.sh --inputs-only \
+    --scan /实际scan --odom /实际odom --image /实际image --points /实际points
+
+  # 2. 被动检查感知与建图，不启 Nav2，不发布最终速度
+  ros2 launch slam slam.launch.py use_sim_time:=false robot_model:=false \
+    nav2_enabled:=false speed_gate:=false \
+    scan_topic:=/实际scan odom_topic:=/实际odom \
+    camera_topic:=/实际image point_cloud_topic:=/实际points
+
+  # 3. SLAM、识别和 rosbag 验收后再启 Nav2，但仍不把速度送进电机
+  ros2 launch slam slam.launch.py use_sim_time:=false robot_model:=false \
+    speed_gate:=false scan_topic:=/实际scan odom_topic:=/实际odom \
+    camera_topic:=/实际image point_cloud_topic:=/实际points
+
+确认 `/navigation/healthy=true`、地图/TF/障碍结果稳定且 `/cmd_vel` 所有权唯一后，才进入低速
+空场、单障碍和自主任务测试。详细通过标准、故障注入和测试记录要求见 instruction.txt
+第十节 6.1～6.8。

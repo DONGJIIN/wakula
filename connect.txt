@@ -453,3 +453,14 @@ smoother -> `/cmd_vel_smoothed` -> navigation_speed_gate -> `/cmd_vel`。迁移�
 `ros2 topic info /cmd_vel --verbose`，确认不存在第二个 Nav2、键盘或旧安全节点直接发布同名
 最终速度。消息/Action 接口版本也必须一致；同一 ROS_DOMAIN_ID 中不得出现两个不同构建的
 `quadruped_interfaces`。
+
+8.1 真机联调时观察哪些接口
+
+第一阶段只看输入：`/scan`、`/odom`、Image、PointCloud2，以及
+`odom -> base_link -> sensor_frame`；此时电机禁用。第二阶段启动完整算法但令
+`nav2_enabled:=false speed_gate:=false`，观察 `/map`、`map -> base_link`、
+`/perception/fused_obstacle`、`/perception/front_obstacle_name`、
+`/terrain/navigation_safety` 和 `/traversal/guidance`。第三阶段启用 Nav2，先只观察全局路径、
+局部代价地图和 `/cmd_vel_smoothed`。最后确认 `/cmd_vel` 只有一个发布/仲裁链且有真实控制
+订阅者，才允许低速接电机；越障阶段另检查 `/traverse_obstacle`、`/autonomy/state` 和两份
+障碍清单。各阶段命令与通过标准见 instruction.txt 第十节第 6 项。

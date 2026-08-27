@@ -338,6 +338,10 @@ ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
 完整复制命令、真机启动方式、Action 对接和验收清单见 `instruction.txt` 第十节；所有
 话题、消息和所有权冲突见 `connect.txt` 第八节。
 
+真机调试必须按“原始输入与 TF → 被动感知/SLAM → SLAM 回环 → OpenCV/点云 rosbag →
+Nav2 空载规划 → 低速运动 → 单障碍 Action → 自主任务与故障长测”逐级进行。完整命令、
+每级通过标准和故障定位方法见 `instruction.txt` 第十节第 6 项；不要首次接入就运行自主任务。
+
 ## 4. 默认与可替换传感器接口
 
 ### 4.1 真机传感器选型与预留安装位置

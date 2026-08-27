@@ -401,20 +401,156 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    真机运动组必须提供 `/traverse_obstacle` Action 服务端；没有服务端时任务只会等待，不会
    生成腿部动作。目标仓库仍负责 Action 控制权仲裁、接触/姿态闭环和硬件急停。
 
-6. 对接验收顺序
+6. 真机分阶段调试流程
 
-   - 断开电机，先验证 `/scan`、`/odom`、`odom -> base_link` 和所有传感器固定 TF。
-   - 验证 Image/PointCloud2 时间源一致、frame_id 正确，点云在 RViz 中与地面/墙面对齐。
-   - 核对 `/terrain/navigation_safety` 与 `/traversal/guidance` 持续更新，断流时必须失效。
-   - 用 `ros2 topic info /cmd_vel --verbose` 确认最终速度只有预期仲裁节点发布。
-   - 先录 rosbag 离线重调相机、点云和地形阈值，再连接低速底盘。
-   - 最后接入真实 `/traverse_obstacle`，以单障碍、保护绳和可人工急停方式验收。
+   必须按 6.1～6.8 顺序推进。前一阶段不通过时不要带病进入下一阶段，也不要一上来启动
+   autonomous_navigation。首次接电使用支撑架/保护绳、实体急停和一名独立安全员；先禁止
+   电机使能。`use_sim_time:=false`，真机不得保留 Gazebo 的 `/clock`。
 
-   若同时复制仓库根目录的 `scripts/check_integration.sh`，可依次运行：
+   6.1 确认硬件原始输入（电机禁用，算法不启动）
 
+     cd <目标工作空间>
+     source /opt/ros/jazzy/setup.bash
+     source install/setup.bash
+     ros2 topic list -t
      ./scripts/check_integration.sh --inputs-only \
-       --scan /实际scan --odom /实际odom --image /实际image --points /实际points
+       --scan /实际scan --odom /实际odom \
+       --image /实际image --points /实际points
+
+   再分别观察频率和单帧内容：
+
+     ros2 topic hz /实际scan
+     ros2 topic hz /实际odom
+     ros2 topic hz /实际image
+     ros2 topic hz /实际points
+     ros2 topic echo /实际odom --once
+     ros2 run tf2_ros tf2_echo odom base_link
+     ros2 run tf2_ros tf2_echo base_link <雷达frame_id>
+     ros2 run tf2_ros tf2_echo base_link <相机或点云frame_id>
+
+   通过标准：检查脚本为“失败 0”；消息持续更新且时间戳来自同一时钟；`/odom` 的
+   `header.frame_id=odom`、`child_frame_id=base_link`；ROS 坐标为 x 前、y 左、z 上；雷达、
+   相机和点云 TF 与实测安装位置一致。静止时里程计不能持续漂移，缓慢移动/转动时符号正确。
+   不满足时先修驱动、时钟同步、URDF/静态 TF 或状态估计，不要通过放宽算法阈值掩盖问题。
+
+   6.2 被动启动感知与 SLAM（仍不允许算法驱动真机）
+
+     ros2 launch slam slam.launch.py \
+       use_sim_time:=false robot_model:=false nav2_enabled:=false speed_gate:=false \
+       scan_topic:=/实际scan odom_topic:=/实际odom \
+       camera_topic:=/实际image point_cloud_topic:=/实际points
+
+   `robot_model:=false` 避免占位 URDF 与真机 TF 冲突；`nav2_enabled:=false` 和
+   `speed_gate:=false` 保证本阶段没有最终 `/cmd_vel`。在 RViz 中检查 LaserScan、Map、TF、
+   PointCloud2 和 `/vision/annotated_image`。另开终端观察：
+
+     ros2 topic hz /map
+     ros2 run tf2_ros tf2_echo map base_link
+     ros2 topic echo /navigation/healthy
+     ros2 topic echo /perception/front_obstacle_name
+     ros2 topic echo /terrain/navigation_safety
+     ros2 topic echo /traversal/guidance
+
+   通过标准：`map -> odom -> base_link -> sensor` 连通；点云与地面/墙面重合；无遮挡时不应
+   长期报告危险障碍；放置一个已知障碍后，名称、距离、横向偏差和阶段能稳定更新；遮住或
+   断开传感器后 `perception_valid` 失效并进入 STOP，而不是保持旧的 READY。
+
+   6.3 单独验证 SLAM
+
+   保持 6.2 的启动方式，用目标机器人已有的人工控制以低速走“直线—原地正反转—倒退—闭合
+   小环路”。不要直接搬动机器人，除非状态估计能同步反映这次位移。观察 RViz 中机器人不能
+   跑出最新地图，旋转和倒退时扫描不得明显拖尾，回到起点后墙体不应出现多层重影。保存一张
+   调试地图：
+
+     mkdir -p maps
+     ros2 run nav2_map_server map_saver_cli -f maps/real_site_debug
+
+   若建图跟不上，按 `/scan` 频率与时间戳、`/odom`、激光外参、`map -> odom` 的顺序排查；
+   优先修数据源，最后才调整 `src/slam/config/slam.yaml`。每次只改一组参数并记录 rosbag。
+
+   6.4 标定和调整 OpenCV/点云识别
+
+   分别采集空场及每类比赛障碍的正对、左右偏、远近样本，并覆盖正常光、暗光、阴影、过曝
+   和运动模糊。终端名称只是人工速查，程序验收应以强类型消息为准：
+
+     ros2 topic echo /perception/fused_obstacle
+     ros2 topic echo /perception/front_obstacle_name
+     ros2 topic echo /terrain/navigation_safety
+
+   同时录制原始输入、TF 和算法输出：
+
+     ros2 bag record -o real_perception_debug \
+       /scan /odom /tf /tf_static \
+       /实际image /实际camera_info /实际points \
+       /vision/obstacle_evidence /terrain/features \
+       /vision/obstacle_stamped /terrain/features_stamped \
+       /perception/fused_obstacle /terrain/navigation_safety /traversal/guidance
+
+   先完成相机内参以及相机—点云—`base_link` 外参标定，再调
+   `quadruped_perception/config/vision.yaml` 和 `terrain.yaml`。不得用一次现场观察直接改阈值；
+   应把 bag 带回开发工作空间，用离线工具比较修改前后结果：
+
+     ros2 run quadruped_tools perception_bag_evaluator real_perception_debug \
+       --write-label-template labels.csv --sample-period 0.5
+     # 人工填写 labels.csv 后再生成报告
+     ros2 run quadruped_tools perception_bag_evaluator real_perception_debug \
+       --labels labels.csv --report perception_report.json \
+       --suggestions calibration_suggestions.yaml
+
+   报告至少查看各类别 precision/recall/F1 和混淆矩阵，不能只看总体 accuracy。调试工具可留在
+   开发机，不是目标机器人的运行包。
+
+   6.5 启动 Nav2，但先不接电机
+
+     ros2 launch slam slam.launch.py \
+       use_sim_time:=false robot_model:=false speed_gate:=false \
+       scan_topic:=/实际scan odom_topic:=/实际odom \
+       camera_topic:=/实际image point_cloud_topic:=/实际points
+
+   等待 `/navigation/healthy=true`，检查 Nav2 生命周期节点已经 active。在 RViz 设置一个位于
+   已知自由区内的近距离目标，确认全局路径、局部代价地图和 `/cmd_vel_smoothed` 正常，但本
+   阶段不把速度送给驱动。若 Nav2 不激活，优先检查 `/scan`、`/odom`、TF 和时间戳；若路径
+   穿墙，检查地图/footprint/costmap；若原地震荡，检查里程计符号和局部控制器参数。
+
+   6.6 低速接入真机运动
+
+   首先确定最终速度只能有一个所有者：使用本项目速度门时保持 `speed_gate:=true`；目标已有
+   twist_mux/硬件安全层时设为 `speed_gate:=false`，并由目标安全层订阅算法约束。执行：
+
+     ros2 topic info /cmd_vel --verbose
      ./scripts/check_integration.sh \
-       --scan /实际scan --odom /实际odom --image /实际image --points /实际points
+       --scan /实际scan --odom /实际odom \
+       --image /实际image --points /实际points
+
+   完整检查要求最终速度存在真实运动控制订阅者。先在平坦空场发送 0.5～1.0 m 的 Nav2 目标，
+   限制线速度/角速度并始终可急停；再测倒退、连续旋转、窄通道、死路和恢复。验证取消目标或
+   Ctrl-C 算法后自动速度归零，但独立的人工控制仍可按目标机器人的仲裁规则接管。
+
+   6.7 接入真实越障 Action 和自主任务
+
+   先确认运动组服务端和类型：
+
+     ros2 action list -t | grep traverse_obstacle
+     ./scripts/check_integration.sh --require-traverse-server \
+       --scan /实际scan --odom /实际odom \
+       --image /实际image --points /实际points
+
+   先单独验证一个低风险障碍：Nav2 到达入口、`guidance` 从 APPROACH/ALIGN 稳定进入 READY、
+   Action 接管、真实控制器完成动作并稳定落地、任务层再次用地图位姿确认已经越过入口。
+   只有以上条件全部满足才允许 Result.success=true。单障碍重复通过后才启动自主任务：
+
+     ros2 launch slam autonomous_navigation.launch.py \
+       use_sim_time:=false simulation_traversal_backend:=false
+
+   观察 `/autonomy/state`、`/autonomy/event`、`/autonomy/completed_obstacles` 和
+   `/autonomy/pending_obstacles`。不要在真机启动 Gazebo 的 `sim_traverse_obstacle` 替身。
+
+   6.8 故障、长测与交付记录
+
+   在支撑架/保护绳条件下依次制造相机、点云、雷达、里程计断流和 TF 缺失；确认健康状态
+   变 false、安全模式进入 STOP、自动速度归零，恢复数据后不会无条件恢复旧动作。然后按
+   “平地 10 分钟—单障碍重复—多目标—半场—整场”递进长测，记录 CPU、内存、温度、降频、
+   话题频率、定位漂移、误识别、Nav2 恢复次数和 Action 成败原因。每次测试保存 Git commit、
+   参数文件、硬件/固件版本、rosbag 和结果表，禁止只写“运行正常”。
 
    完整检查全部通过只代表 ROS 接口和算法数据链对齐，不代表真机步态或越障安全已经验收。
