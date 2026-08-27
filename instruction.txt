@@ -554,3 +554,17 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    参数文件、硬件/固件版本、rosbag 和结果表，禁止只写“运行正常”。
 
    完整检查全部通过只代表 ROS 接口和算法数据链对齐，不代表真机步态或越障安全已经验收。
+
+7. 参数合同与节点级回归
+
+   感知和规划节点采用 fail-fast 参数合同。修改 vision.yaml、terrain.yaml、
+   terrain_navigation.yaml 或 autonomous_mission.yaml 后，应先运行对应包测试再启动全栈。
+   ROI 上下界、HSV 三元组、处理频率、点数、同步/断流窗口、STEP/CLIMB/STOP 阈值、入口距离、
+   确认帧数、任务投票窗口、绝对话题和速度门输入/输出均在节点构造阶段校验；配置非法时节点
+   会主动退出并一次打印同组全部错误。不要把该退出改成 warning 或静默夹紧，否则现场容易把
+   配置错误误判为识别不准。`resize_width=0` 与 `transform_max_points=0` 是明确支持的“关闭上限”
+   值，其余要求正值的处理周期和超时不能用 0 表示关闭。
+
+   节点级测试不依赖 Gazebo：它通过真实 DDS 发布 TerrainFeatures/VisionObstacle 验证同步融合，
+   只发布点云时验证超时后降级，并通过真实 20 Hz 速度门定时器验证过期非零命令会被明确的零
+   Twist 覆盖。修改 QoS、话题、定时器或构造参数时必须保留这些回归，不能只测试纯函数。

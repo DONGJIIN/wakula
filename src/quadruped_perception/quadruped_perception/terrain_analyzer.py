@@ -27,6 +27,11 @@ from std_msgs.msg import Float32MultiArray, Header
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from quadruped_interfaces.msg import TerrainFeatures
+
+from quadruped_perception.parameter_validation import (
+    TERRAIN_PARAMETER_NAMES,
+    validate_terrain_parameters,
+)
 from quadruped_perception.terrain_geometry import (
     CLEAR,
     analyze_terrain_geometry,
@@ -289,13 +294,13 @@ def compute_terrain_features(
 class TerrainAnalyzer(Node):
     """限频处理最新点云并发布地形特征、Nav2 障碍点和诊断信息。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """声明地形参数并建立“最新帧覆盖”式点云处理流水线。
 
         订阅回调只保存最新消息，定时器才执行 TF 和几何分析。这种结构会主动丢弃处理不过来
         的旧帧，避免 RK3588 在高频点云下积压并输出过时的安全判断。
         """
-        super().__init__("terrain_analyzer")
+        super().__init__("terrain_analyzer", **node_kwargs)
         self.declare_parameter("input_topic", "")
         self.declare_parameter(
             "input_topic_candidates", DEFAULT_POINT_CLOUD_TOPICS
@@ -328,6 +333,13 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("bar_min_clearance", 0.18)
         self.declare_parameter("min_connected_region_cells", 4)
         self.declare_parameter("min_connected_region_points", 16)
+
+        # Validate the configured geometry as one contract.  Continuing with a corrected 10 cm
+        # ROI after a typo is unsafe because downstream nodes cannot tell that the requested
+        # field of view was not actually used.
+        validate_terrain_parameters(
+            {name: self.get_parameter(name).value for name in TERRAIN_PARAMETER_NAMES}
+        )
 
         override_topic = str(self.get_parameter("input_topic").value)
         candidates = list(self.get_parameter("input_topic_candidates").value)

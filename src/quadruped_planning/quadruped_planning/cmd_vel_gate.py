@@ -14,6 +14,11 @@ from math import isfinite, pi
 import rclpy
 from geometry_msgs.msg import Twist
 from quadruped_interfaces.msg import TraversalGuidance
+
+from quadruped_planning.parameter_validation import (
+    SPEED_GATE_PARAMETER_NAMES,
+    validate_speed_gate_parameters,
+)
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -126,13 +131,13 @@ def scan_allows_command(
 class NavigationSpeedGate(Node):
     """以 20 Hz 重算最终速度，任一安全输入超时即归零。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """建立三路安全心跳，并以固定频率发布经过门控的 Twist。
 
         这里保存消息接收时间而不是源 Header，因为 Twist/Float32/Bool 没有 Header。每次
         定时回调都重新检查超时，所以发布者退出后不会永久沿用最后一条非零命令。
         """
-        super().__init__("navigation_speed_gate")
+        super().__init__("navigation_speed_gate", **node_kwargs)
         self.declare_parameter("input_topic", "/cmd_vel_smoothed")
         self.declare_parameter("output_topic", "/cmd_vel")
         self.declare_parameter("command_timeout", 0.5)
@@ -148,6 +153,10 @@ class NavigationSpeedGate(Node):
         self.declare_parameter("alignment_guidance_timeout", 0.8)
         self.declare_parameter("alignment_max_angular_speed", 0.30)
         self.declare_parameter("stopped_rotation_linear_tolerance", 0.02)
+
+        validate_speed_gate_parameters(
+            {name: self.get_parameter(name).value for name in SPEED_GATE_PARAMETER_NAMES}
+        )
 
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value

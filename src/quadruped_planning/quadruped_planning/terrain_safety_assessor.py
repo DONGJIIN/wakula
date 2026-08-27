@@ -13,6 +13,11 @@ from typing import Sequence, Tuple
 
 import rclpy
 from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
+
+from quadruped_planning.parameter_validation import (
+    SAFETY_PARAMETER_NAMES,
+    validate_safety_parameters,
+)
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, Float32MultiArray, Header, String
@@ -755,13 +760,13 @@ def select_fused_assessment(
 class TerrainSafetyAssessor(Node):
     """持续发布地形模式和 Nav2 速度上限，并监控感知心跳。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """加载安全阈值并连接强类型融合接口与旧数组兼容接口。
 
         ``prefer_fused_obstacle`` 为真时融合消息是唯一权威输入；旧数组仍被订阅只是为了
         兼容关闭视觉的点云路径，不能让两条路径同时争抢当前状态。
         """
-        super().__init__("terrain_safety_assessor")
+        super().__init__("terrain_safety_assessor", **node_kwargs)
         for name, default in (
             ("step_threshold", 0.08),
             ("climb_threshold", 0.18),
@@ -791,6 +796,10 @@ class TerrainSafetyAssessor(Node):
         self.declare_parameter("name_clear_frames", 4)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("output_frame", "base_link")
+
+        validate_safety_parameters(
+            {name: self.get_parameter(name).value for name in SAFETY_PARAMETER_NAMES}
+        )
 
         configured_thresholds = tuple(
             float(self.get_parameter(name).value)

@@ -21,6 +21,7 @@ from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.action import NavigateToPose
 from quadruped_interfaces.action import TraverseObstacle
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
+from quadruped_planning.parameter_validation import validate_mission_parameters
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -1088,8 +1089,8 @@ def obstacle_was_completed(
 class AutonomousMission(Node):
     """可运行时启停的探索—对正—越障状态机。"""
 
-    def __init__(self):
-        super().__init__("autonomous_mission")
+    def __init__(self, **node_kwargs):
+        super().__init__("autonomous_mission", **node_kwargs)
         defaults = {
             "autostart": False, "map_timeout": 2.0, "guidance_timeout": 1.0,
             "frontier_minimum_cells": 8, "frontier_minimum_distance": 0.55,
@@ -1198,6 +1199,7 @@ class AutonomousMission(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.params = {name: self.get_parameter(name).value for name in defaults}
+        validate_mission_parameters(self.params)
         map_qos = QoSProfile(depth=1)
         map_qos.reliability = ReliabilityPolicy.RELIABLE
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL

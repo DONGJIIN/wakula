@@ -15,6 +15,8 @@ import signal
 
 from geometry_msgs.msg import PoseStamped
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
+
+from quadruped_planning.parameter_validation import validate_guidance_parameters
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -378,8 +380,8 @@ def compute_guidance(
 class TraversalGuidanceNode(Node):
     """发布越障入口建议，不取得 Nav2 或运动控制权。"""
 
-    def __init__(self):
-        super().__init__("traversal_guidance")
+    def __init__(self, **node_kwargs):
+        super().__init__("traversal_guidance", **node_kwargs)
         defaults = (
             ("input_timeout", 0.8),
             ("approach_start_distance", 1.8),
@@ -400,6 +402,7 @@ class TraversalGuidanceNode(Node):
         self.parameters = {
             name: float(self.get_parameter(name).value) for name, _ in defaults
         }
+        validate_guidance_parameters(self.parameters)
         self.stabilizer = GuidanceStabilizer(
             handoff_distance=self.parameters["handoff_distance"],
             alignment_tolerance=self.parameters["alignment_tolerance"],

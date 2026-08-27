@@ -12,6 +12,11 @@ import signal
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObstacle
+
+from quadruped_perception.parameter_validation import (
+    FUSION_PARAMETER_NAMES,
+    validate_fusion_parameters,
+)
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
@@ -253,18 +258,21 @@ def fuse_observations(
 class PerceptionFusion(Node):
     """缓存少量消息并只融合时间差在阈值内的最近观测。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """建立两个有界输入队列以及融合结果/诊断发布器。
 
         节点不使用 message_filters，是为了明确控制乱序消息的配对、消费和丢弃规则；
         这样 rosbag 回放发生突发到达时，也不会重复使用同一帧证据。
         """
-        super().__init__("perception_fusion")
+        super().__init__("perception_fusion", **node_kwargs)
         self.declare_parameter("sync_slop", 0.10)
         self.declare_parameter("queue_size", 10)
         self.declare_parameter("vision_min_confidence", 0.55)
         self.declare_parameter("vision_center_margin", 0.15)
         self.declare_parameter("terrain_only_timeout", 0.25)
+        validate_fusion_parameters(
+            {name: self.get_parameter(name).value for name in FUSION_PARAMETER_NAMES}
+        )
         self.sync_slop = max(0.001, float(self.get_parameter("sync_slop").value))
         queue_size = max(2, int(self.get_parameter("queue_size").value))
         self.vision_min_confidence = min(

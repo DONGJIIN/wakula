@@ -30,6 +30,11 @@ from std_msgs.msg import Float32MultiArray, String
 
 from quadruped_interfaces.msg import NavigationSafety, VisionObstacle
 
+from quadruped_perception.parameter_validation import (
+    VISION_PARAMETER_NAMES,
+    validate_vision_parameters,
+)
+
 from quadruped_perception.topic_selection import should_accept_source
 
 
@@ -805,13 +810,15 @@ def stabilize_evidence(
 class VisionObstacleDetector(Node):
     """从常见相机话题选择单一数据源，并发布经过时序确认的辅助证据。"""
 
-    def __init__(self):
+    def __init__(self, **node_kwargs):
         """加载可标定参数，创建候选相机订阅和视觉证据发布器。
 
         参数分为图像质量、颜色、轮廓和时序确认四组。换相机时应通过 YAML 调参，不能把
         场地颜色或分辨率常量写回检测函数，确保在线节点和离线评估使用同一算法。
         """
-        super().__init__("vision_obstacle_detector")
+        # Forward standard Node keyword arguments (especially parameter_overrides) so launch
+        # tests and future composed deployments exercise the exact same constructor as runtime.
+        super().__init__("vision_obstacle_detector", **node_kwargs)
         self.declare_parameter("image_topic", "")
         self.declare_parameter("image_topic_candidates", DEFAULT_IMAGE_TOPICS)
         self.declare_parameter("debug_mask_topic", "/vision/debug_mask")
@@ -856,6 +863,13 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
         self.declare_parameter("blue_hsv_lower", [90, 70, 50])
         self.declare_parameter("blue_hsv_upper", [135, 255, 255])
+
+        # Validate the raw YAML values before clipping or allocating ROS entities.  A typo such
+        # as an inverted ROI or impossible HSV range must fail at launch instead of silently
+        # changing the algorithm and masquerading as poor camera accuracy.
+        validate_vision_parameters(
+            {name: self.get_parameter(name).value for name in VISION_PARAMETER_NAMES}
+        )
 
         override_topic = str(self.get_parameter("image_topic").value)
         candidates = list(self.get_parameter("image_topic_candidates").value)
