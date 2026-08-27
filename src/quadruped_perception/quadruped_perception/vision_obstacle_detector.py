@@ -34,6 +34,10 @@ from quadruped_perception.parameter_validation import (
     VISION_PARAMETER_NAMES,
     validate_vision_parameters,
 )
+from quadruped_perception.sensor_contracts import (
+    image_message_contract_valid,
+    source_stamp_is_plausible,
+)
 
 from quadruped_perception.topic_selection import should_accept_source
 
@@ -1066,6 +1070,27 @@ class VisionObstacleDetector(Node):
         """只保存最新图像，避免相机帧率高于处理能力时形成积压。"""
         now = self.get_clock().now()
         now_seconds = now.nanoseconds * 1e-9
+        # A publisher is not a usable camera merely because DDS messages arrive.  Validate the
+        # cheap structural contract before it can lock ``active_topic`` and suppress a healthy
+        # fallback camera.  Encoding interpretation is also cheap and catches unsupported
+        # vendor strings without decoding the full image in this high-frequency callback.
+        try:
+            _, channels = self.bridge.encoding_to_dtype_with_channels(msg.encoding)
+            encoding_valid = int(channels) in (1, 3, 4)
+        except (CvBridgeError, KeyError, RuntimeError, TypeError, ValueError):
+            encoding_valid = False
+        if (
+            not image_message_contract_valid(msg)
+            or not encoding_valid
+            or not source_stamp_is_plausible(
+                msg.header, now_seconds, self.source_switch_timeout
+            )
+        ):
+            self.get_logger().warning(
+                f"Ignoring invalid Image contract from {source}",
+                throttle_duration_sec=2.0,
+            )
+            return
         active_age = (
             float("inf")
             if self.last_active_image_time is None
@@ -1110,8 +1135,15 @@ class VisionObstacleDetector(Node):
         self.last_processed_stamp = stamp
         try:
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except CvBridgeError as exc:
+        except (CvBridgeError, RuntimeError, TypeError, ValueError) as exc:
             self.get_logger().warning(f"Image conversion failed: {exc}")
+            # Do not let a stream that passed metadata checks but failed actual conversion keep
+            # ownership forever.  The next healthy candidate may take over immediately.
+            self.latest_frame = None
+            if source == self.active_topic:
+                self.active_topic = None
+                self.last_active_image_time = None
+                self.evidence_history.clear()
             return
         if bgr.size == 0:
             return

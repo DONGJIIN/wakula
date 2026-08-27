@@ -571,3 +571,14 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    Twist 覆盖。SLAM 节点测试还通过真实 LaserScan、Odometry 与静态 TF 验证健康状态由 false
    进入 true，并在传感器断流后回到 false。修改 QoS、话题、定时器或构造参数时必须保留这些
    回归，不能只测试纯函数。
+
+8. 多候选传感器的有效源规则
+
+   相机和点云节点允许配置多个常见默认话题，但“DDS 有消息”不等于“传感器有效”。候选 Image
+   必须先通过 frame、非零且新鲜的 Header 时间、宽高、step、缓冲区长度和 CvBridge 编码检查；
+   候选 PointCloud2 还必须具有一致的 width/height/point_step/row_step/data，以及不越界的单值
+   FLOAT32/FLOAT64 x、y、z 字段。只有通过合同的消息才能刷新 active source 心跳。
+
+   因此主话题持续发送空帧、坏编码、缺字段、截断数据或旧 rosbag 帧时，不会永久压住健康备用
+   话题。现场出现 `Ignoring invalid ... contract` 时先检查驱动时间戳、frame、编码和消息布局，
+   不要通过删掉校验让坏流取得所有权。正式 rosbag 回放必须使用 `--clock` 并让算法启用仿真时钟。

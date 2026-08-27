@@ -9,6 +9,9 @@ import time
 
 import pytest
 import rclpy
+from sensor_msgs.msg import Image
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -173,3 +176,55 @@ def test_node_rejects_invalid_sync_parameters_before_creating_topics(ros_context
     """Reject a negative synchronization window during node construction."""
     with pytest.raises(ValueError, match="invalid fusion parameters.*sync_slop"):
         PerceptionFusion(parameter_overrides=[Parameter("sync_slop", value=-0.1)])
+
+
+def test_invalid_preferred_sensors_do_not_block_healthy_fallbacks(ros_context):
+    """Only structurally usable camera/cloud messages may acquire active-source ownership."""
+    vision = VisionObstacleDetector()
+    terrain = TerrainAnalyzer()
+    try:
+        stamp = vision.get_clock().now().to_msg()
+
+        bad_image = Image()
+        bad_image.header.stamp = stamp
+        bad_image.header.frame_id = "camera_link"
+        bad_image.encoding = "bgr8"
+        vision.image_callback(bad_image, "/camera/image_raw")
+        assert vision.active_topic is None
+
+        bad_image.width = 4
+        bad_image.height = 3
+        bad_image.step = 12
+        bad_image.data = bytes(36)
+        bad_image.encoding = "bad_vendor_encoding"
+        vision.image_callback(bad_image, "/camera/image_raw")
+        assert vision.active_topic is None
+
+        good_image = Image()
+        good_image.header.stamp = stamp
+        good_image.header.frame_id = "camera_link"
+        good_image.width = 4
+        good_image.height = 3
+        good_image.encoding = "bgr8"
+        good_image.step = 12
+        good_image.data = bytes(36)
+        vision.image_callback(good_image, "/camera/color/image_raw")
+        assert vision.active_topic == "/camera/color/image_raw"
+        vision.processing_callback()
+        assert vision.last_processed_stamp is not None
+
+        bad_cloud = point_cloud2.create_cloud_xyz32(
+            Header(stamp=stamp, frame_id="depth_link"), [(1.0, 0.0, 0.0)]
+        )
+        bad_cloud.fields = bad_cloud.fields[:2]
+        terrain.cloud_callback(bad_cloud, "/camera/depth/points")
+        assert terrain.active_topic is None
+
+        good_cloud = point_cloud2.create_cloud_xyz32(
+            Header(stamp=stamp, frame_id="depth_link"), [(1.0, 0.0, 0.0)]
+        )
+        terrain.cloud_callback(good_cloud, "/camera/depth/color/points")
+        assert terrain.active_topic == "/camera/depth/color/points"
+    finally:
+        terrain.destroy_node()
+        vision.destroy_node()

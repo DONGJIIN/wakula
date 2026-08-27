@@ -32,6 +32,10 @@ from quadruped_perception.parameter_validation import (
     TERRAIN_PARAMETER_NAMES,
     validate_terrain_parameters,
 )
+from quadruped_perception.sensor_contracts import (
+    point_cloud_message_contract_valid,
+    source_stamp_is_plausible,
+)
 from quadruped_perception.terrain_geometry import (
     CLEAR,
     analyze_terrain_geometry,
@@ -462,6 +466,22 @@ class TerrainAnalyzer(Node):
     def cloud_callback(self, msg: PointCloud2, source: str) -> None:
         """只缓存最新帧；处理速度落后时主动丢旧帧，避免决策使用过期环境。"""
         now = self.get_clock().now()
+        # Validate metadata before source arbitration.  Otherwise a continuously published
+        # empty cloud or a cloud without floating XYZ fields can monopolize the preferred topic
+        # and prevent a healthy secondary depth camera/3-D lidar from ever taking over.
+        if (
+            not point_cloud_message_contract_valid(msg)
+            or not source_stamp_is_plausible(
+                msg.header,
+                now.nanoseconds * 1e-9,
+                self.source_switch_timeout,
+            )
+        ):
+            self.get_logger().warning(
+                f"Ignoring invalid PointCloud2 contract from {source}",
+                throttle_duration_sec=2.0,
+            )
+            return
         active_age = (
             float("inf")
             if self.last_active_cloud_time is None

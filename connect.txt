@@ -27,6 +27,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输入：PointCloud2，默认优先 /camera/depth/points。
   输出：/terrain/features_stamped、/perception/obstacle_points、/diagnostics。
   注意：点云必须带有效 frame_id 和传感器到 base_link 的 TF。
+        只有非零新鲜时间戳、完整缓冲区及 FLOAT32/FLOAT64 单值 x/y/z 字段的消息才会锁定来源；
+        坏主话题不会阻止后续候选点云接管。
         确认坑洞会以虚拟障碍点写入局部代价地图；无回波盲区不会被当成坑。
         地面由近场有效栅格锚定；横杆落地支柱和窄立柱分别用高度带/原始回波复核。
 
@@ -36,6 +38,7 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：/vision/obstacle_stamped、/vision/annotated_image（RViz 标注画面）、
         /vision/debug_mask（可选）及调试信息。
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
+        Image 必须具有非零新鲜时间戳、合法 frame/编码/宽高/step 和完整数据；不合格候选源不锁定。
         蓝白限高杆需至少三段蓝色短段水平对齐；单根着色细柱可提示立柱。孤立 Canny
         横边或大框不会单独输出横杆/墙，WALL 由点云确认。
 
