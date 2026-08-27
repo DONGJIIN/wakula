@@ -1,4 +1,4 @@
-"""ament_python 安装元数据：算法调试、标定、rosbag 评估与回归工具。"""
+"""ament_python 安装元数据：rosbag 感知标注与准确率评估工具。"""
 
 from setuptools import find_packages, setup
 
@@ -16,7 +16,7 @@ setup(
     zip_safe=True,
     maintainer="Quadruped Developer",
     maintainer_email="developer@example.com",
-    description="Wakula algorithm dashboard, calibration and regression tools.",
+    description="Rosbag calibration and perception accuracy tools.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
@@ -24,9 +24,6 @@ setup(
             "perception_bag_evaluator = "
             "quadruped_tools.perception_bag_evaluator:main",
             "stack_regression = quadruped_tools.stack_regression:main",
-            "algorithm_debug_dashboard = "
-            "quadruped_tools.algorithm_debug_dashboard:main",
-            "camera_calibrator = quadruped_tools.camera_calibrator:main",
         ],
     },
 )

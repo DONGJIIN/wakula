@@ -171,13 +171,6 @@ Action 成功也不能声称真机已经具备越障能力。
    十字键事件才在运行时创建独立子进程，因此 Xbox、Gazebo、SLAM 三个入口保持分离。
 
 5. quadruped_tools
-   algorithm_debug_dashboard.py：独立只读浏览器调试台；订阅标注图、CameraInfo、scan、odom、
-   map、Nav2 plan、NavigationSafety、TraversalGuidance、导航健康和自主任务清单，显示话题
-   频率/断流、当前障碍及完整交接状态。它没有 publisher/ActionClient，不改变三进程结构；
-   页面可把同一时刻的 JSON 与标注图保存到 reports/debug_dashboard，便于队员复盘。
-   camera_calibrator.py：离线棋盘格内参工具；自动提取亚像素角点，以 median/MAD 和绝对
-   像素门限剔除坏帧，重新拟合后检查逐帧误差、总 RMS、有效图片数和画面覆盖范围，输出
-   ROS CameraInfo YAML。它不估计 base_link 到相机、相机到雷达的六自由度外参。
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类
    TP/FP/FN、precision、recall、F1、混淆矩阵以及连续量误差，帮助客观调整阈值。
    stack_regression.py：仿真专用长测工具；只有显式 --allow-motion 才向 /cmd_vel_teleop
@@ -254,9 +247,7 @@ Action 成功也不能声称真机已经具备越障能力。
 
 四、推荐调参顺序
 --------------
-1. 先确认相机内参、点云单位、时间戳和 TF 方向正确。相机换镜头/分辨率后用
-   camera_calibrator 生成内参；RGB-D 厂家已提供 rectified/aligned 输出时优先直接使用。
-   相机—机身/雷达外参必须另做空间标定，不能拿相机内参 YAML 代替静态 TF。
+1. 先确认相机内参、点云单位、时间戳和 TF 方向正确。
 2. 在静态平地调 ground_height_bin、grid_cell_size、ROI 和 min_valid_points。
 3. 用已知高度台阶调 warning_height、step_threshold、climb_threshold、stop_threshold。
 4. 用斜坡和不平路面调 max_slope、max_roughness。
@@ -270,16 +261,6 @@ Action 成功也不能声称真机已经具备越障能力。
 
   ros2 run quadruped_tools stack_regression --allow-motion --cycles 5 \
     --report reports/stack_regression.json
-
-运行期只读调试台（不发布运动命令）：
-
-  ros2 run quadruped_tools algorithm_debug_dashboard
-
-离线相机内参标定示例（9×6 为内角点，0.025 m 为单格边长）：
-
-  ros2 run quadruped_tools camera_calibrator --images 'calibration/*.png' \
-    --board-cols 9 --board-rows 6 --square-size 0.025 \
-    --output config/front_camera_intrinsics.yaml
 
 2026-08-13 基线：5 轮约 3 分 20 秒，最大闭环位置误差 0.0103 m、偏航误差
 0.0152 rad，scan/odom/导航健康未持续断流；多目标和 1 m 绕杆窄通道成功，高墙内部

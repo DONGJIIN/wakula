@@ -47,8 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，234 项测试通过，并提供浏览器算法调试台、相机内参标定、一键启动、
-独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，226 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -158,7 +157,7 @@ wakula/
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
 | `quadruped_planning` | 地形风险分类、入口引导、速度安全门和未知地图自主任务 | 四个导航/任务节点 |
 | `quadruped_teleop` | Xbox 按键安全状态机、独立 Twist 候选和自主任务进程开关 | `xbox_teleop` |
-| `quadruped_tools` | 浏览器调试台、相机内参标定、rosbag 评估与长测 | `algorithm_debug_dashboard`、`camera_calibrator` |
+| `quadruped_tools` | rosbag 标注评估、SLAM/Nav2 长测与资源报告 | `perception_bag_evaluator`、`stack_regression` |
 | `slam` | 核心 SLAM/Nav2/OpenCV 入口，以及需显式启动的独立自主导航入口 | 两个互不 include 的 launch |
 
 主要节点：
@@ -198,10 +197,6 @@ wakula/
 - `stack_regression`：在明确允许仿真运动后自动执行连续旋转、前进、倒退、回环、多目标、
   1 m 绕杆窄通道和不可达目标恢复，并记录数据断流、闭环误差、越障阶段稳定性/安全合同、
   CPU 与常驻内存峰值。
-- `algorithm_debug_dashboard`：独立只读订阅相机标注图、地图、里程计、Nav2 路径、感知安全、
-  越障引导和任务清单，在本机浏览器集中显示频率/断流状态，并导出原子 JSON 与现场截图。
-- `camera_calibrator`：离线检测棋盘格内角点，执行坏帧剔除、内参/畸变拟合和逐帧重投影
-  误差验收，输出 `camera_info_manager` 可加载的 YAML；不替代相机—雷达/机身外参标定。
 
 ## 3. SLAM、Nav2、OpenCV 与点云如何协同
 
@@ -531,21 +526,6 @@ ros2 launch slam slam.launch.py rviz:=false
 ros2 launch slam slam.launch.py vision:=false
 ```
 
-### 可选算法调试软件（独立进程）
-
-启动核心算法后，可在任意新终端运行：
-
-```bash
-cd ~/wakula
-source install/setup.bash
-ros2 run quadruped_tools algorithm_debug_dashboard
-```
-
-浏览器默认打开 `http://127.0.0.1:8088`，集中显示 `/vision/annotated_image`、当前障碍名称、
-地形几何、引导阶段、SLAM 地图覆盖率、Nav2 路径、任务清单及各话题频率。它没有 publisher
-和 Action client，不会让机器人运动，也不属于三条正式运行命令。页面可将当前状态导出到
-`reports/debug_dashboard/`；无桌面环境使用 `--ros-args -p open_browser:=false`。
-
 覆盖非默认相机话题：
 
 ```bash
@@ -825,28 +805,6 @@ ros2 launch quadruped_teleop xbox_teleop.launch.py
 硬件安全层与驱动。该节点只输出机身速度，仍需运动控制团队把 Twist 转换为四足步态。
 
 ## 7. OpenCV 障碍识别
-
-### 相机是否需要标定
-
-需要，但收益要分层看待。当前 HSV/轮廓分类主要使用归一化像素区域，所以内参略有误差
-通常不会直接导致颜色识别失效；曝光、白平衡、阴影、高光、模糊和负样本覆盖对分类准确率
-影响更大。以下情况必须做内参/畸变标定：更换镜头或分辨率、使用广角镜头、需要边缘区域
-几何一致性，或要把 RGB 与深度/点云准确对齐。若相机驱动已经发布厂家标定后的 rectified/
-aligned 图像和点云，应优先使用驱动结果，不要在线重复畸变校正浪费 RK3588 算力。
-
-采集最终分辨率下 15～30 张棋盘格照片，覆盖中心、四角、远近和倾斜姿态，然后执行：
-
-```bash
-ros2 run quadruped_tools camera_calibrator \
-  --images 'calibration/*.png' --board-cols 9 --board-rows 6 \
-  --square-size 0.025 --camera-name front_camera \
-  --output config/front_camera_intrinsics.yaml
-```
-
-`board-cols/rows` 是内角点数，`square-size` 单位为米。工具默认要求至少 10 张有效图、全局
-重投影 RMS 不高于 0.8 px，并检查棋盘是否覆盖画面；不通过时仍保留结果供排查，但返回非零。
-相机内参只解决“像素光线是否准确”。`base_link -> camera_link`、雷达—相机空间外参、RGB—
-深度时间同步仍须分别标定；其中外参误差比 HSV 内参误差更容易造成点云和视觉指向不同障碍。
 
 节点同时使用两类轻量特征：
 
