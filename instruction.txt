@@ -50,12 +50,15 @@ Action 成功也不能声称真机已经具备越障能力。
    正常联调固定为三个独立进程：robocon_field.launch.py（Gazebo 数据源）、slam.launch.py
    （核心算法）、autonomous_navigation.launch.py（自主任务）。只启动前两项不会自主运动；
    真机只需用真实传感器/底盘替换第一项，核心算法和任务入口不变。
-   任一 Nav2 目标连续 5 秒既没有 0.08 m 平移、也没有 0.10 rad 旋转进展，就取消当前
+   任一 Nav2 目标连续 5 秒既没有 0.04 m 平移、也没有 0.06 rad 旋转进展，就取消当前
    Action 并改选目标。普通前沿/覆盖点会加入临时黑名单；若是已确认障碍入口，任务节点
    会冻结“创建接近目标时”的障碍 ID，避免近场 BAR/WALL/STEP 抖动丢失任务身份。只有
    最新观测仍属于同一 map 入口、粗类型兼容、距离不大于 2.10 m、横偏和航向均在门限内，
    才转交 TraverseObstacle，让真机控制器完成最后一段低速接近和越障；任一守卫不满足，
-   就同时冷却语义记录和空间入口并选择其他目标。即使当前只有通用 STEP/WALL、没有唯一
+   就同时冷却语义记录和空间入口。此时以及“新鲜地形引导确认前沿被障碍阻挡”的情况，
+   任务会交替转向 45°；转向成功后再通过普通 Nav2 安全链尝试移动 0.80 m，换一个真实
+   观察站后才继续识别。该 0.80 m 平移没有速度旁路，障碍仍在正前方时会保持停车并再次
+   恢复。即使当前只有通用 STEP/WALL、没有唯一
    障碍名，也会先尝试把当前粗类型和 map 位置匹配到此前多帧确认的待办记录；只有类型兼容
    且位置误差不超过 0.90 m 才复用 ID。每次回访按 8/16/32/64 秒退避，到达观察位但没有
    重新识别也不会清零，因而一个旧入口不会反复抢占整场任务。入口已到达但越障 Action 服务端
@@ -462,17 +465,31 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    通过增大该参数开放障碍前线速度，修改后必须复测 360° 雷达急停和人工停止。
    若最终 `/cmd_vel` 与 `/cmd_vel_smoothed` 都为零并且 return_home 恰好每 5 秒被取消，说明
    任务层打断了 Nav2 行为树恢复；返程专用 return_nav_stall_timeout 默认 20 秒，探索仍为
-   5 秒。真机先观察 Spin/BackUp 何时开始，再调整该值，不要关闭 Nav2 碰撞检查。
+   5 秒。若 20 秒后仍是纯前进请求、正前方 traversal_required=true，任务会先取消返程，
+   执行 failed_entry_turn_angle 转向和 failed_entry_escape_distance 安全换站，再重试终点；
+   换站阶段继续受雷达、地形和健康门约束。真机先观察 Spin/BackUp 何时开始，再调整该值，
+   不要关闭 Nav2 碰撞检查。
    若窗口已经延长但 `/cmd_vel_smoothed` 是较大线速度叠加 yaw、`/terrain/speed_limit=0`、
-   最终 `/cmd_vel` 仍全零，应检查 `/navigation/return_rotation_recovery`。任务在 return_home
-   活跃时以 4 Hz 发布 true；速度门只提取最大 0.30 rad/s yaw并强制 linear=0，0.8 秒未收到
-   心跳立即失效。该许可的目的只是先转开正前方旧障碍，限速恢复后仍由 Nav2 正常平移；
+   最终 `/cmd_vel` 仍全零，应检查 `/navigation/rotation_recovery`。任务在返航、探索、覆盖、
+   回访、接近、对正和换视角等 Nav2 拥有转向的阶段以 4 Hz 发布 true；速度门只提取最大
+   0.30 rad/s yaw 并强制 linear=0，0.8 秒未收到心跳立即失效。该许可的目的只是先转开
+   正前方旧障碍，限速恢复后仍由 Nav2 正常平移；HANDOFF、TRAVERSING 和 entry_escape
+   不使用该许可；
    禁止在真机上把它改成线速度旁路，修改后要复测雷达急停、感知断流和 Ctrl-C 停车。
 
    对“几何成立但名称有歧义”的目标，四次换视角现在按机器人 map 驻留点计数，不按会随
    相机朝向移动的桥/坡/坑最近前缘计数。若日志在同一位置仍反复从 1/4 开始，先检查
    map->base_link 是否跳变，再按真实定位噪声调整 semantic_verification_lock_radius；不要
    单纯增加最大尝试次数，否则会消耗比赛预算。四次耗尽后本轮看到的各前缘会一起短暂冷却。
+
+   若日志每 5 秒出现 frontier/coverage made no pose progress，并且同时有
+   traversal_required=true，先观察是否随后出现 changing observation station。默认转角由
+   failed_entry_turn_angle=0.785 rad 控制，换站距离由 failed_entry_escape_distance=0.80 m
+   控制：相机视场窄、长结构侧视仍无法分型时，可把转角逐次增加约 5°；空间狭窄或换站目标
+   经常被局部代价地图拒绝时，把距离每次减小 0.10 m。不要把转角一次调到超过 90°，也不要
+   为了移动而放宽线速度门。若低速真机确实在移动却被误判停滞，应先确认 `/odom` 连续、
+   无跳变，再小幅下调 nav_progress_translation 或 nav_progress_rotation；阈值过小会把打滑、
+   原地抖动误判成有效进展，从而失去 5 秒脱困。
 
 6. 真机分阶段调试流程
 

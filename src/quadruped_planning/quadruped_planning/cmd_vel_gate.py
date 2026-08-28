@@ -166,9 +166,9 @@ class NavigationSpeedGate(Node):
         self.declare_parameter("alignment_guidance_timeout", 0.8)
         self.declare_parameter("alignment_max_angular_speed", 0.30)
         self.declare_parameter("stopped_rotation_linear_tolerance", 0.12)
-        # /navigation/return_rotation_recovery 由独立自主任务以 4 Hz 刷新；若进程崩溃，
+        # /navigation/rotation_recovery 由独立自主任务以 4 Hz 刷新；若进程崩溃，
         # 0.8 秒后许可自动失效，不能留下永久旋转旁路。
-        self.declare_parameter("return_rotation_recovery_timeout", 0.8)
+        self.declare_parameter("rotation_recovery_timeout", 0.8)
 
         validate_speed_gate_parameters(
             {name: self.get_parameter(name).value for name in SPEED_GATE_PARAMETER_NAMES}
@@ -237,8 +237,8 @@ class NavigationSpeedGate(Node):
         self.last_scan_time = None
         self.alignment_requested = False
         self.last_guidance_time = None
-        self.return_rotation_requested = False
-        self.last_return_rotation_time = None
+        self.rotation_recovery_requested = False
+        self.last_rotation_recovery_time = None
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
@@ -273,8 +273,8 @@ class NavigationSpeedGate(Node):
         )
         self.create_subscription(
             Bool,
-            "/navigation/return_rotation_recovery",
-            self.return_rotation_callback,
+            "/navigation/rotation_recovery",
+            self.rotation_recovery_callback,
             10,
         )
         self.timer = self.create_timer(0.05, self.publish_safe_command)
@@ -315,10 +315,15 @@ class NavigationSpeedGate(Node):
         )
         self.last_guidance_time = self.get_clock().now()
 
-    def return_rotation_callback(self, msg: Bool) -> None:
-        """Cache the task-layer heartbeat that permits yaw-only return recovery."""
-        self.return_rotation_requested = bool(msg.data)
-        self.last_return_rotation_time = self.get_clock().now()
+    def rotation_recovery_callback(self, msg: Bool) -> None:
+        """Cache the task heartbeat that permits bounded yaw-only Nav2 recovery.
+
+        The mission may assert this during exploration, return, viewpoint changes or
+        obstacle approach.  It is not a general speed bypass: ``publish_safe_command``
+        always calls :func:`alignment_twist`, which discards every linear component.
+        """
+        self.rotation_recovery_requested = bool(msg.data)
+        self.last_rotation_recovery_time = self.get_clock().now()
 
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
@@ -340,10 +345,10 @@ class NavigationSpeedGate(Node):
             if self.last_guidance_time is None
             else (now - self.last_guidance_time).nanoseconds / 1e9
         )
-        return_rotation_age = (
+        rotation_recovery_age = (
             float("inf")
-            if self.last_return_rotation_time is None
-            else (now - self.last_return_rotation_time).nanoseconds / 1e9
+            if self.last_rotation_recovery_time is None
+            else (now - self.last_rotation_recovery_time).nanoseconds / 1e9
         )
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
@@ -366,13 +371,13 @@ class NavigationSpeedGate(Node):
             self.latest_cmd,
             float(self.get_parameter("stopped_rotation_linear_tolerance").value),
         )
-        return_rotation_fresh = return_rotation_age <= max(
+        rotation_recovery_fresh = rotation_recovery_age <= max(
             0.1,
-            float(self.get_parameter("return_rotation_recovery_timeout").value),
+            float(self.get_parameter("rotation_recovery_timeout").value),
         )
-        return_rotation_requested = bool(
-            self.return_rotation_requested
-            and return_rotation_fresh
+        rotation_recovery_requested = bool(
+            self.rotation_recovery_requested
+            and rotation_recovery_fresh
             and has_finite_yaw_request(self.latest_cmd)
         )
         if (
@@ -380,7 +385,7 @@ class NavigationSpeedGate(Node):
             and (
                 (self.alignment_requested and alignment_fresh)
                 or safe_rotation_requested
-                or return_rotation_requested
+                or rotation_recovery_requested
             )
             and command_age <= self.command_timeout
             and assessment_age <= self.assessment_timeout

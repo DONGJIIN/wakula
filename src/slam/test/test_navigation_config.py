@@ -71,6 +71,10 @@ def test_nav2_rk3588_budget_keeps_safety_rates_and_bounds_trajectory_samples():
     assert planner["GridBased"]["plugin"] == "nav2_navfn_planner::NavfnPlanner"
     assert 150 <= dwb["vx_samples"] * dwb["vtheta_samples"] <= 320
     assert 1.2 <= dwb["sim_time"] <= 2.0
+    # A gradual inflation gradient makes Navfn choose clearance before DWB reaches
+    # narrow pole gaps.  Keep both maps identical so global and local costs agree.
+    assert local["inflation_layer"]["cost_scaling_factor"] == pytest.approx(3.0)
+    assert global_map["inflation_layer"]["cost_scaling_factor"] == pytest.approx(3.0)
 
 
 def test_nav2_supports_multi_pose_and_bounded_dead_end_recovery():

@@ -34,6 +34,9 @@ autonomous_mission:
     autostart: false
     map_timeout: 2.0
     guidance_timeout: 1.0
+    # 首次 map/TF 就绪后先收集约 7 帧 5 Hz 点云/图像，再允许提交第一个 Nav2 目标。
+    # 相机启动慢时可增大；过大会直接占用五分钟任务预算。
+    startup_sensor_settle_time: 1.50
     frontier_minimum_cells: 8
     frontier_minimum_distance: 0.55
     frontier_maximum_distance: 7.0
@@ -65,11 +68,28 @@ autonomous_mission:
     nav_rejection_retry_delay: 1.0
     # 规划中止/取消后留给 costmap、行为树和 SLAM 地图边界的恢复时间，避免高频重发。
     nav_failure_retry_delay: 1.0
+    # 越障服务拒绝当前入口后，先交替左/右旋转换视角，而不是在同一点等待冷却后重试。
+    # 角度过小可能仍看到相同侧面；过大会丢失目标并增加定位压力。真机从约 30° 起标定。
+    failed_entry_turn_angle: 0.785398
+    # 转向后至少等待数帧稳定点云；相机曝光较慢或点云频率低时应适当增大。
+    failed_entry_settle_time: 0.80
+    # 同一站位、同一航向已被 Action 拒绝时，45 秒内不允许重新交接；移动超过 0.65 m
+    # 或改变约 40° 航向即可重新验证。参数只描述在线相对位姿，不含场地坐标。
+    failed_entry_memory_duration: 45.0
+    failed_entry_station_tolerance: 0.65
+    failed_entry_heading_tolerance: 0.70
+    # 完成换向后沿新机头方向请求短距离 Nav2 脱离；该阶段不获得零限速旋转旁路，仍需
+    # 前向地形、急停雷达和导航健康全部许可。若真机机身更长，从 0.6 m 起逐步标定。
+    failed_entry_escape_distance: 0.80
     # 严格 READY 被点云前缘抖动漏掉时的三重守卫：Nav2 已到入口、最新障碍仍是同一
     # map 位置、且距离/横偏均受限。不是“看见障碍就越”的宽松触发器。
     handoff_fallback_max_distance: 1.45
     handoff_fallback_max_lateral: 0.50
     handoff_fallback_spatial_tolerance: 0.90
+    # 长桥/台阶最近前缘漂移超过 0.90 m 时，仅在机器人回到原确认观察位 0.60 m 内、
+    # 航向相差不超过 0.70 rad 且粗类型兼容时恢复待办 ID。相邻障碍误关联时先减小这两项。
+    handoff_fallback_viewpoint_tolerance: 0.60
+    handoff_fallback_view_heading_tolerance: 0.70
     # Action 前最终航向必须在约 7° 内，不使用下面仅供停滞恢复的宽松门限。
     handoff_alignment_tolerance: 0.12
     # 坑沿/墙脚/台阶立面会被 Nav2 正确视为不可通行。入口连续 5 秒无位姿进展后，
@@ -77,11 +97,13 @@ autonomous_mission:
     approach_stall_handoff_count: 1
     # 若 Nav2 连续停在更远的膨胀边界，允许把“最后一段接近”也交给 TraverseObstacle。
     # Action 目标携带实测 entry_distance，真机控制器仍须自行完成低速接近和姿态闭环。
-    # 2.10 m 仍位于当前 2.5 m 地形 ROI 内，并要求横偏/航向/语义/空间锁全部通过；
+    # 2.35 m 仍位于当前 2.5 m 地形 ROI 内，并要求横偏/航向/语义/空间锁全部通过；
     # 这允许真实越障控制器接管最后一段低速接近，避免 Nav2 膨胀层停在 1.9~2.0 m 时循环。
-    approach_stall_handoff_max_distance: 2.10
+    approach_stall_handoff_max_distance: 2.35
     approach_stall_handoff_max_lateral: 0.75
-    approach_stall_handoff_max_heading_error: 0.18
+    # 停滞交接允许约 12.6°，由 Action 在 PREPARING 阶段完成最后闭环对正；真正开始
+    # 抬腿仍应使用 handoff_alignment_tolerance 的严格约 7° 门限。
+    approach_stall_handoff_max_heading_error: 0.22
     # 连续停滞但没有通过越障交接门限的入口先短暂让路，避免无限重试同一假目标。
     obstacle_failure_cooldown: 12.0
     obstacle_failure_radius: 0.90
@@ -107,12 +129,17 @@ autonomous_mission:
     # 只有进入 1.2 m 近场且距离/横偏/航向均通过时才能真正触发 Action。
     semantic_observation_distance: 2.50
     semantic_confirmation_distance: 1.20
+    # /front_obstacle_name 已经过感知层多帧稳定与几何一致性检查，任务层再要求最近 6 帧中
+    # 2 票即可锁定。若真机类别偶发串扰，先提高感知层 name_confirmation_frames；只有
+    # 稳定名称仍误锁时才把这里恢复为 3，避免在同一桥面白白等待几十秒。
+    # 两帧仅 0.2～0.4 s，曾把坡侧的短暂 WALL 轮廓锁成高墙；三帧仍足够快，且允许
+    # sustained recent evidence 纠正旧锁。真机掉帧严重时先降低感知频率，不建议减回 2。
     semantic_confirmation_votes: 3
-    semantic_recent_window: 5
-    # 结构已确认但专名仍有歧义时，仅原地小角度换视角；四次仍不能确认则暂时跳过。
+    semantic_recent_window: 6
+    # 结构已确认但专名仍有歧义时，仅原地小角度换视角；两次仍不能确认则暂时跳过。
     # 0.30 rad 与 Nav2 最小有效旋转一致；交替视角的第三次可覆盖约 50° 的坡侧误差。
     semantic_verification_turn_angle: 0.30
-    semantic_verification_max_attempts: 4
+    semantic_verification_max_attempts: 2
     # 换视角序列按机器人驻留点而不是会漂移的障碍前缘计数；该半径表示位姿移动多远
     # 才算真正的新观察站。过大会合并相邻观察站，过小会在同一地点重复 1/4。
     semantic_verification_lock_radius: 1.50
@@ -144,14 +171,21 @@ autonomous_mission:
     # 每次 90°，最多补扫两圈；仍无前沿/覆盖/待办目标就返回任务启动点。
     maximum_search_turns: 8
     search_turn_angle: 1.570796
-    # Nav2 Action 尚未结束但 map 位姿连续 5 秒既没有 8 cm 平移，也没有 0.10 rad 转动，
+    # Nav2 Action 尚未结束但里程计位姿连续 5 秒既没有 4 cm 平移，也没有 0.06 rad 转动，
     # 视为局部停滞并取消重规划，避免表现成“自动导航走到一半自己停下”。
     nav_stall_timeout: 5.0
     # 返程只有一个终点，允许 Nav2 行为树用 20 秒执行 Spin/BackUp/重规划；普通探索仍保持
     # 5 秒快速切换。过小会在恢复动作前取消，过大则延迟真正失联的诊断。
     return_nav_stall_timeout: 20.0
-    nav_progress_translation: 0.08
-    nav_progress_rotation: 0.10
+    # 运动看门狗优先使用连续 /odom；0.5 s 内没有新里程计才退回 map TF。真机里程计频率
+    # 低于 2 Hz 时应先修驱动，不建议增大到掩盖断流，因为导航健康节点会同步停车。
+    odom_progress_timeout: 0.5
+    # 现场日志中 DWB 在代价梯度内会以 0.02～0.04 m/s 做有效低速调整。旧的
+    # 8 cm / 0.10 rad 窗口会把已在移动误判为卡死。新阈值仍要求 5 秒内有可见
+    # 位姿变化，而不是根据“有速度命令”假定机器人真的在动。真机若定位噪声超过
+    # 4 cm / 0.06 rad，应先改用带协方差的轨迹判据，不要继续降低本阈值。
+    nav_progress_translation: 0.04
+    nav_progress_rotation: 0.06
     # 自主导航终端每 5 秒显示一次已越过/未越过清单，清单变化时立即显示。
     inventory_log_period: 5.0
     # 总预算 300 秒，从捕获启动位姿开始计时。前 240 秒探索/越障，最后 60 秒开始返程；

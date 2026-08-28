@@ -212,6 +212,10 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45
+        # 默认 10.0 只在障碍边缘留下很窄的代价带，Navfn 会选择从杆间斜穿，DWB 到
+        # 近处才发现没有稳健轨迹。较缓的 3.0 提前惩罚贴杆路径，但不改变 lethal 边界。
+        # 真机窄通道过不去时，先核对实测 footprint，再以 0.5 为步长向上调本值。
+        cost_scaling_factor: 3.0
 
 # ---------- 全局代价地图：静态 SLAM 地图 + 2D 激光动态标障 ----------
 global_costmap:
@@ -247,6 +251,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45
+        cost_scaling_factor: 3.0
 
 # ---------- Wakula 自定义输入健康检查 ----------
 navigation_health_monitor:

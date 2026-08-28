@@ -22,7 +22,7 @@ SPEED_GATE_PARAMETER_NAMES = (
     "navigation_health_timeout", "default_speed_limit", "scan_topic", "scan_timeout",
     "emergency_stop_distance", "emergency_sector_half_angle",
     "alignment_guidance_timeout", "alignment_max_angular_speed",
-    "stopped_rotation_linear_tolerance", "return_rotation_recovery_timeout",
+    "stopped_rotation_linear_tolerance", "rotation_recovery_timeout",
 )
 
 
@@ -150,7 +150,7 @@ def validate_speed_gate_parameters(values: Mapping[str, object]) -> None:
     for name in (
         "command_timeout", "assessment_timeout", "navigation_health_timeout",
         "scan_timeout", "emergency_stop_distance", "alignment_guidance_timeout",
-        "alignment_max_angular_speed", "return_rotation_recovery_timeout",
+        "alignment_max_angular_speed", "rotation_recovery_timeout",
     ):
         _positive(values, name, errors)
     _unit(values, "default_speed_limit", errors)
@@ -200,11 +200,18 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
     if stable_duration >= verification_timeout:
         errors.append("post_traversal_stable_duration must be below verification timeout")
     for name in (
-        "map_timeout", "guidance_timeout", "goal_timeout", "traversal_timeout",
+        "map_timeout", "guidance_timeout", "startup_sensor_settle_time",
+        "goal_timeout", "traversal_timeout",
         "controller_wait_timeout", "nav_stall_timeout", "return_nav_stall_timeout",
+        "odom_progress_timeout",
         "mission_timeout",
         "return_time_reserve", "front_name_timeout", "inventory_log_period",
         "obstacle_revisit_max_cooldown",
+        "handoff_fallback_viewpoint_tolerance",
+        "handoff_fallback_view_heading_tolerance",
+        "failed_entry_turn_angle", "failed_entry_settle_time",
+        "failed_entry_memory_duration", "failed_entry_station_tolerance",
+        "failed_entry_heading_tolerance", "failed_entry_escape_distance",
     ):
         _positive(values, name, errors)
     mission_timeout = _number(values, "mission_timeout", errors)
@@ -222,6 +229,9 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
         "pre_alignment_max_step", "handoff_alignment_tolerance",
         "approach_stall_handoff_max_heading_error", "semantic_verification_turn_angle",
         "search_turn_angle", "post_traversal_stable_rotation",
+        "handoff_fallback_view_heading_tolerance",
+        "failed_entry_turn_angle",
+        "failed_entry_heading_tolerance",
     ):
         if _number(values, name, errors) > pi:
             errors.append(f"{name} must be <= pi")

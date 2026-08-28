@@ -6,6 +6,7 @@ from nav_msgs.msg import OccupancyGrid
 
 from quadruped_planning.autonomous_mission import (
     Frontier,
+    FailedEntry,
     ObservedObstacle,
     action_type_for_semantic,
     action_obstacle_type,
@@ -20,23 +21,29 @@ from quadruped_planning.autonomous_mission import (
     dominant_planar_vote,
     extract_coverage_goals,
     extract_frontiers,
+    failed_entry_matches,
     frontier_goal_in_known_free_space,
     inventory_display,
     is_actionable_semantic_id,
     mission_score,
     mission_inventory,
+    navigation_purpose_allows_yaw_only_recovery,
     matching_pending_semantic,
+    matching_pending_semantic_from_viewpoint,
     nav_status_allows_guarded_handoff,
     normalized_angle,
     obstacle_revisit_delay,
+    obstacle_geometry_fits_candidate,
     obstacle_was_completed,
     resolve_completed_semantics,
     inventory_message,
     semantic_id_for_action,
     semantic_vote_is_confirmed,
+    replacement_semantic_vote,
     select_full_semantic_vote,
     select_semantic_vote,
     semantic_after_approach_stall,
+    semantic_task_is_complete,
     target_is_in_heading_cone,
     timeout_reached,
     traversal_crossing_evidence,
@@ -161,6 +168,34 @@ def test_action_semantic_requires_repeated_recent_evidence():
     assert semantic_vote_is_confirmed(
         votes, "high_wall", minimum_votes=3, recent_window=5
     )
+
+
+def test_sustained_new_semantic_can_replace_but_noise_cannot():
+    """A lock is sticky for noise, not permanent against a better viewpoint."""
+    assert replacement_semantic_vote(
+        ["high_wall", "high_wall", "t_shaped_stairs", "high_wall"],
+        "high_wall",
+        minimum_votes=3,
+        recent_window=6,
+    ) == ""
+    assert replacement_semantic_vote(
+        [
+            "high_wall",
+            "high_wall",
+            "t_shaped_stairs",
+            "t_shaped_stairs",
+            "t_shaped_stairs",
+        ],
+        "high_wall",
+        minimum_votes=3,
+        recent_window=6,
+    ) == "t_shaped_stairs"
+    assert replacement_semantic_vote(
+        ["t_shaped_stairs"] * 6,
+        "t_shaped_stairs",
+        minimum_votes=3,
+        recent_window=6,
+    ) == ""
 
 
 def test_close_handoff_rejects_unknown_or_misaligned_obstacle():
@@ -351,6 +386,31 @@ def test_two_independent_bridge_results_complete_a_and_b_without_guessing_first(
     assert {"wooden_bridge_a", "wooden_bridge_b"}.issubset(two_unknowns)
 
 
+def test_completed_unique_semantic_is_never_reexecuted_but_bridge_pair_can_finish():
+    assert semantic_task_is_complete("gravel_wood_pit", ["gravel_wood_pit"])
+    assert not semantic_task_is_complete("high_wall", ["gravel_wood_pit"])
+    assert not semantic_task_is_complete(
+        "wooden_bridge_unknown", ["wooden_bridge_unknown_1"]
+    )
+    assert semantic_task_is_complete(
+        "wooden_bridge_unknown", ["wooden_bridge_a", "wooden_bridge_b"]
+    )
+
+
+def test_bridge_platform_alone_cannot_be_traversed_without_a_or_b_evidence():
+    from quadruped_interfaces.msg import NavigationSafety
+
+    deck = NavigationSafety()
+    deck.perception_valid = True
+    deck.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    deck.obstacle_height = 0.24
+    deck.width = 1.0
+    deck.roughness = 0.018
+    deck.slope_pitch = 0.02
+    deck.slope_roll = 0.01
+    assert not obstacle_geometry_fits_candidate("wooden_bridge_unknown", deck)
+
+
 def test_competition_score_counts_unique_tasks_and_return_bonus():
     completed = ["high_wall", "high_wall", "height_bar"]
     assert mission_score(completed, False) == 300
@@ -419,15 +479,47 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
         "ros__parameters"
     ]
     assert params["nav_stall_timeout"] == 5.0
+    assert params["startup_sensor_settle_time"] == 1.50
     assert params["return_nav_stall_timeout"] == 20.0
+    assert params["odom_progress_timeout"] == 0.5
+    assert params["nav_progress_translation"] == 0.04
+    assert params["nav_progress_rotation"] == 0.06
     assert params["controller_wait_timeout"] == 5.0
     assert params["approach_stall_handoff_count"] == 1
-    assert params["approach_stall_handoff_max_distance"] == 2.10
+    assert params["approach_stall_handoff_max_distance"] == 2.35
+    assert params["approach_stall_handoff_max_heading_error"] == 0.22
     assert params["maximum_search_turns"] == 8
     assert params["inventory_log_period"] == 5.0
     assert params["mission_timeout"] == 300.0
     assert params["return_time_reserve"] == 60.0
     assert params["obstacle_revisit_max_cooldown"] == 64.0
+    assert params["semantic_confirmation_votes"] == 3
+    assert params["semantic_recent_window"] == 6
+    assert params["semantic_verification_max_attempts"] == 2
+    assert params["failed_entry_turn_angle"] == 0.785398
+    assert params["failed_entry_settle_time"] == 0.80
+    assert params["failed_entry_memory_duration"] == 45.0
+    assert params["failed_entry_station_tolerance"] == 0.65
+    assert params["failed_entry_heading_tolerance"] == 0.70
+    assert params["failed_entry_escape_distance"] == 0.80
+
+
+def test_only_nav_owned_states_receive_yaw_only_stop_recovery():
+    """Approach may turn in place at STOP, but handoff/escape may not bypass it."""
+    for purpose in (
+        "return_home",
+        "frontier",
+        "coverage",
+        "revisit_obstacle",
+        "approach",
+        "prealign_obstacle",
+        "verify_obstacle",
+        "entry_recovery",
+        "search_turn",
+    ):
+        assert navigation_purpose_allows_yaw_only_recovery(purpose)
+    for purpose in ("", "handoff", "traversal", "entry_escape"):
+        assert not navigation_purpose_allows_yaw_only_recovery(purpose)
 
 
 def test_active_search_prefers_one_near_known_unfinished_obstacle():
@@ -477,6 +569,31 @@ def test_near_field_generic_geometry_reuses_only_compatible_pending_identity():
         TraverseObstacle.Goal.OBSTACLE_STEP,
         0.90,
     ) == ""
+
+
+def test_revisit_viewpoint_recovers_identity_despite_long_structure_edge_drift():
+    records = [
+        ObservedObstacle(
+            "t_shaped_stairs", 2.0, 0.0, 0.5, -0.2, 0.30, 0.96, 10.0
+        ),
+        ObservedObstacle(
+            "high_wall", 7.0, 0.0, 5.0, 0.0, 0.0, 0.95, 10.0
+        ),
+    ]
+    # Current nearest tread may have moved far from obstacle_x/y; the robot station
+    # and compatible STEP geometry still identify the pending T stair.
+    assert matching_pending_semantic_from_viewpoint(
+        records, [], (0.55, -0.18, 0.35),
+        TraverseObstacle.Goal.OBSTACLE_STEP, 0.60, 0.70,
+    ) == "t_shaped_stairs"
+    assert matching_pending_semantic_from_viewpoint(
+        records, ["t_shaped_stairs"], (0.55, -0.18, 0.35),
+        TraverseObstacle.Goal.OBSTACLE_STEP, 0.60, 0.70,
+    ) == ""
+    assert matching_pending_semantic_from_viewpoint(
+        records, [], (0.55, -0.18, 1.20),
+        TraverseObstacle.Goal.OBSTACLE_STEP, 0.60, 0.70,
+    ) == ""
     assert matching_pending_semantic(
         records,
         [],
@@ -484,6 +601,61 @@ def test_near_field_generic_geometry_reuses_only_compatible_pending_identity():
         TraverseObstacle.Goal.OBSTACLE_STEP,
         0.90,
     ) == ""
+
+
+def test_failed_semantic_cooldown_cannot_be_bypassed_by_ledger_fallback():
+    """A rejected bridge entry must not be re-armed by the next generic STEP."""
+    record = ObservedObstacle(
+        "wooden_bridge_b", 2.0, 0.0, 0.5, -0.2, 0.30, 0.96, 10.0,
+        retry_after=30.0,
+    )
+    assert matching_pending_semantic(
+        [record], [], (2.1, 0.0), TraverseObstacle.Goal.OBSTACLE_STEP,
+        0.90, current_time=20.0,
+    ) == ""
+    assert matching_pending_semantic_from_viewpoint(
+        [record], [], (0.52, -0.18, 0.31),
+        TraverseObstacle.Goal.OBSTACLE_STEP, 0.60, 0.70,
+        current_time=20.0,
+    ) == ""
+    # Once the bounded retry deadline expires, identical live geometry may recover
+    # the semantic ID and attempt the obstacle from a newly observed entry.
+    assert matching_pending_semantic(
+        [record], [], (2.1, 0.0), TraverseObstacle.Goal.OBSTACLE_STEP,
+        0.90, current_time=31.0,
+    ) == "wooden_bridge_b"
+
+
+def test_rejected_entry_memory_is_local_to_station_heading_and_expires():
+    record = FailedEntry("wooden_bridge_b", 0.5, -1.7, 1.57, 50.0)
+    assert failed_entry_matches(
+        [record], "wooden_bridge_b", (0.55, -1.65, 1.60),
+        20.0, 0.65, 0.70,
+    )
+    # A new observation station, a substantially different heading, another
+    # semantic, or an expired record must all remain eligible.
+    assert not failed_entry_matches(
+        [record], "wooden_bridge_b", (1.30, -1.65, 1.60),
+        20.0, 0.65, 0.70,
+    )
+    assert not failed_entry_matches(
+        [record], "wooden_bridge_b", (0.55, -1.65, 0.20),
+        20.0, 0.65, 0.70,
+    )
+    # A long bridge rejected from this station still has the same landing envelope
+    # after a pure turn, so the mission must physically obtain a new station.
+    assert failed_entry_matches(
+        [record], "wooden_bridge_b", (0.55, -1.65, 0.20),
+        20.0, 0.65, 0.70, require_new_station=True,
+    )
+    assert not failed_entry_matches(
+        [record], "t_shaped_stairs", (0.55, -1.65, 1.60),
+        20.0, 0.65, 0.70,
+    )
+    assert not failed_entry_matches(
+        [record], "wooden_bridge_b", (0.55, -1.65, 1.60),
+        51.0, 0.65, 0.70,
+    )
 
 
 def test_failed_obstacle_revisit_uses_bounded_exponential_backoff():
@@ -612,7 +784,20 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert "approach_stall_handoff_max_heading_error" in source
     assert "obstacle_failure_cooldown" in source
     assert "blocked_obstacles" in source
-    assert "temporarily excluding" in source
+    # 语义不明确或入口不安全时，任务不能在原地无限重试：先改变航向，
+    # 再通过普通 Nav2 目标移动观察站；检查行为字段而不是易变化的日志措辞。
+    assert "ambiguous_recovery_sign" in source
+    assert "self.failed_entry_turn_pending =" in source
+    assert '"entry_recovery"' in source
+    assert '"entry_escape"' in source
+    # 返程直线请求被正前障碍锁住时也要进入同一恢复链，而且换站目标必须获准完成，
+    # 不能被“已到返程时间”的分支在下一 tick 立即取消。
+    stall_recovery = source.split("stalled_purpose = self.nav_purpose", 1)[1].split(
+        "if world_to_cell", 1
+    )[0]
+    assert '"return_home"' in stall_recovery
+    assert "guidance_is_blocking" in stall_recovery
+    assert 'self.nav_purpose in ("entry_recovery", "entry_escape")' in source
     # Ambiguous geometry may be approached for a better view, but all actual
     # TraverseObstacle construction paths must still reject an unconfirmed ID.
     assert source.count("is_actionable_semantic_id") >= 4

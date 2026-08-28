@@ -63,7 +63,11 @@
     <frame name="layout_height_bar"><pose>-3.30 -1.90 0 0 0 0</pose></frame>
     <frame name="layout_main_slope"><pose>-1.20 1.70 0 0 0 0</pose></frame>
     <frame name="layout_wooden_bridge_a"><pose>3.60 1.85 0 0 0 0</pose></frame>
-    <frame name="layout_wooden_bridge_b"><pose>2.15 0.00 0 0 0 0</pose></frame>
+    <!-- B 桥从 y=0.00 北移 0.35 m：旧布局与 T 台之间的物理净宽只有约 0.55 m，
+         小于测试狗 0.60 m 直径，Nav2 无论参数如何都不可能从高墙出口绕到桥的纵向入口。
+         新参考布局给南侧约 0.90 m 净宽，且东端仍可绕到木桥 A；障碍自身尺寸、颜色和
+         算法接口均未改变。此处仍是待正式坐标替换的唯一布局参数。 -->
+    <frame name="layout_wooden_bridge_b"><pose>2.15 0.35 0 0 0 0</pose></frame>
     <!-- T 台原参考 y=-1.00 时，其北侧出口与木桥 B 的南边界几乎相接；测试狗越过
          T 台会直接落进下一障碍碰撞区，无法验证“逐障碍继续探索”。向南平移 0.55 m
          后仍完全位于 14×6 m 赛台内，结构尺寸/颜色不变。正式坐标公布后仍只改本行。 -->

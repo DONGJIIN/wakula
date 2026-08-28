@@ -86,6 +86,8 @@ def test_sim_traversal_executor_yields_cpu_after_action_completion():
     assert '"wooden_bridge_unknown_span", 5.00' in backend
     assert '"wooden_bridge_unknown_duration", 14.0' in backend
     assert '"duration_scale", 0.75' in backend
+    assert '"wooden_bridge_b_span", 5.20' in backend
+    assert '"wooden_bridge_exit_clearance", 0.35' in backend
     assert '"long_structure_exit_clearance", 0.75' in backend
 
 
@@ -206,12 +208,14 @@ def test_obstacle_poses_are_centralized_in_layout_frames():
 
 
 def test_t_stairs_exit_does_not_land_inside_bridge_b():
-    """参考布局必须允许逐障碍测试；T 台北缘与桥 B 南缘之间保留机身通道。"""
+    """参考布局必须允许逐障碍测试；两结构之间留出完整测试狗通道。"""
     stair_y = layout_pose("t_shaped_stairs")[1]
     bridge_y = layout_pose("wooden_bridge_b")[1]
     stair_north = stair_y + 0.50  # T 顶台/横臂的北缘。
     bridge_south = bridge_y - 0.50
-    assert bridge_south - stair_north >= 0.50
+    # generic_quadruped/Nav2 占位直径是 0.60 m；额外保留 0.20 m 防止定位和
+    # 栅格离散误差把数学上刚好可过的间隙变成实际不可达。
+    assert bridge_south - stair_north >= 0.80
 
 
 def test_long_bridge_reference_layout_keeps_full_traversal_inside_arena():
@@ -302,6 +306,15 @@ def test_simulation_velocity_mux_autonomy_stop_keeps_manual_takeover():
     assert selected.linear.x == 0.0 and selected.angular.z == 0.0
 
 
+def test_simulation_velocity_mux_handles_only_shutdown_runtime_error():
+    """The launch-wide SIGINT DDS teardown race must not print a false crash."""
+    source = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(
+        encoding="utf-8"
+    )
+    assert "except RuntimeError:" in source
+    assert "if rclpy.ok():" in source
+
+
 def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     """Gazebo bridge 只能接收 mux 输出，避免键盘和 Collision Monitor 相互覆盖。"""
     launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text(
@@ -366,7 +379,7 @@ def test_simulated_traversal_path_is_layout_independent_and_ends_aligned():
     assert '"exit_clearance", 1.20' in source
     assert '"right_angle_poles_span", 1.00' in source
     assert '"t_shaped_stairs_span", 2.80' in source
-    assert '"wooden_bridge_b_span", 5.70' in source
+    assert '"wooden_bridge_b_span", 5.20' in source
     assert "+ semantic_span" in source
 
 

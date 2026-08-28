@@ -152,6 +152,8 @@ def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
     mission = AutonomousMission()
     try:
         assert mission.params["nav_stall_timeout"] == 5.0
+        assert mission.params["nav_progress_translation"] == 0.04
+        assert mission.params["nav_progress_rotation"] == 0.06
         assert mission.params["controller_wait_timeout"] == 5.0
         assert mission.params["approach_stall_handoff_count"] == 1
         assert mission.params["maximum_search_turns"] == 8

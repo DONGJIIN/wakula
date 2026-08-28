@@ -91,9 +91,10 @@ navigation_speed_gate:
     # 该输入进入“只保留 yaw”的门，实际输出线速度始终为零；用于转离障碍和返程恢复。
     # 值应略高于实测转向附带线速度，不能大到把普通直行误当转向。
     stopped_rotation_linear_tolerance: 0.12
-    # 自主任务仅在 return_home 活跃时以 4 Hz 发布纯旋转恢复许可；断流 0.8 s 自动关闭。
-    # 该许可只从 Nav2 的弧线命令提取 yaw，输出 linear 永远为零，不能用于接近障碍。
-    return_rotation_recovery_timeout: 0.8
+    # 自主任务对 return/frontier/coverage/revisit 以及 approach/换视角目标以 4 Hz
+    # 发布纯旋转恢复许可。approach 只用于消除障碍前最后几度误差；速度门会
+    # 强制 linear=0，并且断流 0.8 s 自动关闭。handoff/traversal 不发布。
+    rotation_recovery_timeout: 0.8
 
 # 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。
 traversal_guidance:

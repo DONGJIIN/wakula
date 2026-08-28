@@ -192,6 +192,13 @@ def main(args=None) -> None:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RuntimeError:
+        # Jazzy can invalidate a subscription handle while the executor is taking
+        # the final DDS sample during a launch-wide SIGINT.  That teardown race is
+        # harmless only after the ROS context has already stopped; a RuntimeError
+        # during normal operation must still surface instead of being hidden.
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
         if rclpy.ok():

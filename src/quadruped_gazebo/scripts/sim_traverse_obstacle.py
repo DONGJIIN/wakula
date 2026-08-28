@@ -209,6 +209,10 @@ class SimTraverseObstacle(Node):
         # 若仍叠加 1.20 m inflation 余量，会跨过出口附近尚未巡检的其他障碍。薄墙仍
         # 使用上面的 1.20 m，避免落点处于墙脚的 lethal inflation cell。
         self.declare_parameter("long_structure_exit_clearance", 0.75)
+        # 木桥的 request.distance 已经是机身到入口前缘的距离，span 之后只需留下较短
+        # 的可导航出口余量。若仍使用 0.75 m，B 桥参考布局会把 base_link 放到在线地图
+        # 边缘，Nav2 对返航目标立即 REJECT。该值只修正无腿位姿替身的落点。
+        self.declare_parameter("wooden_bridge_exit_clearance", 0.35)
         # 规则结构沿通过方向的最小长度。Action 仍使用实时入口距离/航向；这些长度只让
         # 无腿动力学的测试替身落到结构另一侧，不包含任何 world 坐标或固定任务顺序。
         # 三根杆的 L 形中心线纵向包络是 1.00 m；S 形绕行产生的额外曲线长度已经由
@@ -220,7 +224,9 @@ class SimTraverseObstacle(Node):
         self.declare_parameter("high_wall_span", 0.05)
         self.declare_parameter("main_slope_span", 3.00)
         self.declare_parameter("wooden_bridge_a_span", 4.35)
-        self.declare_parameter("wooden_bridge_b_span", 5.70)
+        # B 桥从西侧入口平台前缘到东侧出口坡末端约 5.20 m；规则中的 5.70 m 是模型
+        # 总体参考包络，不能在 request.distance 后再次完整相加，否则重复计算入口平台。
+        self.declare_parameter("wooden_bridge_b_span", 5.20)
         # 未分型木桥也要一次离开整座结构，避免落在桥中段并把同一座桥计成第二座；
         # choose_safe_traversal_heading 会在侧向接近时自动选择不越界的通过方向。
         self.declare_parameter("wooden_bridge_unknown_span", 5.00)
@@ -390,6 +396,15 @@ class SimTraverseObstacle(Node):
                         self.get_parameter("long_structure_exit_clearance").value
                     ),
                 )
+            if str(handle.request.obstacle_id) in {
+                "wooden_bridge_a", "wooden_bridge_b", "wooden_bridge_unknown"
+            }:
+                exit_clearance = max(
+                    0.20,
+                    float(
+                        self.get_parameter("wooden_bridge_exit_clearance").value
+                    ),
+                )
             travel_distance = max(
                 speed * duration,
                 max(0.0, float(handle.request.distance))
@@ -429,6 +444,19 @@ class SimTraverseObstacle(Node):
                 )
             if traversal_yaw is None:
                 self._stop()
+                # Keep enough measured context in the rosout log to distinguish a
+                # wrong semantic span from a side-on entry.  These are live odometry
+                # and Action fields, not hidden world/model coordinates, so the test
+                # remains representative of the real controller contract.
+                projected_x = start_x + cos(requested_yaw) * travel_distance
+                projected_y = start_y + sin(requested_yaw) * travel_distance
+                self.get_logger().warning(
+                    f"rejecting sim traversal {str(handle.request.obstacle_id) or 'unclassified'}: "
+                    f"start=({start_x:.2f}, {start_y:.2f}, {start_yaw:.2f}), "
+                    f"entry={float(handle.request.distance):.2f} m, "
+                    f"travel={travel_distance:.2f} m, requested_yaw={requested_yaw:.2f}, "
+                    f"projected_end=({projected_x:.2f}, {projected_y:.2f})"
+                )
                 handle.abort()
                 result.success = False
                 result.message = (
