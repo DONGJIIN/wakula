@@ -18,6 +18,28 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 | `quickstart.txt` | 新电脑完整复现、依赖插件、当前进度和后续路线 | 换电脑部署或接手开发 |
 | `instruction.txt` | 各模块作用、算法原理、参数和调试步骤 | 修改 SLAM、Nav2、OpenCV 或越障算法 |
 | `connect.txt` | 节点作用、关键输入输出、接口字段和真机通信约定 | 接入相机、雷达、真机或排查通信 |
+| `AGENTS.md` | 仓库边界、参数归属、注释规范和验证命令 | 让另一台电脑的 Codex/代码助手继续开发 |
+
+### 真机调参从哪里开始
+
+所有真实生效的参数仍保存在原有 YAML 中，没有再复制一套容易失配的“调参参数”。以下
+文件顶部均有统一的“现象 → 参数 → 调整方向 → 副作用”索引，接入真机时先读顶部注释，
+再修改同一文件中的实际值：
+
+| 现场问题 | 唯一参数入口 |
+|---|---|
+| 地图跟不上、重影、回环失败、SLAM CPU 高 | `src/slam/config/slam.yaml` |
+| 擦碰、窄通道无路径、速度/振荡、代价地图异常 | `src/slam/config/nav2.yaml` |
+| 相机话题、雷达话题或厂家命名不同 | `src/slam/config/sensor_profiles.yaml` |
+| 光照、颜色、模糊、横杆/立柱视觉误检 | `src/quadruped_perception/config/vision.yaml` |
+| 台阶、坡、坑、墙、横杆点云误检或 RK3588 延迟 | `src/quadruped_perception/config/terrain.yaml` |
+| 停车距离、限速、对正和 READY 交接 | `src/quadruped_planning/config/terrain_navigation.yaml` |
+| 5 秒卡死恢复、重复目标、成功判定和探索覆盖 | `src/quadruped_planning/config/autonomous_mission.yaml` |
+
+调参前先修复时间戳、TF、外参和 `/odom`；这些基础数据错误不能通过放宽算法阈值解决。
+每次只修改一个参数组，保存 YAML 版本、rosbag、设备/安装位姿、测试场景和指标。机身
+`footprint/robot_radius`、两处 `inflation_radius`、入口停车距离、Action 交接距离是一组
+联动参数，禁止只改某一个让机器人“先动起来”。
 
 ## 四足整机研发状态与待完成工作
 
@@ -1085,9 +1107,11 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 相机/点云乱序和旧时间戳。合成测试只能防止代码回退，真机阶段仍必须按比赛场地录包验收。
 新增回归还覆盖相机断流历史清除、纯点云降级、栅格边界细障碍及里程计跳变锁存恢复。
 
-核心 Python、launch、参数 YAML、行为树、ROS 消息和运维脚本均已补充中文设计注释；
-`/terrain/features` 的下标已集中为具名常量。维护时不要为逐行翻译代码而增加注释，应优先
-记录数据流、坐标系、单位、算法假设、安全边界以及更换传感器后必须重新标定的内容。
+核心 Python、launch、参数 YAML、行为树、ROS 消息和运维脚本均已补充设计注释；
+`/terrain/features` 的下标已集中为具名常量。七个核心 YAML 顶部还统一提供真机故障现象、
+优先参数、调整方向和副作用。维护时不要为逐行翻译代码而增加注释，应优先记录数据流、
+坐标系、单位、算法假设、安全边界以及更换传感器后必须重新标定的内容。代码助手必须先读
+根目录 `AGENTS.md`，避免破坏 Gazebo/SLAM/自主任务的独立边界或把仿真坐标写进算法。
 
 ## 11. Robocon 比赛逻辑
 
@@ -1107,6 +1131,7 @@ Action 交接、完成去重、任务清单和终点导航；默认把实时起�
 
 | 配置 | 内容 |
 |---|---|
+| `AGENTS.md` | 供 Codex/代码助手读取的范围边界、参数归属、注释和验证约定 |
 | `quadruped_interfaces/msg/`、`action/` | 地形、视觉、融合消息与越障 Action 合同 |
 | `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
 | `quadruped_gazebo/worlds/robocon_obstacle_field.sdf` | 规则障碍尺寸、颜色和集中式参考布局 |

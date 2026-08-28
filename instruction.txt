@@ -259,6 +259,12 @@ Action 成功也不能声称真机已经具备越障能力。
 
 四、推荐调参顺序
 --------------
+七个核心 YAML 的第一屏已经列出针对真机的“现象 -> 参数 -> 调整方向 -> 风险”，它们是
+参数唯一来源：slam.yaml 管建图，nav2.yaml 管外形/规划/控制，sensor_profiles.yaml 管
+话题映射，vision.yaml 管 OpenCV，terrain.yaml 管点云，terrain_navigation.yaml 管安全
+限速/入口，autonomous_mission.yaml 管探索与 5 秒恢复。不要在 Python、launch 或另一份
+临时 YAML 复制同名阈值。另一台电脑使用 Codex 时，应先读取根目录 AGENTS.md。
+
 1. 先确认相机内参、点云单位、时间戳和 TF 方向正确。
 2. 在静态平地调 ground_height_bin、grid_cell_size、ROI 和 min_valid_points。
 3. 用已知高度台阶调 warning_height、step_threshold、climb_threshold、stop_threshold。
@@ -268,6 +274,17 @@ Action 成功也不能声称真机已经具备越障能力。
    必须包含黑场、白场、阴影、逆光、频闪、反光、运动模糊和局部遮挡；分别关闭
    dual_illumination_color_mask 与 suppress_specular_glare 做 A/B 对照。
 7. 只有离线指标和低速实测都通过后，才逐步放宽速度。
+
+常见调整方向速记：
+- 地图转弯跟不上：先查 TF/CPU，再减小 slam.minimum_time_interval；CPU 高则反向调。
+- 平地误报障碍：先修点云外参/地面拟合，再提高地面吸收带或连通区门，不能直接删点云层。
+- 阴影漏识别：先固定曝光/白平衡，再调 CLAHE/HSV；反光误检则收紧高光与颜色门。
+- 擦碰：增大实测 footprint/robot_radius 或 inflation；窄通道无路径时先证明真实净空，
+  再小步减 inflation，不能关闭 obstacle_layer。
+- 障碍前 5 秒不动：普通目标会换点；已确认入口只有在空间、类别、距离、横偏、航向
+  全部通过时交给 Action，否则冷却。极低速真机才考虑增加 nav_stall_timeout，并同时检查
+  位姿进展阈值，防止定位噪声冒充运动。
+- Action 成功却未计完成：按机身长度和定位噪声调完成后验，先排除服务端过早 success。
 
 当前无真机时的自动回归命令（仅允许在 Gazebo 使用）：
 

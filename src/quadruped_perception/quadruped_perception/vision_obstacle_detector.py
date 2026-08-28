@@ -6,6 +6,10 @@ ROI/形态学去噪 → 几何启发式分类 → 多帧空间一致性确认。
 
 该实现面向 RK3588 的可解释、低算力基线。HSV、ROI 和像素面积均是相机相关参数，
 更换镜头、安装角度或比赛场地光照后必须用 debug mask 与 rosbag 重新标定。
+
+真机参数统一位于 ``config/vision.yaml`` 顶部索引所指的实际 ROS 参数中。不要在本文件
+新增另一套阈值常量；代码负责算法结构，YAML 负责设备/现场标定，这样 launch、测试和
+另一台电脑上的部署读取的是同一组值。
 """
 
 from collections import Counter, deque

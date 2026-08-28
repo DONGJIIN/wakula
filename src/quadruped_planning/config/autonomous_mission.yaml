@@ -1,3 +1,33 @@
+# 自主任务只决定“去哪里、何时移交、是否计为完成”，不生成腿部动作，不读取 Gazebo
+# 名称/坐标。所有距离单位 m、角度 rad、时间 s；expected_obstacle_ids 是任务语义，不是路线。
+#
+# ======================== 真机调参快速入口（先读） ========================
+# 先单独验收 SLAM、Nav2、感知和真实 TraverseObstacle 服务端，再启动本节点。任务层参数
+# 不能修复底盘不响应、TF 漂移、点云误分类或 Action 虚假 success。
+#
+# 现象 -> 优先参数 -> 调整方向：
+# 1. 低速真机被误判“5 秒卡死”：先确认 map 位姿真的没变；再增大 nav_stall_timeout 或
+#    减小 nav_progress_translation/rotation。阈值过小会把定位噪声误当进展而永不恢复。
+# 2. 同一障碍反复重试：增大 obstacle_failure_cooldown/revisit_cooldown 或 failure_radius；
+#    半径过大会屏蔽旁边的另一障碍。先查看日志中的 distance/lateral/heading 失败原因。
+# 3. Nav2 停在膨胀层却不移交：核对语义和空间锁，再按真实控制器可接近距离调整
+#    approach_stall_handoff_max_distance；增大它意味着越障控制器必须接管更长的低速接近。
+#    绝不能为了“能动”而删除语义、横偏、航向或空间一致性守卫。
+# 4. 斜着进入障碍：减小 handoff_alignment_tolerance 和 stall 最大航向误差，或增大
+#    pre_alignment_trigger_angle 的灵敏度（即适当减小触发角）。过严会增加对正次数。
+# 5. 长坡/桥接近时丢失同一目标：小步增大 obstacle_lock_radius/spatial_tolerance；密集障碍
+#    被串成同一目标时反向减小。必须在 map 中检查两处实体间距。
+# 6. 障碍名称长期不唯一：增加 verification 次数/转角或语义投票窗口；过大会原地观察更久。
+#    不允许把 wooden_bridge_unknown 直接计为已完成。
+# 7. Action 明明成功但不计完成：查看位移、越过入口平面和稳定窗口；按机身长度调整
+#    post_traversal_minimum_displacement/beyond_margin，按定位噪声调 stable_translation/rotation。
+#    放宽前先确认服务端不是“动作一开始就返回 success”。
+# 8. 探索漏区域：减小 frontier_minimum_cells/coverage_goal_spacing 或增加 search turns；代价是
+#    目标更多、任务更慢。frontier/coverage 参数只基于在线地图，不应加入正式场地坐标。
+# 9. 无目标太早回起点：增大 maximum_search_turns/empty_frontier_confirmations；任务总时长
+#    仍受 mission_timeout 限制。比赛时长确定后必须按规则重设该上限。
+#
+# 调参顺序：5 秒进展判据 -> 入口空间/航向 -> Action 成功后验 -> 冷却 -> 探索覆盖。
 autonomous_mission:
   ros__parameters:
     autostart: false

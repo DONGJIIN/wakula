@@ -3,6 +3,10 @@
 节点只编排三个已有能力：从 ``/map`` 选择未知区域边界、用 Nav2 到达自由空间目标、在
 ``/traversal/guidance`` 连续确认 READY 后调用 ``TraverseObstacle``。它不读取 Gazebo world
 坐标，也不生成关节命令；仿真和真机通过同一个 Action 合同替换越障执行器。
+
+真机探索、5 秒停滞恢复、入口交接和成功后验参数统一位于
+``config/autonomous_mission.yaml``，文件顶部给出按运行现象排查和调整的顺序。Python 中的
+纯函数保持硬件无关；不得将某个 world 的障碍坐标、顺序或仿真实体名写入任务判断。
 """
 
 from __future__ import annotations

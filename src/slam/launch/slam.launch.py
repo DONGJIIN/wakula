@@ -2,6 +2,10 @@
 
 本文件只负责组合模块和统一 remap，不复制子节点参数。启动顺序由 ROS 2 launch 管理，
 Nav2 是否真正激活则由 readiness monitor 根据 /scan、/odom 和 TF 决定。
+
+真机参数入口分别位于 ``slam/config``、``quadruped_perception/config`` 和
+``quadruped_planning/config`` 中各 YAML 的顶部调参索引。话题不同使用 profile/remap；
+不要为了适配某个驱动在此写死设备名，也不要在 launch 中复制算法阈值。
 """
 
 import subprocess

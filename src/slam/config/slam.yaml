@@ -1,5 +1,26 @@
 # SLAM Toolbox 在线异步建图基线。真实部署前必须按雷达量程、/odom 噪声和比赛场地 rosbag
 # 调参；本文件不会生成里程计，odom -> base_link 必须由外部状态估计提供。
+#
+# ======================== 真机调参快速入口（先读） ========================
+# 单位：距离=m，角度=rad，时间=s。先确认 /scan、/odom、TF 和时间戳正确，再调算法；
+# 雷达装歪、odom 漂移或时间不同步不能靠放宽匹配阈值修复。
+#
+# 现象 -> 优先参数 -> 调整方向：
+# 1. 雷达报 range 能力不匹配：max_laser_range = min(可靠实测距离, LaserScan.range_max)。
+#    不要填写宣传页最大量程；黑色材料/斜入射仍稳定返回的距离才算可靠。
+# 2. 转圈/倒退时地图跟不上：先查 TF 与 CPU；再将 minimum_time_interval 逐步减小
+#    （0.10 -> 0.08 -> 0.067）。越小匹配更及时，但 RK3588 CPU 和队列压力更大。
+# 3. 地图更新看起来慢但机器人定位正常：减小 map_update_interval；它只影响栅格显示，
+#    不提高扫描匹配频率。不要用它解决 map->odom 滞后。
+# 4. 静止时墙体变厚/重影：先修 odom 和外参；再适当增大 minimum_travel_distance、
+#    minimum_travel_heading。增得过大会让低速倒退和小角度旋转不建图。
+# 5. 真实回环没闭合：在标注 rosbag 上小步降低 loop_match_minimum_response_*；若错误
+#    拉扯地图则反向提高，并缩小 loop_search_maximum_distance。每次只改一项。
+# 6. CPU 高/scan queue full：增大 minimum_time_interval，必要时减小 scan_buffer_size；
+#    不要同时放大 correlation/loop 搜索窗口。scan_queue_size 只吸收短时 TF/调度抖动。
+# 7. 细障碍地图轮廓太粗：resolution 0.05 -> 0.04；内存/CPU 会近似按面积快速增加。
+#
+# 建议标定顺序：量程 -> TF/时间 -> 直行/倒退 -> 连续旋转 -> 闭环 -> 分辨率/算力。
 slam_toolbox:
   ros__parameters:
     use_sim_time: false

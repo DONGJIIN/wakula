@@ -7,6 +7,10 @@ Nav2 擅长在自由空间中到达一个位姿，但不能完成抬腿、攀爬
 
 所有位置都在输入消息的 frame（通常为 base_link）中，x 向前、y 向左、yaw 逆时针
 为正。纯函数 ``compute_guidance`` 供单元测试和 rosbag 离线评估复用。
+
+入口距离、对正容差、低通和 READY 迟滞统一配置在
+``config/terrain_navigation.yaml``。这些参数必须和 Nav2 footprint/inflation、任务层停滞
+交接范围以及真实越障控制器的接近能力联合标定，不能只为了尽快 READY 而单独放宽。
 """
 
 from dataclasses import dataclass, replace

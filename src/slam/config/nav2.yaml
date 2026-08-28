@@ -1,5 +1,34 @@
 # Wakula 的保守 Nav2 基线。所有速度和机器人尺寸都是未标定初值，真机只能在低速、
 # 有保护条件下根据实测能力调整。速度话题完整链路见 connect.txt。
+#
+# ======================== 真机调参快速入口（先读） ========================
+# 本文件包含多个 Nav2 节点，同一个物理量可能必须同步修改，禁止只改其中一处：
+# - 外形：local_costmap.robot_radius 与 global_costmap.robot_radius 必须一致；真机轮廓
+#   确定后优先换成 footprint。inflation_radius 是额外安全层，不包含机身半径。
+# - 速度：FollowPath 的 max/min/acc/decel 与 velocity_smoother 对应数组必须一致；最终
+#   /cmd_vel 还会被 terrain_navigation.yaml 限速，看到速度低不一定是 DWB 参数问题。
+# - 越障入口：robot_radius、两处 inflation_radius、terrain_navigation.yaml 的
+#   hard_stop_distance/handoff_distance、autonomous_mission.yaml 的停滞交接距离要联动实测。
+#
+# 现象 -> 优先参数 -> 调整方向：
+# 1. 贴墙/擦碰：先增大实测 footprint/robot_radius，再小步增大 inflation_radius；代价是
+#    窄通道更难规划。若模型外形错误，禁止只靠无限增大 inflation 掩盖。
+# 2. 窄通道明明能过却无路径：先核对 footprint 和点云假障碍；确认有真实净空后再每次
+#    0.05 m 减小 inflation_radius。不要删除 obstacle_layer 来“让越障通过”。
+# 3. 路径振荡/左右摆：先降低 max_vel_x、max_vel_theta 和加速度；再检查 GoalAlign/
+#    PathAlign 权重。一次只改一个 critic，保留 rosbag 和 /cmd_vel 日志对比。
+# 4. 跟踪反应慢：在 CPU 有余量时提高 controller_frequency 或 vx/vtheta_samples；若控制
+#    周期超时则反向降低采样。sim_time 越大看得远，但窄场景更保守且计算更重。
+# 5. 到目标附近转不停：适当增大 xy/yaw_goal_tolerance；过大会导致障碍入口未对正便成功。
+#    yaw_goal_tolerance 应与 autonomous_mission 的 handoff_alignment_tolerance 联动。
+# 6. TF extrapolation：先修驱动时间戳/时钟，再小步增加 transform_tolerance；放宽容差不能
+#    修复持续时钟偏差，只会让控制使用更旧位姿。
+# 7. 动态障碍残留：核对 scan clearing 和 raytrace_max_range > obstacle_max_range；点云层
+#    故意 marking-only，避免稀疏 RGB-D 错误清除 2D 雷达障碍。
+# 8. “5 秒就取消”来自 autonomous_mission.yaml 的 nav_stall_timeout，早于本文件
+#    progress_checker 的 15 s；若真机极低速，应联动降低进展阈值或增加任务层超时。
+#
+# 首次真机只用低速：先外形/急停，再直线/旋转动力学，再局部地图，最后才调 critic。
 
 # ---------- 局部路径跟踪：全局路径 -> /cmd_vel_nav ----------
 controller_server:

@@ -3,6 +3,10 @@
 相机和深度驱动通常不是严格硬同步，本节点用消息头时间戳做有界近似同步。点云几何
 始终是 STEP/PIT/WALL 的尺度依据；OpenCV 只能提高同类置信度或把已有高处几何细分为
 横杆/立柱，不能凭单目图像独立批准越障。
+
+时间同步、队列和置信度入口位于 ``config/vision.yaml`` 的 ``perception_fusion`` 段。
+真机先修正两路 Header 的共同时间源，再调整 ``sync_slop``；单纯放大同步窗口会把机器人
+运动前后的不同障碍错误配成一帧。
 """
 
 from collections import deque

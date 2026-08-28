@@ -1,5 +1,14 @@
 # 设备名只是常见话题的便捷预设。算法侧合同仍固定为 /scan、/odom、
 # sensor_msgs/Image 和 sensor_msgs/PointCloud2；profile 不安装或启动任何厂家驱动。
+#
+# ======================== 真机接线快速入口（先读） ========================
+# 1. 先运行驱动并用 `ros2 topic list/type/hz` 取得真实话题；不要凭型号猜命名空间。
+# 2. 复制最接近的 profile 改名，只填写话题。frame_id 和外参应由驱动/URDF/TF 解决，
+#    不能写在本文件；驱动启动、串口、IP、波特率也不属于算法 profile。
+# 3. 3D 雷达的 point_cloud_topic 只供地形分析；SLAM 仍需 /scan，可由独立 2D 雷达或
+#    pointcloud_to_laserscan 生成。RGB-D 应发布已经对齐、带正确 Header 的 PointCloud2。
+# 4. 临时测试优先用 slam.launch.py 的 scan_topic/odom_topic/camera_topic/
+#    point_cloud_topic 覆盖；确认稳定后再固化 profile，避免为一次测试新增重复预设。
 profiles:
   ros_default:
     scan_topic: /scan
