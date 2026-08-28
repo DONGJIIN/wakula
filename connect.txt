@@ -83,7 +83,11 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         /navigation/autonomy_stop。
   输出：最终标准 /cmd_vel。
   注意：它只限制已有速度，不自行生成运动指令；雷达急停距离默认 0.22 m，不负责把
-        可越障目标改成绕行目标。
+        可越障目标改成绕行目标。地形限速为零时，可把 DWB 线速度不超过 0.12 m/s 且含
+        yaw 的转向主导输入转换为纯 yaw 输出；输出线速度仍为零，用于换视角和返程脱困。
+  返航输入：/navigation/return_rotation_recovery（std_msgs/Bool，4 Hz 心跳）。仅自主任务的
+        return_home 活跃时为 true；断流 0.8 s 自动失效。此时即使 DWB 弧线命令线速度较大，
+        也只提取最大 0.30 rad/s yaw，绝不放行 linear，全部安全守卫仍有效。
 
 /autonomous_mission（quadruped_planning / autonomous_mission）
   作用：在未知地图中选择探索前沿；确认障碍后让 Nav2 到达入口、调用越障 Action，成功后
@@ -96,8 +100,14 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         /autonomy/progress，以及 transient-local 的 /autonomy/completed_obstacles 和
         /autonomy/pending_obstacles（String 内为 count/ids/names_zh JSON）。
   进度显示：自主任务终端每 5 秒及清单变化时显示“已越过/未越过”；上述三个话题用于其他
-        节点、UI 或晚启动终端读取同一账本。
+        节点、UI 或晚启动终端读取同一账本。/autonomy/progress 是分号分隔的可读 String，
+        关键字段为 state、completed、score、elapsed_seconds、budget_remaining_seconds、
+        completed_ids、pending_ids；默认总预算 300 s，最后 60 s 预留返程。
   生命周期：仅随 autonomous_navigation.launch.py 存在；启动 launch 即执行，Ctrl-C 即取消退出。
+  额外输出：/navigation/return_rotation_recovery（std_msgs/Bool）。只表示返航阶段允许速度门
+        从 Nav2 命令提取纯 yaw，不是 Twist，也不绕过 /terrain/speed_limit 或雷达急停。
+  停滞时限：前沿/覆盖/入口等普通 Nav2 目标 5 s 无位姿进展即取消改选；return_home 使用
+        20 s，允许 Nav2 行为树先执行 Spin/BackUp/重规划，再由任务层取消重试。
   安全输出：/navigation/autonomy_stop（std_msgs/Bool，可靠 + transient_local）。启动发布
   false；退出先发布 true。最终仲裁器收到 true 后只锁自动导航分支；有效键盘/手柄输入
   仍可人工接管。标准优先级：人工输入 > 自动导航锁 > 自动导航输入 > 零速度。
@@ -107,7 +117,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   对正：确认唯一障碍后先调用 /navigate_to_pose 做同位置纯 yaw 对正，再接近入口；单次
         最多修正 0.524 rad，转后等待 0.6 s 新感知，Action 交接航向门限为 0.12 rad。
   回访：多帧语义确认后记录“障碍 map 位置 + 当时安全观察位”。若尚未完成，空闲时优先
-        返回观察位并朝向障碍重新识别；历史记录不能直接触发 Action，8 秒冷却避免循环。
+        返回观察位并朝向障碍重新识别；近场语义退化时还必须满足实时粗类型兼容和 0.90 m
+        空间门才可复用历史 ID。历史记录不能单独触发 Action；每次回访按 8/16/32/64 s
+        指数退避，到达观察位但没有重新捕获也不会清零。
   去重：完成记录使用“障碍几何类别 + map 坐标”，只屏蔽 0.65 m 内的同类旧目标；不同
         类别的相邻比赛障碍仍会独立进入引导和 Action。
   成功判定：`/traverse_obstacle` 必须同时得到 ROS `SUCCEEDED` 和 Result `success=true`；随后

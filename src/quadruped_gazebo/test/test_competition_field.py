@@ -85,6 +85,7 @@ def test_sim_traversal_executor_yields_cpu_after_action_completion():
     # 不能错误套用 B 桥全长并移出场地。
     assert '"wooden_bridge_unknown_span", 5.00' in backend
     assert '"wooden_bridge_unknown_duration", 14.0' in backend
+    assert '"duration_scale", 0.75' in backend
     assert '"long_structure_exit_clearance", 0.75' in backend
 
 

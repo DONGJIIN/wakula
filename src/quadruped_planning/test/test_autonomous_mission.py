@@ -25,8 +25,10 @@ from quadruped_planning.autonomous_mission import (
     is_actionable_semantic_id,
     mission_score,
     mission_inventory,
+    matching_pending_semantic,
     nav_status_allows_guarded_handoff,
     normalized_angle,
+    obstacle_revisit_delay,
     obstacle_was_completed,
     resolve_completed_semantics,
     inventory_message,
@@ -38,6 +40,7 @@ from quadruped_planning.autonomous_mission import (
     target_is_in_heading_cone,
     timeout_reached,
     traversal_crossing_evidence,
+    verification_station_matches,
     world_to_cell,
 )
 from action_msgs.msg import GoalStatus
@@ -416,11 +419,15 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
         "ros__parameters"
     ]
     assert params["nav_stall_timeout"] == 5.0
+    assert params["return_nav_stall_timeout"] == 20.0
     assert params["controller_wait_timeout"] == 5.0
     assert params["approach_stall_handoff_count"] == 1
     assert params["approach_stall_handoff_max_distance"] == 2.10
     assert params["maximum_search_turns"] == 8
     assert params["inventory_log_period"] == 5.0
+    assert params["mission_timeout"] == 300.0
+    assert params["return_time_reserve"] == 60.0
+    assert params["obstacle_revisit_max_cooldown"] == 64.0
 
 
 def test_active_search_prefers_one_near_known_unfinished_obstacle():
@@ -443,6 +450,56 @@ def test_active_search_prefers_one_near_known_unfinished_obstacle():
     assert choose_pending_obstacle(
         records, ["height_bar"], (0.0, 0.0, 0.0), 12.0
     ) is None
+
+
+def test_near_field_generic_geometry_reuses_only_compatible_pending_identity():
+    """Regression for the gravel/high-wall revisit loop observed in the run log."""
+    records = [
+        ObservedObstacle(
+            "gravel_wood_pit", 2.0, 0.0, 0.5, 0.0, 0.0, 0.96, 10.0
+        ),
+        ObservedObstacle(
+            "high_wall", 8.0, 0.0, 6.0, 0.0, 0.0, 0.92, 11.0
+        ),
+    ]
+    assert matching_pending_semantic(
+        records,
+        [],
+        (2.18, 0.05),
+        TraverseObstacle.Goal.OBSTACLE_STEP,
+        0.90,
+    ) == "gravel_wood_pit"
+    # The same coarse STEP must not inherit a far wall or a task already completed.
+    assert matching_pending_semantic(
+        records,
+        ["gravel_wood_pit"],
+        (2.18, 0.05),
+        TraverseObstacle.Goal.OBSTACLE_STEP,
+        0.90,
+    ) == ""
+    assert matching_pending_semantic(
+        records,
+        [],
+        (4.0, 0.0),
+        TraverseObstacle.Goal.OBSTACLE_STEP,
+        0.90,
+    ) == ""
+
+
+def test_failed_obstacle_revisit_uses_bounded_exponential_backoff():
+    assert obstacle_revisit_delay(8.0, 1, 64.0) == 8.0
+    assert obstacle_revisit_delay(8.0, 2, 64.0) == 16.0
+    assert obstacle_revisit_delay(8.0, 4, 64.0) == 64.0
+    assert obstacle_revisit_delay(8.0, 20, 64.0) == 64.0
+
+
+def test_ambiguous_view_counter_tracks_robot_station_not_moving_front_edge():
+    # A pure camera turn may move the reported bridge/pit edge by metres, while the
+    # base itself stays at one station and must consume the same bounded 1/4 sequence.
+    anchor = (1.0, 2.0)
+    assert verification_station_matches(anchor, (1.02, 1.98), 1.50)
+    assert not verification_station_matches(anchor, (2.6, 2.0), 1.50)
+    assert not verification_station_matches(None, anchor, 1.50)
 
 
 def test_semantic_vote_converges_from_early_generic_guess():

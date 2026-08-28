@@ -17,8 +17,8 @@
 #    盲区。过大会阻止靠近比赛障碍；Action 接管后仍由真机控制器负责自身急停。
 # 6. 感知偶发断流就停车：先修驱动和 CPU；只有确认最大正常间隔后才能增大 timeout。
 #    command_timeout/assessment_timeout/health_timeout 越大，故障停车越慢。
-# 7. 对正时不能旋转：检查新鲜 ALIGN guidance，再调 alignment_max_angular_speed；禁止在
-#    STOP 状态开放线速度。
+# 7. 对正/返程时不能转身：检查 DWB 输入的 linear/angular；若是小线速度叠加 yaw，可小步
+#    增大 stopped_rotation_linear_tolerance，门后仍强制 linear=0。过大可能增加原地转向次数。
 #
 # 必须联动核验：nav2 两处半径/膨胀、hard_stop_distance、handoff_distance、
 # autonomous_mission 的 handoff/stall 最大距离，以及真实 TraverseObstacle 的接近能力。
@@ -87,9 +87,13 @@ navigation_speed_gate:
     # 有效的 TraversalGuidance ALIGN 状态能打开该权限，感知断流仍然全停。
     alignment_guidance_timeout: 0.8
     alignment_max_angular_speed: 0.30
-    # STOP 状态仍允许 Nav2 的纯原地转向，以便离开未知轮廓并继续探索；线速度始终为零，
-    # 且最终还需通过导航健康、命令超时、外部停车和全向 22 cm 雷达急停。
-    stopped_rotation_linear_tolerance: 0.02
+    # DWB 的转向主导命令常为 0.10 m/s + 0.20 rad/s，而不是数学上的纯 yaw。STOP 时允许
+    # 该输入进入“只保留 yaw”的门，实际输出线速度始终为零；用于转离障碍和返程恢复。
+    # 值应略高于实测转向附带线速度，不能大到把普通直行误当转向。
+    stopped_rotation_linear_tolerance: 0.12
+    # 自主任务仅在 return_home 活跃时以 4 Hz 发布纯旋转恢复许可；断流 0.8 s 自动关闭。
+    # 该许可只从 Nav2 的弧线命令提取 yaw，输出 linear 永远为零，不能用于接近障碍。
+    return_rotation_recovery_timeout: 0.8
 
 # 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。
 traversal_guidance:

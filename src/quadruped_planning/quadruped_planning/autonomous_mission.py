@@ -572,6 +572,9 @@ class ObservedObstacle:
     confidence: float
     last_seen: float
     retry_after: float = 0.0
+    # 连续回访尝试次数只影响任务调度，不改变感知置信度。Nav2 到达观察位并不等于
+    # 重新识别成功，因此每次尝试都指数退避，避免旧记录每隔固定时间抢占任务。
+    revisit_failures: int = 0
 
 
 @dataclass
@@ -663,6 +666,77 @@ def choose_pending_obstacle(
             item.semantic_id,
         ),
     )
+
+
+def obstacle_revisit_delay(
+    base_seconds: float,
+    failure_count: int,
+    maximum_seconds: float,
+) -> float:
+    """Return bounded exponential backoff for a repeatedly failed revisit.
+
+    ``failure_count=1`` uses the base delay, then doubles until the configured
+    maximum.  The helper is pure so scheduling policy can be regression-tested
+    without running ROS or Nav2.
+    """
+    base = max(0.0, float(base_seconds))
+    maximum = max(base, float(maximum_seconds))
+    failures = max(1, int(failure_count))
+    return min(maximum, base * (2.0 ** min(failures - 1, 16)))
+
+
+def verification_station_matches(
+    anchor: Optional[Tuple[float, float]],
+    robot_position: Tuple[float, float],
+    maximum_distance: float,
+) -> bool:
+    """Return whether alternate camera views came from the same robot station.
+
+    A long bridge, ramp or pit can report a different *nearest obstacle point* after
+    every in-place turn. Resetting the view counter from that moving point caused
+    repeated ``1/4`` verification cycles. The robot pose is the stable reference:
+    pure rotations at one station remain one bounded sequence, while driving to a
+    genuinely new viewpoint starts a fresh sequence.
+    """
+    if anchor is None:
+        return False
+    return hypot(
+        float(robot_position[0]) - float(anchor[0]),
+        float(robot_position[1]) - float(anchor[1]),
+    ) <= max(0.0, float(maximum_distance))
+
+
+def matching_pending_semantic(
+    records: Sequence[ObservedObstacle],
+    completed_ids: Sequence[str],
+    obstacle_position: Tuple[float, float],
+    coarse_action_type: int,
+    maximum_distance: float,
+) -> str:
+    """Match near-field coarse geometry to the nearest pending semantic record.
+
+    This performs no perception on its own.  It only reconnects a live map position
+    and coarse Action type to an identity that was confirmed from earlier multi-frame
+    evidence.  A completed task, incompatible type, or out-of-radius record cannot
+    match, which prevents an old name leaking to the next obstacle.
+    """
+    completed = set(str(item) for item in completed_ids)
+    candidates = []
+    for record in records:
+        semantic_id = str(record.semantic_id)
+        if semantic_id in completed:
+            continue
+        distance = hypot(
+            float(obstacle_position[0]) - float(record.obstacle_x),
+            float(obstacle_position[1]) - float(record.obstacle_y),
+        )
+        if (
+            distance <= max(0.0, float(maximum_distance))
+            and semantic_id_for_action(semantic_id, coarse_action_type)
+            == semantic_id
+        ):
+            candidates.append((distance, semantic_id))
+    return min(candidates)[1] if candidates else ""
 
 
 def _origin_yaw(grid: OccupancyGrid) -> float:
@@ -1254,6 +1328,9 @@ class AutonomousMission(Node):
             # 回到当时的安全观察位姿重新捕获它，而不是把目标直接放在实体障碍中心。
             "obstacle_revisit_position_tolerance": 0.30,
             "obstacle_revisit_cooldown": 8.0,
+            # 同一观察位按 8/16/32/64 秒退避；到达位姿但未重新捕获也算一次尝试，
+            # 期间优先处理其他障碍或前沿，防止一个旧记录耗尽整场比赛时间。
+            "obstacle_revisit_max_cooldown": 64.0,
             # 没有前沿不等于比赛完成：先原地分段转向补扫，再重试曾被 Nav2 暂时拒绝
             # 的方向；只有八项任务全部完成或总任务超时才转向终点。
             "empty_frontier_confirmations": 4,
@@ -1262,10 +1339,16 @@ class AutonomousMission(Node):
             "maximum_search_turns": 8,
             "search_turn_angle": 1.570796,
             "nav_stall_timeout": 5.0,
+            # 普通探索 5 秒不动就应切换目标；返程是唯一终点，必须给 Nav2 行为树足够
+            # 时间触发 Spin/BackUp/重新规划，不能每 5 秒由任务层提前取消。
+            "return_nav_stall_timeout": 20.0,
             "nav_progress_translation": 0.08,
             "nav_progress_rotation": 0.10,
             "inventory_log_period": 5.0,
-            "mission_timeout": 900.0,
+            # 整场软件任务预算为 5 分钟。最后 60 秒只允许完成正在执行的越障或返回
+            # 起点，不再发起新的探索；若返程受阻仍继续安全重试，而不是到点原地停车。
+            "mission_timeout": 300.0,
+            "return_time_reserve": 60.0,
             "return_home_tolerance": 0.40,
             "front_name_timeout": 1.2,
             "expected_obstacle_ids": list(COMPETITION_OBSTACLE_IDS),
@@ -1331,6 +1414,13 @@ class AutonomousMission(Node):
             Bool, "/navigation/autonomy_stop", stop_qos
         )
         self.autonomy_stop_pub.publish(Bool(data=False))
+        # 返航时前置相机可能仍看着刚放弃的障碍并把地形限速压成零。任务节点只发布一个
+        # 带心跳的“允许提取纯 yaw”布尔量；速度门仍会删除全部线速度并执行健康/雷达急停。
+        # 这不是新的速度指令，Gazebo 和真机均使用同一标准 Nav2 -> /cmd_vel 链路。
+        self.return_rotation_pub = self.create_publisher(
+            Bool, "/navigation/return_rotation_recovery", 10
+        )
+        self.return_rotation_pub.publish(Bool(data=False))
         self.nav_client = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.traverse_client = ActionClient(self, TraverseObstacle, "/traverse_obstacle")
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -1409,7 +1499,10 @@ class AutonomousMission(Node):
         # 语义投票从障碍第一次进入前向 ROI 就开始，而不是等 Nav2 已经锁定入口才开始。
         # 近距离墙面可能退化成 STEP；保留更早的 WALL 多帧证据可避免在交接前改名。
         self.semantic_vote_position = None
+        # 语义换视角以机器人驻留点计数，而不是以会随相机朝向移动的最近障碍前缘计数。
+        # 同时保存本轮看到的所有前缘，耗尽尝试后一起做短暂空间冷却。
         self.semantic_verification_position = None
+        self.semantic_verification_obstacle_positions = []
         self.semantic_verification_attempts = 0
         self.semantic_settle_until = 0.0
         # 预对正完成后必须等待相机/点云看到新的机身朝向；否则定时器可能在旧 Guidance
@@ -1459,17 +1552,26 @@ class AutonomousMission(Node):
             f"state={self.state}; completed={len(completed)}/"
             f"{len(completed) + len(pending)}; "
             f"score={mission_score(self.completed_semantics, self.returned_home)}; "
+            f"elapsed_seconds={max(0.0, now - self.mission_started):.1f}; "
+            "budget_remaining_seconds="
+            f"{max(0.0, float(self.params['mission_timeout']) - (now - self.mission_started)):.1f}; "
             f"completed_ids={','.join(completed) or 'none'}; "
             f"pending_ids={','.join(pending) or 'none'}"
         )
         self.progress_pub.publish(String(data=progress))
         if changed or periodic:
-            self.get_logger().info(inventory_display(completed, pending))
+            elapsed = max(0.0, now - self.mission_started)
+            remaining = max(0.0, float(self.params["mission_timeout"]) - elapsed)
+            self.get_logger().info(
+                inventory_display(completed, pending)
+                + f" | 用时={elapsed:.0f}s | 剩余预算={remaining:.0f}s"
+            )
             self.last_inventory_signature = signature
             self.last_inventory_log_time = now
 
     def _publish_immediate_stop(self) -> None:
         """锁住核心速度门；用于独立 launch 退出时确定性停车。"""
+        self.return_rotation_pub.publish(Bool(data=False))
         self.autonomy_stop_pub.publish(Bool(data=True))
 
     def _map_callback(self, msg):
@@ -1587,6 +1689,7 @@ class AutonomousMission(Node):
         previous = self.observed_obstacles.get(semantic_id)
         obstacle_x, obstacle_y = float(position[0]), float(position[1])
         retry_after = 0.0
+        revisit_failures = 0
         if previous is not None:
             # 相同比赛 ID 理论上只出现一次。用低通抑制深度边缘抖动；若位置发生大跳变，
             # 保留新观察但不平均两处，避免假阳性把回访点落在它们中间。
@@ -1597,6 +1700,9 @@ class AutonomousMission(Node):
                 obstacle_x = 0.8 * previous.obstacle_x + 0.2 * obstacle_x
                 obstacle_y = 0.8 * previous.obstacle_y + 0.2 * obstacle_y
             retry_after = previous.retry_after
+            # 感知再次看到目标或 Nav2 到达旧位姿都不代表重新识别/越障成功，因此保留
+            # 调度尝试次数，避免原地连续图像帧绕过指数退避。
+            revisit_failures = previous.revisit_failures
         self.observed_obstacles[semantic_id] = ObservedObstacle(
             semantic_id=semantic_id,
             obstacle_x=obstacle_x,
@@ -1607,6 +1713,7 @@ class AutonomousMission(Node):
             confidence=max(0.0, min(1.0, float(confidence))),
             last_seen=float(now),
             retry_after=retry_after,
+            revisit_failures=revisit_failures,
         )
 
     def _defer_obstacle_revisit(self, semantic_id: str, now: float) -> None:
@@ -1616,6 +1723,19 @@ class AutonomousMission(Node):
             record.retry_after = float(now) + float(
                 self.params["obstacle_revisit_cooldown"]
             )
+
+    def _penalize_obstacle_revisit(self, semantic_id: str, now: float) -> None:
+        """Back off one repeatedly unreachable viewpoint while exploring elsewhere."""
+        record = self.observed_obstacles.get(str(semantic_id))
+        if record is None:
+            return
+        record.revisit_failures += 1
+        delay = obstacle_revisit_delay(
+            self.params["obstacle_revisit_cooldown"],
+            record.revisit_failures,
+            self.params["obstacle_revisit_max_cooldown"],
+        )
+        record.retry_after = float(now) + delay
 
     def _known_semantic_at_guidance(self, msg) -> str:
         """Recover a previously confirmed name for the same physical entry.
@@ -1633,24 +1753,29 @@ class AutonomousMission(Node):
         position = self._obstacle_position(msg)
         if position is None:
             return ""
-        coarse_type = action_obstacle_type(msg)
-        maximum_distance = float(self.params["handoff_fallback_spatial_tolerance"])
-        candidates = []
-        for semantic_id, record in self.observed_obstacles.items():
-            if semantic_id in self.completed_semantics:
-                continue
-            distance = hypot(
-                float(position[0]) - float(record.obstacle_x),
-                float(position[1]) - float(record.obstacle_y),
-            )
-            if (
-                distance <= maximum_distance
-                and semantic_id_for_action(semantic_id, coarse_type) == semantic_id
-            ):
-                candidates.append((distance, semantic_id))
-        # Two records within exactly the same tolerance are unlikely in the published
-        # field, but choosing the nearest keeps the rule deterministic for unknown maps.
-        return min(candidates)[1] if candidates else ""
+        return matching_pending_semantic(
+            tuple(self.observed_obstacles.values()),
+            self.completed_semantics,
+            position,
+            action_obstacle_type(msg),
+            float(self.params["handoff_fallback_spatial_tolerance"]),
+        )
+
+    def _action_semantic_id(self, msg, fallback: str = "") -> str:
+        """Resolve the live name, then safely reuse the pending spatial ledger.
+
+        At long range the camera can see an entire pit/bridge/stair structure, while
+        at the handoff boundary it may see only one tread and publish a generic STEP.
+        Throwing away the earlier identity caused the mission to rotate four times,
+        revisit the same point, and repeat indefinitely.  The fallback below still
+        requires a live valid Guidance, a compatible coarse Action type, and a map
+        position within ``handoff_fallback_spatial_tolerance``; it never authorises
+        traversal from a stale name alone or from a Gazebo entity.
+        """
+        resolved = self._resolved_obstacle_id(msg, fallback)
+        if is_actionable_semantic_id(resolved):
+            return resolved
+        return self._known_semantic_at_guidance(msg)
 
     def _geometry_supports_obstacle_id(
         self,
@@ -1756,6 +1881,7 @@ class AutonomousMission(Node):
         self.semantic_votes.clear()
         self.semantic_vote_position = None
         self.semantic_verification_position = None
+        self.semantic_verification_obstacle_positions.clear()
         self.semantic_verification_attempts = 0
         self.semantic_settle_until = 0.0
 
@@ -1964,6 +2090,15 @@ class AutonomousMission(Node):
         ):
             return None
         semantic_id = self._resolved_obstacle_id(msg)
+        # A failed revisit or rejected TraverseObstacle must also cool the live
+        # perception path.  Otherwise a camera that keeps seeing the same structure
+        # bypasses ``choose_pending_obstacle`` and immediately recreates the failed
+        # handoff.  The delay is bounded at 64 s, during which other targets remain
+        # eligible; this is scheduling only and never marks the obstacle completed.
+        action_id = self._action_semantic_id(msg)
+        action_record = self.observed_obstacles.get(action_id)
+        if action_record is not None and action_record.retry_after > now:
+            return None
         # Explicit arena-boundary evidence is never an obstacle-verification
         # target.  Other stable metric geometry may remain semantically
         # ambiguous; the task layer is allowed to approach/rotate for a better
@@ -2010,27 +2145,37 @@ class AutonomousMission(Node):
         if robot is None or position is None:
             self.state = "WAITING_FOR_INPUTS"
             return
-        # 换视角时长坡、桥面和坑沿的“最近前缘”会沿结构移动，不能沿用只为导航目标
-        # 平滑设计的 0.75 m obstacle_lock_radius。否则每次转身都被误当成新障碍，
-        # verification_attempts 永远回到 1/4，自动探索便会在一处无限旋转。
+        # 换视角时长坡、桥面和坑沿的“最近前缘”会沿结构移动。这里必须用几乎不动的
+        # 机器人驻留点判断是否仍是同一轮验证；若用障碍前缘，即使半径放到 1.5 m 也会
+        # 在同一长结构上反复重置为 1/4。
         lock_radius = float(self.params["semantic_verification_lock_radius"])
-        if (
-            self.semantic_verification_position is None
-            or hypot(
-                position[0] - self.semantic_verification_position[0],
-                position[1] - self.semantic_verification_position[1],
-            ) > lock_radius
+        robot_xy = (float(robot[0]), float(robot[1]))
+        if not verification_station_matches(
+            self.semantic_verification_position,
+            robot_xy,
+            lock_radius,
         ):
-            self.semantic_verification_position = position
+            self.semantic_verification_position = robot_xy
+            self.semantic_verification_obstacle_positions.clear()
             self.semantic_verification_attempts = 0
+        if not any(
+            hypot(position[0] - previous[0], position[1] - previous[1])
+            <= float(self.params["obstacle_failure_radius"])
+            for previous in self.semantic_verification_obstacle_positions
+        ):
+            self.semantic_verification_obstacle_positions.append(position)
         self.semantic_verification_attempts += 1
         maximum = int(self.params["semantic_verification_max_attempts"])
         if self.semantic_verification_attempts > maximum:
-            self.blocked_obstacles.append((
-                float(position[0]),
-                float(position[1]),
-                now + float(self.params["obstacle_failure_cooldown"]),
-            ))
+            expiry = now + float(self.params["obstacle_failure_cooldown"])
+            # 冷却本轮各个朝向看到的前缘，而不是只冷却最后一个像素投影点。这样长桥/坡
+            # 转身后不会立刻从另一个前缘绕过 failure_radius 再进入 1/4。
+            for blocked_position in self.semantic_verification_obstacle_positions:
+                self.blocked_obstacles.append((
+                    float(blocked_position[0]),
+                    float(blocked_position[1]),
+                    expiry,
+                ))
             self._reset_obstacle_lock()
             self.cooldown_until = now + float(self.params["nav_failure_retry_delay"])
             self.state = "RECOVERY"
@@ -2117,7 +2262,7 @@ class AutonomousMission(Node):
             resolved_id = (
                 locked_id
                 if is_actionable_semantic_id(locked_id)
-                else self._resolved_obstacle_id(
+                else self._action_semantic_id(
                     guidance,
                     self._current_obstacle_id(),
                 )
@@ -2125,11 +2270,7 @@ class AutonomousMission(Node):
             # A pending ledger record bridges a short near-field semantic dropout.  It
             # never bypasses the live spatial/type/distance/alignment gates in
             # ``_nav_result``; it only preserves which obstacle those gates refer to.
-            self.nav_obstacle_id = (
-                resolved_id
-                if is_actionable_semantic_id(resolved_id)
-                else self._known_semantic_at_guidance(guidance)
-            )
+            self.nav_obstacle_id = resolved_id
         elif purpose != "approach":
             self.nav_obstacle_position = None
             self.nav_obstacle_id = ""
@@ -2218,8 +2359,11 @@ class AutonomousMission(Node):
             return
         if purpose == "revisit_obstacle":
             # 到达旧观察位后给相机/点云一个完整稳定窗口重新捕获。即使 Nav2 中止，也只
-            # 延迟该障碍，不妨碍任务继续选择前沿寻找其他未完成项。
-            self._defer_obstacle_revisit(revisit_id, time.monotonic())
+            # 延迟该障碍，不妨碍任务继续选择其他未完成项。Nav2 到达观察位只证明路径
+            # 成功，不证明相机重新识别成功；因此成功/失败都算一次有界回访尝试并递增
+            # 退避。即使相机仍持续看到该目标，fresh-target 分支也要遵守同一冷却，
+            # 否则连续图像帧会绕过回访调度并立即重建同一次失败的交接。
+            self._penalize_obstacle_revisit(revisit_id, time.monotonic())
         if purpose in ("frontier", "coverage") and not succeeded and target is not None:
             self.blocked_frontiers.append(target)
         if not succeeded:
@@ -2272,7 +2416,7 @@ class AutonomousMission(Node):
                 and cancel_reason in ("stall", "approach_within_tolerance")
             )
             live_semantic_id = (
-                self._resolved_obstacle_id(
+                self._action_semantic_id(
                     latest,
                     self.locked_obstacle_id or self._current_obstacle_id(),
                 )
@@ -2412,7 +2556,14 @@ class AutonomousMission(Node):
             self.nav_progress_pose = robot
             self.nav_progress_time = now
             return False
-        return now - self.nav_progress_time >= float(self.params["nav_stall_timeout"])
+        stall_timeout = float(
+            self.params[
+                "return_nav_stall_timeout"
+                if self.nav_purpose == "return_home"
+                else "nav_stall_timeout"
+            ]
+        )
+        return now - self.nav_progress_time >= stall_timeout
 
     def _start_traverse(self, guidance):
         if (
@@ -2424,7 +2575,7 @@ class AutonomousMission(Node):
         # 入口接近期间分类仍可能变化。必须在构造 Action 之前做最后一次“名称 + 几何”
         # 一致性校验；没有稳定比赛 ID 时返回探索换视角，绝不发送匿名直行命令。
         if not self.pending_traverse_id:
-            self.pending_traverse_id = self._resolved_obstacle_id(
+            self.pending_traverse_id = self._action_semantic_id(
                 guidance,
                 self.locked_obstacle_id or self._current_obstacle_id(),
             )
@@ -2469,7 +2620,7 @@ class AutonomousMission(Node):
         不猜测腿部动作，也不会因服务缺失继续选择障碍背后的前沿目标。
         """
         self.pending_traverse = target
-        self.pending_traverse_id = self._resolved_obstacle_id(
+        self.pending_traverse_id = self._action_semantic_id(
             target,
             self.locked_obstacle_id or self._current_obstacle_id(now),
         )
@@ -2623,14 +2774,15 @@ class AutonomousMission(Node):
         self._reject_traversal_completion(
             completed_id,
             completed_position,
-            "controller result/ROS Action status did not prove success",
+            "controller result/ROS Action status did not prove success"
+            + (f" ({controller_message})" if controller_message else ""),
         )
 
     def _reject_traversal_completion(self, semantic_id, position, reason: str) -> None:
         """Keep an unverified obstacle pending and schedule a bounded later retry."""
         now = time.monotonic()
         self.traversal_verification = None
-        self._defer_obstacle_revisit(str(semantic_id), now)
+        self._penalize_obstacle_revisit(str(semantic_id), now)
         if position is not None:
             self.blocked_obstacles.append((
                 float(position[0]),
@@ -2641,7 +2793,7 @@ class AutonomousMission(Node):
         self.cooldown_until = now + float(self.params["nav_failure_retry_delay"])
         self.state = "RECOVERY"
         self._publish_state(
-            f"traversal not counted: {reason}; obstacle remains pending"
+            f"traversal not counted: {reason}; obstacle remains pending with backoff"
         )
 
     def _confirm_traversal_completion(
@@ -2736,6 +2888,12 @@ class AutonomousMission(Node):
 
     def _tick(self):
         self.state_pub.publish(String(data=self.state))
+        # 20 Hz 速度门只接受新鲜许可；任务崩溃、Ctrl-C 或离开 return_home 后最多一个
+        # 心跳窗口便恢复默认拒绝。许可本身不携带速度，只允许从 Nav2 命令提取纯 yaw。
+        self.return_rotation_pub.publish(Bool(data=bool(
+            self.nav_purpose == "return_home"
+            and (self.nav_handle is not None or self.nav_send_pending)
+        )))
         self._publish_inventory()
         if not self.enabled:
             return
@@ -2884,9 +3042,16 @@ class AutonomousMission(Node):
         # 完成八项后立即去终点；达到总任务时限也会携带已完成成绩结束，避免无前沿时
         # 永远原地等待。默认终点是本次任务实时捕获的起点；若 /autonomy/finish_pose
         # 提供正式终点则优先使用它。两种情况都不读取仿真 world。
-        mission_timed_out = now - self.mission_started >= float(
-            self.params["mission_timeout"]
+        mission_elapsed = now - self.mission_started
+        # ``mission_timeout`` 是“启动到回到终点”的总预算，不是可以全部用于探索的时间。
+        # 提前保留返程窗口，防止直到 300 秒才开始回头。正在执行的 TraverseObstacle
+        # 不会被硬切断；它完成独立落地验证后，下一 tick 立即进入返程。
+        work_deadline = max(
+            0.0,
+            float(self.params["mission_timeout"])
+            - float(self.params["return_time_reserve"]),
         )
+        mission_timed_out = mission_elapsed >= work_deadline
         if (
             self._all_obstacles_complete()
             or mission_timed_out
@@ -2912,7 +3077,9 @@ class AutonomousMission(Node):
             elif self.exploration_exhausted:
                 reason = "bounded exploration complete"
             else:
-                reason = "mission time limit reached"
+                reason = (
+                    f"return reserve reached after {mission_elapsed:.0f} seconds"
+                )
             destination = "configured finish" if self.finish_pose is not None else "start/finish"
             self._publish_state(f"{reason}; navigating to {destination}")
             return
@@ -2939,10 +3106,15 @@ class AutonomousMission(Node):
                 obstacle_position = (
                     self.locked_obstacle_position or self._obstacle_position(target)
                 )
-                handoff_id = self._resolved_obstacle_id(
+                live_handoff_id = self._resolved_obstacle_id(
                     target,
                     self.locked_obstacle_id
                     or self._current_obstacle_id(now),
+                )
+                handoff_id = (
+                    live_handoff_id
+                    if is_actionable_semantic_id(live_handoff_id)
+                    else self._known_semantic_at_guidance(target)
                 )
                 if not is_actionable_semantic_id(handoff_id):
                     # Geometry says the robot is at an obstacle boundary,
@@ -2964,7 +3136,15 @@ class AutonomousMission(Node):
                     target, handoff_id, obstacle_position, now
                 )
                 self._cancel_nav("handoff")
-                self._publish_state("READY confirmed; cancelling Nav2 before handoff")
+                identity_source = (
+                    "live semantic"
+                    if is_actionable_semantic_id(live_handoff_id)
+                    else "pending map-position ledger"
+                )
+                self._publish_state(
+                    "READY confirmed from " + identity_source
+                    + "; cancelling Nav2 before handoff"
+                )
                 return
             if target.phase in (TraversalGuidance.PHASE_APPROACH, TraversalGuidance.PHASE_ALIGN):
                 approach = self._relative_approach_pose(target)
@@ -3015,7 +3195,7 @@ class AutonomousMission(Node):
                         float(self.params["pre_alignment_trigger_angle"]),
                         float(self.params["pre_alignment_max_step"]),
                     )
-                    pre_alignment_id = self._resolved_obstacle_id(
+                    pre_alignment_id = self._action_semantic_id(
                         target,
                         self.locked_obstacle_id
                         or self._current_obstacle_id(now),
@@ -3037,7 +3217,7 @@ class AutonomousMission(Node):
                         )
                         return
                     if robot_to_goal < float(self.params["minimum_approach_goal_distance"]):
-                        semantic_id = self._resolved_obstacle_id(
+                        semantic_id = self._action_semantic_id(
                             target,
                             self.locked_obstacle_id
                             or self._current_obstacle_id(now),

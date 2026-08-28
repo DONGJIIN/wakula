@@ -56,11 +56,15 @@ Action 成功也不能声称真机已经具备越障能力。
    最新观测仍属于同一 map 入口、粗类型兼容、距离不大于 2.10 m、横偏和航向均在门限内，
    才转交 TraverseObstacle，让真机控制器完成最后一段低速接近和越障；任一守卫不满足，
    就同时冷却语义记录和空间入口并选择其他目标。即使当前只有通用 STEP/WALL、没有唯一
-   障碍名，也会冷却空间入口，禁止每 5 秒重复提交同一不可达点。入口已到达但越障 Action
-   服务端未就绪时最多等待 5 秒，之后同样保留待办并继续探索，不能永久卡在障碍前。
-   八项全部完成或任务超时后用 Nav2 去终点；若没有前沿、覆盖目标或可执行待办，则每次
+   障碍名，也会先尝试把当前粗类型和 map 位置匹配到此前多帧确认的待办记录；只有类型兼容
+   且位置误差不超过 0.90 m 才复用 ID。每次回访按 8/16/32/64 秒退避，到达观察位但没有
+   重新识别也不会清零，因而一个旧入口不会反复抢占整场任务。入口已到达但越障 Action 服务端
+   未就绪时最多等待 5 秒，之后同样保留待办并继续探索，不能永久卡在障碍前。
+   八项全部完成或到达返程时间后用 Nav2 去终点；若没有前沿、覆盖目标或可执行待办，则每次
    原地转 90° 补扫，最多 8 次（两圈）后携带当前清单返回终点。默认终点是自主任务启动时
-   捕获的实时起点。
+   捕获的实时起点。默认总预算 300 秒，前 240 秒可探索/越障、最后 60 秒保留返程；正在执行
+   的 Action 不会被时钟硬切断，返程失败也会继续安全恢复。终端和 /autonomy/progress 同时
+   输出 elapsed_seconds 与 budget_remaining_seconds，调比赛节奏时先看实际各阶段耗时。
    正式终点不同可由外部赛务模块发布 map 坐标 /autonomy/finish_pose，核心算法不读取 world。
 
 2. quadruped_perception
@@ -444,6 +448,31 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
 
    真机运动组必须提供 `/traverse_obstacle` Action 服务端；没有服务端时任务只会等待，不会
    生成腿部动作。目标仓库仍负责 Action 控制权仲裁、接触/姿态闭环和硬件急停。
+
+   默认 `autonomous_mission.yaml` 使用 300 秒总预算和 60 秒返程预留。真机场地、步态速度或
+   规则时限变化时，应先用 rosbag/任务日志统计“自由空间导航、识别对正、单项 Action、返程”
+   四类耗时，再调整 mission_timeout/return_time_reserve；后者必须小于前者。不要为抢时间
+   删除语义、空间、横偏、航向或完成后验守卫。Gazebo 的 duration_scale 只压缩无腿替身时间，
+   真机 Action 用接触、姿态和落地稳定判据决定何时结束。
+
+   若返程日志反复出现 return_home made no pose progress，同时 terrain mode=CLIMB/STOP、
+   `/cmd_vel_smoothed` 是“小线速度 + yaw”而最终 `/cmd_vel` 为零，先检查
+   stopped_rotation_linear_tolerance。默认 0.12 m/s 用于接纳 DWB 约 0.10 m/s 的转向主导
+   请求，速度门随后强制 linear=0、只保留有界 yaw。真机若正常转向附带值更小可下调；绝不
+   通过增大该参数开放障碍前线速度，修改后必须复测 360° 雷达急停和人工停止。
+   若最终 `/cmd_vel` 与 `/cmd_vel_smoothed` 都为零并且 return_home 恰好每 5 秒被取消，说明
+   任务层打断了 Nav2 行为树恢复；返程专用 return_nav_stall_timeout 默认 20 秒，探索仍为
+   5 秒。真机先观察 Spin/BackUp 何时开始，再调整该值，不要关闭 Nav2 碰撞检查。
+   若窗口已经延长但 `/cmd_vel_smoothed` 是较大线速度叠加 yaw、`/terrain/speed_limit=0`、
+   最终 `/cmd_vel` 仍全零，应检查 `/navigation/return_rotation_recovery`。任务在 return_home
+   活跃时以 4 Hz 发布 true；速度门只提取最大 0.30 rad/s yaw并强制 linear=0，0.8 秒未收到
+   心跳立即失效。该许可的目的只是先转开正前方旧障碍，限速恢复后仍由 Nav2 正常平移；
+   禁止在真机上把它改成线速度旁路，修改后要复测雷达急停、感知断流和 Ctrl-C 停车。
+
+   对“几何成立但名称有歧义”的目标，四次换视角现在按机器人 map 驻留点计数，不按会随
+   相机朝向移动的桥/坡/坑最近前缘计数。若日志在同一位置仍反复从 1/4 开始，先检查
+   map->base_link 是否跳变，再按真实定位噪声调整 semantic_verification_lock_radius；不要
+   单纯增加最大尝试次数，否则会消耗比赛预算。四次耗尽后本轮看到的各前缘会一起短暂冷却。
 
 6. 真机分阶段调试流程
 

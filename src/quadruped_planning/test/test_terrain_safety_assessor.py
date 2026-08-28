@@ -7,6 +7,7 @@ from sensor_msgs.msg import LaserScan
 from quadruped_planning.cmd_vel_gate import (
     alignment_twist,
     gated_twist,
+    has_finite_yaw_request,
     is_pure_rotation_request,
     scan_allows_command,
 )
@@ -621,12 +622,24 @@ def test_alignment_twist_never_preserves_translation():
     assert alignment_twist(command, 0.0).angular.z == 0.0
 
 
-def test_only_pure_yaw_can_escape_a_zero_speed_limit():
+def test_rotation_dominant_dwb_command_can_escape_a_zero_speed_limit():
     command = Twist()
     command.angular.z = 0.5
     assert is_pure_rotation_request(command)
     command.linear.x = 0.10
-    assert not is_pure_rotation_request(command)
+    assert is_pure_rotation_request(command)
+    # The permission classifier may accept DWB's small arc request, but the actual
+    # STOP-mode output always drops translation before reaching the robot.
+    assert alignment_twist(command, 0.3).linear.x == 0.0
+    assert not is_pure_rotation_request(command, 0.02)
+    # Return recovery may inspect the yaw from a larger DWB arc, but its eventual
+    # output still passes through alignment_twist and therefore remains pure yaw.
+    command.linear.x = 0.40
+    command.angular.z = -0.61
+    assert has_finite_yaw_request(command)
+    recovered = alignment_twist(command, 0.30)
+    assert recovered.linear.x == 0.0
+    assert recovered.angular.z == -0.30
     command.linear.x = 0.0
     command.linear.y = 0.03
     assert not is_pure_rotation_request(command, 0.02)

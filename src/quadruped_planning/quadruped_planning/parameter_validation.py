@@ -22,7 +22,7 @@ SPEED_GATE_PARAMETER_NAMES = (
     "navigation_health_timeout", "default_speed_limit", "scan_topic", "scan_timeout",
     "emergency_stop_distance", "emergency_sector_half_angle",
     "alignment_guidance_timeout", "alignment_max_angular_speed",
-    "stopped_rotation_linear_tolerance",
+    "stopped_rotation_linear_tolerance", "return_rotation_recovery_timeout",
 )
 
 
@@ -150,7 +150,7 @@ def validate_speed_gate_parameters(values: Mapping[str, object]) -> None:
     for name in (
         "command_timeout", "assessment_timeout", "navigation_health_timeout",
         "scan_timeout", "emergency_stop_distance", "alignment_guidance_timeout",
-        "alignment_max_angular_speed",
+        "alignment_max_angular_speed", "return_rotation_recovery_timeout",
     ):
         _positive(values, name, errors)
     _unit(values, "default_speed_limit", errors)
@@ -201,10 +201,22 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
         errors.append("post_traversal_stable_duration must be below verification timeout")
     for name in (
         "map_timeout", "guidance_timeout", "goal_timeout", "traversal_timeout",
-        "controller_wait_timeout", "nav_stall_timeout", "mission_timeout",
-        "front_name_timeout", "inventory_log_period",
+        "controller_wait_timeout", "nav_stall_timeout", "return_nav_stall_timeout",
+        "mission_timeout",
+        "return_time_reserve", "front_name_timeout", "inventory_log_period",
+        "obstacle_revisit_max_cooldown",
     ):
         _positive(values, name, errors)
+    mission_timeout = _number(values, "mission_timeout", errors)
+    return_reserve = _number(values, "return_time_reserve", errors)
+    if return_reserve >= mission_timeout:
+        errors.append("return_time_reserve must be below mission_timeout")
+    revisit_cooldown = _number(values, "obstacle_revisit_cooldown", errors)
+    revisit_maximum = _number(values, "obstacle_revisit_max_cooldown", errors)
+    if revisit_maximum < revisit_cooldown:
+        errors.append(
+            "obstacle_revisit_max_cooldown must be >= obstacle_revisit_cooldown"
+        )
     for name in (
         "minimum_alignment_command_angle", "pre_alignment_trigger_angle",
         "pre_alignment_max_step", "handoff_alignment_tolerance",

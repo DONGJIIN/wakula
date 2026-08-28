@@ -189,6 +189,10 @@ class SimTraverseObstacle(Node):
         # B 桥 5.70 m 的全长，否则从桥侧接近会把测试模型直接移出 6 m 宽赛场。
         self.declare_parameter("wooden_bridge_unknown_duration", 14.0)
         self.declare_parameter("t_shaped_stairs_duration", 16.0)
+        # 参考时长按 0.20 m/s 写成；仿真任务回归使用 0.75 倍时间，相当于约
+        # 0.27 m/s 的平滑位姿更新，可把八项 Action 总时长从约 116 秒压到约 87 秒。
+        # 该系数只加速无腿 Gazebo 替身，不进入 SLAM/自主算法，也不能用于估算真机步态。
+        self.declare_parameter("duration_scale", 0.75)
         self.declare_parameter("stabilize_duration", 0.6)
         self.declare_parameter("model_name", "generic_quadruped")
         self.declare_parameter(
@@ -333,7 +337,11 @@ class SimTraverseObstacle(Node):
             }.get(str(handle.request.obstacle_id))
             if semantic_duration:
                 duration_parameter = semantic_duration
-            duration = max(0.5, float(self.get_parameter(duration_parameter).value))
+            duration = max(
+                0.5,
+                float(self.get_parameter(duration_parameter).value)
+                * max(0.10, float(self.get_parameter("duration_scale").value)),
+            )
             speed = max(0.03, min(0.25, float(self.get_parameter("forward_speed").value)))
             if self.latest_odom is None:
                 result.success = False

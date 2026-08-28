@@ -75,12 +75,14 @@ def alignment_twist(source: Twist, angular_limit: float) -> Twist:
     return output
 
 
-def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.02) -> bool:
-    """识别 Nav2 的原地转向请求，供停车状态安全脱困。
+def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.12) -> bool:
+    """识别 Nav2 的转向主导请求，供停车状态安全脱困。
 
     当前方障碍不具备稳定比赛语义时，引导层不会进入 ``ALIGN``；若速度门又把所有 yaw
-    一并归零，机器人就永远保持同一视角，无法转身探索其他方向。这里只接受几乎为零
-    的平移且确有 yaw 的命令，后续仍经过导航健康、超时、外部停车和 360° 雷达急停。
+    一并归零，机器人就永远保持同一视角，无法转身或返回。DWB 常把期望原地转向写成
+    小线速度 + yaw（实测约 0.10 m/s + 0.20 rad/s）；这里允许该输入进入
+    ``alignment_twist``，但输出会强制丢弃全部平移，只保留有界 yaw。后续仍经过导航
+    健康、超时、外部停车和 360° 雷达急停，绝不允许借此继续靠近障碍。
     """
     tolerance = max(0.0, float(linear_tolerance))
     return bool(
@@ -89,6 +91,17 @@ def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.02) -> b
         and abs(float(source.linear.z)) <= tolerance
         and abs(float(source.angular.z)) > 1e-4
     )
+
+
+def has_finite_yaw_request(source: Twist, minimum_magnitude: float = 1e-3) -> bool:
+    """Return true only for a finite, non-trivial Nav2 yaw request.
+
+    During an explicitly heartbeated return recovery the DWB command may still carry
+    a large forward component. The caller may inspect its yaw, but must pass it through
+    :func:`alignment_twist`, which discards every linear component.
+    """
+    yaw = float(source.angular.z)
+    return isfinite(yaw) and abs(yaw) >= max(0.0, float(minimum_magnitude))
 
 
 def scan_allows_command(
@@ -152,7 +165,10 @@ class NavigationSpeedGate(Node):
         self.declare_parameter("require_emergency_scan", True)
         self.declare_parameter("alignment_guidance_timeout", 0.8)
         self.declare_parameter("alignment_max_angular_speed", 0.30)
-        self.declare_parameter("stopped_rotation_linear_tolerance", 0.02)
+        self.declare_parameter("stopped_rotation_linear_tolerance", 0.12)
+        # /navigation/return_rotation_recovery 由独立自主任务以 4 Hz 刷新；若进程崩溃，
+        # 0.8 秒后许可自动失效，不能留下永久旋转旁路。
+        self.declare_parameter("return_rotation_recovery_timeout", 0.8)
 
         validate_speed_gate_parameters(
             {name: self.get_parameter(name).value for name in SPEED_GATE_PARAMETER_NAMES}
@@ -221,6 +237,8 @@ class NavigationSpeedGate(Node):
         self.last_scan_time = None
         self.alignment_requested = False
         self.last_guidance_time = None
+        self.return_rotation_requested = False
+        self.last_return_rotation_time = None
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
@@ -251,6 +269,12 @@ class NavigationSpeedGate(Node):
             TraversalGuidance,
             "/traversal/guidance",
             self.guidance_callback,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            "/navigation/return_rotation_recovery",
+            self.return_rotation_callback,
             10,
         )
         self.timer = self.create_timer(0.05, self.publish_safe_command)
@@ -291,6 +315,11 @@ class NavigationSpeedGate(Node):
         )
         self.last_guidance_time = self.get_clock().now()
 
+    def return_rotation_callback(self, msg: Bool) -> None:
+        """Cache the task-layer heartbeat that permits yaw-only return recovery."""
+        self.return_rotation_requested = bool(msg.data)
+        self.last_return_rotation_time = self.get_clock().now()
+
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
@@ -310,6 +339,11 @@ class NavigationSpeedGate(Node):
             float("inf")
             if self.last_guidance_time is None
             else (now - self.last_guidance_time).nanoseconds / 1e9
+        )
+        return_rotation_age = (
+            float("inf")
+            if self.last_return_rotation_time is None
+            else (now - self.last_return_rotation_time).nanoseconds / 1e9
         )
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
@@ -332,11 +366,21 @@ class NavigationSpeedGate(Node):
             self.latest_cmd,
             float(self.get_parameter("stopped_rotation_linear_tolerance").value),
         )
+        return_rotation_fresh = return_rotation_age <= max(
+            0.1,
+            float(self.get_parameter("return_rotation_recovery_timeout").value),
+        )
+        return_rotation_requested = bool(
+            self.return_rotation_requested
+            and return_rotation_fresh
+            and has_finite_yaw_request(self.latest_cmd)
+        )
         if (
             self.speed_limit <= 0.0
             and (
                 (self.alignment_requested and alignment_fresh)
                 or safe_rotation_requested
+                or return_rotation_requested
             )
             and command_age <= self.command_timeout
             and assessment_age <= self.assessment_timeout

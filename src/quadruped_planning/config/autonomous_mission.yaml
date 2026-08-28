@@ -8,8 +8,9 @@
 # 现象 -> 优先参数 -> 调整方向：
 # 1. 低速真机被误判“5 秒卡死”：先确认 map 位姿真的没变；再增大 nav_stall_timeout 或
 #    减小 nav_progress_translation/rotation。阈值过小会把定位噪声误当进展而永不恢复。
-# 2. 同一障碍反复重试：增大 obstacle_failure_cooldown/revisit_cooldown 或 failure_radius；
-#    半径过大会屏蔽旁边的另一障碍。先查看日志中的 distance/lateral/heading 失败原因。
+# 2. 同一障碍反复重试：先查清是语义、路径还是入口门限失败；再增大
+#    obstacle_failure_cooldown、obstacle_revisit_cooldown/max_cooldown 或 failure_radius。
+#    半径过大会屏蔽旁边的另一障碍，最大冷却过大会让真实目标过晚重试。
 # 3. Nav2 停在膨胀层却不移交：核对语义和空间锁，再按真实控制器可接近距离调整
 #    approach_stall_handoff_max_distance；增大它意味着越障控制器必须接管更长的低速接近。
 #    绝不能为了“能动”而删除语义、横偏、航向或空间一致性守卫。
@@ -25,7 +26,7 @@
 # 8. 探索漏区域：减小 frontier_minimum_cells/coverage_goal_spacing 或增加 search turns；代价是
 #    目标更多、任务更慢。frontier/coverage 参数只基于在线地图，不应加入正式场地坐标。
 # 9. 无目标太早回起点：增大 maximum_search_turns/empty_frontier_confirmations；任务总时长
-#    仍受 mission_timeout 限制。比赛时长确定后必须按规则重设该上限。
+#    仍受 mission_timeout 限制。return_time_reserve 是其中只留给返程的窗口，不能大于总时长。
 #
 # 调参顺序：5 秒进展判据 -> 入口空间/航向 -> Action 成功后验 -> 冷却 -> 探索覆盖。
 autonomous_mission:
@@ -112,8 +113,8 @@ autonomous_mission:
     # 0.30 rad 与 Nav2 最小有效旋转一致；交替视角的第三次可覆盖约 50° 的坡侧误差。
     semantic_verification_turn_angle: 0.30
     semantic_verification_max_attempts: 4
-    # 点云换视角时障碍前缘可沿长结构移动超过普通入口锁半径。验证计数使用更大的
-    # 独立半径，确保四次失败后真正让路，而不是因前缘漂移每次又从 1/4 开始。
+    # 换视角序列按机器人驻留点而不是会漂移的障碍前缘计数；该半径表示位姿移动多远
+    # 才算真正的新观察站。过大会合并相邻观察站，过小会在同一地点重复 1/4。
     semantic_verification_lock_radius: 1.50
     # 原地换视角结束后等待至少六帧 5 Hz 深度数据，禁止使用旋转残影立即交接。
     semantic_post_turn_settle_time: 1.20
@@ -134,6 +135,9 @@ autonomous_mission:
     obstacle_revisit_position_tolerance: 0.30
     # 一次回访后给感知/地图 8 秒更新，同时允许先探索其他方向，避免在单一误检处循环。
     obstacle_revisit_cooldown: 8.0
+    # 每次回访按 8/16/32/64 秒退避；到达旧观察位但没重新识别也算一次尝试。
+    # 真机目标恢复后迟迟不重试可减小上限；过小会让旧记录反复抢占任务。
+    obstacle_revisit_max_cooldown: 64.0
     # 无前沿不是结束条件：连续约 1 秒无候选后原地转 90° 补扫，四次补扫后重新尝试
     # 暂时失败的前沿；达到下面的补扫上限仍无新目标，才携带当前清单返回终点。
     empty_frontier_confirmations: 4
@@ -143,12 +147,17 @@ autonomous_mission:
     # Nav2 Action 尚未结束但 map 位姿连续 5 秒既没有 8 cm 平移，也没有 0.10 rad 转动，
     # 视为局部停滞并取消重规划，避免表现成“自动导航走到一半自己停下”。
     nav_stall_timeout: 5.0
+    # 返程只有一个终点，允许 Nav2 行为树用 20 秒执行 Spin/BackUp/重规划；普通探索仍保持
+    # 5 秒快速切换。过小会在恢复动作前取消，过大则延迟真正失联的诊断。
+    return_nav_stall_timeout: 20.0
     nav_progress_translation: 0.08
     nav_progress_rotation: 0.10
     # 自主导航终端每 5 秒显示一次已越过/未越过清单，清单变化时立即显示。
     inventory_log_period: 5.0
-    # 规则比赛时长尚可能调整；该软件上限保证异常时仍会携带已有清单前往终点。
-    mission_timeout: 900.0
+    # 总预算 300 秒，从捕获启动位姿开始计时。前 240 秒探索/越障，最后 60 秒开始返程；
+    # 正在执行的越障不会被强制中断，返程遇阻也会继续安全重试而不是到点原地停车。
+    mission_timeout: 300.0
+    return_time_reserve: 60.0
     return_home_tolerance: 0.40
     front_name_timeout: 1.2
     expected_obstacle_ids:
