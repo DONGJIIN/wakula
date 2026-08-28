@@ -34,6 +34,7 @@ from quadruped_planning.autonomous_mission import (
     semantic_vote_is_confirmed,
     select_full_semantic_vote,
     select_semantic_vote,
+    semantic_after_approach_stall,
     target_is_in_heading_cone,
     timeout_reached,
     traversal_crossing_evidence,
@@ -379,6 +380,31 @@ def test_five_second_watchdog_uses_monotonic_deadline():
     assert not timeout_reached(10.0, 15.0, 0.0)
 
 
+def test_stall_preserves_confirmed_identity_only_for_same_compatible_entry():
+    """Near-field BAR/STEP flicker must not restart the same height-bar approach loop."""
+    assert semantic_after_approach_stall(
+        "height_bar",
+        "high_wall",
+        TraverseObstacle.Goal.OBSTACLE_STEP,
+        True,
+    ) == "height_bar"
+    # Spatial disagreement means a neighboring obstacle may use its own live identity,
+    # but must never inherit the old height-bar label.
+    assert semantic_after_approach_stall(
+        "height_bar",
+        "high_wall",
+        TraverseObstacle.Goal.OBSTACLE_WALL,
+        False,
+    ) == "high_wall"
+    # An incompatible coarse type invalidates the original lock.
+    assert semantic_after_approach_stall(
+        "right_angle_poles",
+        "",
+        TraverseObstacle.Goal.OBSTACLE_STEP,
+        True,
+    ) == ""
+
+
 def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     """Protect the operator-requested five-second recovery and finite search defaults."""
     from pathlib import Path
@@ -392,6 +418,7 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["nav_stall_timeout"] == 5.0
     assert params["controller_wait_timeout"] == 5.0
     assert params["approach_stall_handoff_count"] == 1
+    assert params["approach_stall_handoff_max_distance"] == 2.10
     assert params["maximum_search_turns"] == 8
     assert params["inventory_log_period"] == 5.0
 

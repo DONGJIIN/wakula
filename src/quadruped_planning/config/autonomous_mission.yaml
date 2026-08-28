@@ -46,7 +46,9 @@ autonomous_mission:
     approach_stall_handoff_count: 1
     # 若 Nav2 连续停在更远的膨胀边界，允许把“最后一段接近”也交给 TraverseObstacle。
     # Action 目标携带实测 entry_distance，真机控制器仍须自行完成低速接近和姿态闭环。
-    approach_stall_handoff_max_distance: 1.85
+    # 2.10 m 仍位于当前 2.5 m 地形 ROI 内，并要求横偏/航向/语义/空间锁全部通过；
+    # 这允许真实越障控制器接管最后一段低速接近，避免 Nav2 膨胀层停在 1.9~2.0 m 时循环。
+    approach_stall_handoff_max_distance: 2.10
     approach_stall_handoff_max_lateral: 0.75
     approach_stall_handoff_max_heading_error: 0.18
     # 连续停滞但没有通过越障交接门限的入口先短暂让路，避免无限重试同一假目标。

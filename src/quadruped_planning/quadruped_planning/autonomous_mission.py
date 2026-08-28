@@ -218,6 +218,34 @@ def semantic_id_for_action(candidate: str, obstacle_type: int) -> str:
     return ""
 
 
+def semantic_after_approach_stall(
+    initial_id: str,
+    live_id: str,
+    obstacle_type: int,
+    spatial_match: bool,
+) -> str:
+    """Keep a confirmed obstacle identity through near-field classifier flicker.
+
+    The far/medium-range view is usually the best semantic view.  At the Nav2 inflation
+    boundary a crossbar may be cropped to one post, or a wall edge may look like a step.
+    Throwing away the identity captured when the approach goal was created caused the
+    mission to cancel and immediately approach the same physical entry forever.
+
+    Preservation is deliberately conditional: the live observation must still project to
+    the same map entry and its coarse action type must remain compatible.  A nearby but
+    different obstacle therefore cannot inherit the old identity.
+    """
+    initial_id = str(initial_id)
+    live_id = str(live_id)
+    if (
+        bool(spatial_match)
+        and is_actionable_semantic_id(initial_id)
+        and semantic_id_for_action(initial_id, int(obstacle_type)) == initial_id
+    ):
+        return initial_id
+    return live_id if is_actionable_semantic_id(live_id) else ""
+
+
 def action_type_for_semantic(semantic_id: str, fallback: int) -> int:
     """把已锁定比赛语义映射为稳定 Action 粗类型。
 
@@ -1166,7 +1194,10 @@ class AutonomousMission(Node):
             # Nav2 may stop at the inflation boundary before the nominal 1.20 m
             # handoff.  A repeated stall may transfer the remaining approach to
             # TraverseObstacle, whose goal carries the measured entry distance.
-            "approach_stall_handoff_max_distance": 1.85,
+            # 当前地形 ROI 到 2.5 m；在空间、横偏、航向和语义守卫同时成立时，允许
+            # 越障控制器从 2.10 m 内接管最后一段低速接近。否则 Nav2 的膨胀边界可能
+            # 恰好停在 1.9~2.0 m，使任务虽看清障碍却永远够不到名义入口。
+            "approach_stall_handoff_max_distance": 2.10,
             "approach_stall_handoff_max_lateral": 0.75,
             "approach_stall_handoff_max_heading_error": 0.18,
             # 入口连续停滞却不满足越障交接门限时，短暂忽略同一 map 位置，先探索其他
@@ -1324,6 +1355,7 @@ class AutonomousMission(Node):
         # approach goal 与其来源障碍绑定；Nav2 成功后用于交叉验证，防止前缘/类别抖动
         # 让严格 READY 漏报，也防止把相邻障碍误交给越障控制器。
         self.nav_obstacle_position = None
+        self.nav_obstacle_id = ""
         self.nav_retry_until = 0.0
         # 只累计“同一语义障碍的入口导航停滞”。前沿失败、类别改变、成功越障或人工
         # 停止都会清零，避免把互不相关的两次 Nav2 失败拼成一次越障许可。
@@ -1580,6 +1612,41 @@ class AutonomousMission(Node):
             record.retry_after = float(now) + float(
                 self.params["obstacle_revisit_cooldown"]
             )
+
+    def _known_semantic_at_guidance(self, msg) -> str:
+        """Recover a previously confirmed name for the same physical entry.
+
+        Close to an obstacle, the depth camera may only see a tread or one post and the
+        live classifier can legitimately fall back to a generic STEP/WALL/BAR label.
+        The mission ledger already stores the map position of every uniquely confirmed
+        competition obstacle.  Reusing that identity is safe only when all three guards
+        hold: the record is still pending, its map position is close to the current
+        geometry, and the current coarse Action type is compatible with that identity.
+
+        This is deliberately independent of Gazebo model names and rule-map coordinates;
+        on hardware the record is created from the same online camera/point-cloud data.
+        """
+        position = self._obstacle_position(msg)
+        if position is None:
+            return ""
+        coarse_type = action_obstacle_type(msg)
+        maximum_distance = float(self.params["handoff_fallback_spatial_tolerance"])
+        candidates = []
+        for semantic_id, record in self.observed_obstacles.items():
+            if semantic_id in self.completed_semantics:
+                continue
+            distance = hypot(
+                float(position[0]) - float(record.obstacle_x),
+                float(position[1]) - float(record.obstacle_y),
+            )
+            if (
+                distance <= maximum_distance
+                and semantic_id_for_action(semantic_id, coarse_type) == semantic_id
+            ):
+                candidates.append((distance, semantic_id))
+        # Two records within exactly the same tolerance are unlikely in the published
+        # field, but choosing the nearest keeps the rule deterministic for unknown maps.
+        return min(candidates)[1] if candidates else ""
 
     def _geometry_supports_obstacle_id(
         self,
@@ -2039,8 +2106,29 @@ class AutonomousMission(Node):
         self.nav_progress_time = time.monotonic()
         if purpose == "approach" and guidance is not None:
             self.nav_obstacle_position = self._obstacle_position(guidance)
+            # 冻结“创建接近目标时”已经通过多帧和几何校验的语义。接近碰撞膨胀边界后，
+            # 局部点云常在 BAR/WALL/STEP 间变化；result 回调只能在空间和粗类型仍一致时
+            # 使用该 ID，不能把它无条件套给相邻结构。
+            locked_id = canonical_obstacle_id(self.locked_obstacle_id)
+            resolved_id = (
+                locked_id
+                if is_actionable_semantic_id(locked_id)
+                else self._resolved_obstacle_id(
+                    guidance,
+                    self._current_obstacle_id(),
+                )
+            )
+            # A pending ledger record bridges a short near-field semantic dropout.  It
+            # never bypasses the live spatial/type/distance/alignment gates in
+            # ``_nav_result``; it only preserves which obstacle those gates refer to.
+            self.nav_obstacle_id = (
+                resolved_id
+                if is_actionable_semantic_id(resolved_id)
+                else self._known_semantic_at_guidance(guidance)
+            )
         elif purpose != "approach":
             self.nav_obstacle_position = None
+            self.nav_obstacle_id = ""
         future = self.nav_client.send_goal_async(goal)
         future.add_done_callback(self._nav_goal_response)
 
@@ -2058,6 +2146,7 @@ class AutonomousMission(Node):
             # 路径规划失败，不能污染 blocked_frontiers；短暂退避后原目标可重新选择。
             self.nav_target = None
             self.nav_obstacle_position = None
+            self.nav_obstacle_id = ""
             self._defer_obstacle_revisit(self.nav_revisit_id, time.monotonic())
             self.nav_revisit_id = ""
             self.nav_purpose = ""
@@ -2082,9 +2171,11 @@ class AutonomousMission(Node):
         revisit_id = self.nav_revisit_id
         cancel_reason = self.nav_cancel_reason
         obstacle_position = self.nav_obstacle_position
+        approach_initial_id = self.nav_obstacle_id
         self.nav_handle, self.nav_target, self.nav_cancel_pending = None, None, False
         self.nav_progress_pose = None
         self.nav_obstacle_position = None
+        self.nav_obstacle_id = ""
         self.nav_revisit_id = ""
         self.nav_cancel_reason = ""
         succeeded = status == GoalStatus.STATUS_SUCCEEDED
@@ -2154,12 +2245,19 @@ class AutonomousMission(Node):
             # obstacle_position 可能因此移动近 1 m；任务锁保存了持续低通后的同一入口，
             # 应以它做交叉验证，而不是永远拿第一帧边缘与最后一帧中心比较。
             entry_reference = self.locked_obstacle_position or obstacle_position
-            same_entry = (
+            # Keep spatial identity separate from the nominal close-handoff envelope.
+            # A robot stopped at the costmap inflation boundary may still be 1.9~2.0 m
+            # away; using the old 1.45 m distance gate as the identity gate would discard
+            # the frozen semantic before the wider guarded-stall handoff can evaluate it.
+            spatial_match = (
                 latest_position is not None
                 and hypot(
                     latest_position[0] - entry_reference[0],
                     latest_position[1] - entry_reference[1],
                 ) <= float(self.params["handoff_fallback_spatial_tolerance"])
+            )
+            same_entry = (
+                spatial_match
                 and latest.distance
                 <= float(self.params["handoff_fallback_max_distance"])
                 and abs(latest.lateral_offset)
@@ -2169,7 +2267,7 @@ class AutonomousMission(Node):
                 status == GoalStatus.STATUS_CANCELED
                 and cancel_reason in ("stall", "approach_within_tolerance")
             )
-            semantic_id = (
+            live_semantic_id = (
                 self._resolved_obstacle_id(
                     latest,
                     self.locked_obstacle_id or self._current_obstacle_id(),
@@ -2177,11 +2275,28 @@ class AutonomousMission(Node):
                 if latest is not None
                 else ""
             )
-            if cancel_reason == "stall" and semantic_id:
-                if semantic_id == self.approach_stall_id:
+            semantic_id = semantic_after_approach_stall(
+                approach_initial_id,
+                live_semantic_id,
+                action_obstacle_type(latest) if latest is not None else 0,
+                spatial_match,
+            )
+            # Even if the live message vanished entirely, retain the initial ID for
+            # retry accounting only.  It may trigger cooldown, never Action handoff,
+            # because ``semantic_id`` above still requires current spatial evidence.
+            stall_tracking_id = (
+                semantic_id
+                or (
+                    approach_initial_id
+                    if is_actionable_semantic_id(approach_initial_id)
+                    else ""
+                )
+            )
+            if cancel_reason == "stall" and stall_tracking_id:
+                if stall_tracking_id == self.approach_stall_id:
                     self.approach_stall_count += 1
                 else:
-                    self.approach_stall_id = semantic_id
+                    self.approach_stall_id = stall_tracking_id
                     self.approach_stall_count = 1
             elif succeeded:
                 self.approach_stall_id = ""
@@ -2194,7 +2309,7 @@ class AutonomousMission(Node):
             repeated_stall_handoff = (
                 cancel_reason == "stall"
                 and semantic_id
-                and semantic_id == self.approach_stall_id
+                and stall_tracking_id == self.approach_stall_id
                 and self.approach_stall_count
                 >= int(self.params["approach_stall_handoff_count"])
                 and latest is not None
@@ -2226,12 +2341,16 @@ class AutonomousMission(Node):
                 return
             if (
                 cancel_reason == "stall"
-                and self.approach_stall_count
-                >= int(self.params["approach_stall_handoff_count"])
+                and (
+                    not stall_tracking_id
+                    or self.approach_stall_count
+                    >= int(self.params["approach_stall_handoff_count"])
+                )
             ):
-                # 同一入口已经满足“重复停滞”，但距离、横偏、航向或语义一致性没有通过
-                # 越障交接门。把最新/原入口短暂加入空间冷却，避免下一 tick 又提交完全
-                # 相同的不可达目标；机器人仍可选其他前沿，稍后再从新视角复核该位置。
+                # 同一入口已经停滞，但距离、横偏、航向或语义一致性没有通过越障交接门。
+                # “没有唯一语义”本身也必须进入本分支；否则计数无法绑定语义 ID，任务会
+                # 每 5 秒取消并立即重发同一 generic STEP/WALL 入口。把最新/原入口短暂
+                # 加入空间冷却，稍后从新视角复核，同时允许机器人先处理其他目标。
                 blocked = latest_position or obstacle_position
                 self.blocked_obstacles.append((
                     float(blocked[0]),
@@ -2240,12 +2359,23 @@ class AutonomousMission(Node):
                 ))
                 self.approach_stall_id = ""
                 self.approach_stall_count = 0
-                self.cooldown_until = time.monotonic() + float(
+                recovery_now = time.monotonic()
+                # 同一观察点不能在下一 tick 立刻被 pending-obstacle 分支再次选择。
+                # 给语义记录和空间入口同时加冷却，期间任务会尝试其他前沿/障碍；冷却
+                # 后再从新的位姿重新观察，而不是在原地重发完全相同的目标。
+                self._defer_obstacle_revisit(
+                    semantic_id or approach_initial_id,
+                    recovery_now,
+                )
+                self.cooldown_until = recovery_now + float(
                     self.params["nav_failure_retry_delay"]
                 )
                 self._publish_state(
-                    "repeated approach stall failed handoff gates; "
-                    "temporarily excluding this entry"
+                    "approach stalled and handoff gates remain unsafe; "
+                    f"distance={float(latest.distance) if latest is not None else -1.0:.2f}, "
+                    f"lateral={float(latest.lateral_offset) if latest is not None else 0.0:.2f}, "
+                    f"heading={float(latest.heading_error) if latest is not None else 0.0:.2f}; "
+                    "cooling this entry and selecting another action"
                 )
             # 到达旧入口后若最新证据已经属于另一个障碍，释放目标锁再探索，不能把新障碍
             # 的相对目标误套到旧入口，也不能永久锁死。

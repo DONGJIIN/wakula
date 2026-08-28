@@ -47,7 +47,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，260 项测试通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，261 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -195,8 +195,12 @@ wakula/
   `/traverse_obstacle`。只有 ROS Action 终态为 `SUCCEEDED`、控制器返回 `success=true`、实时
   TF 证明机体已越过所观测的入口平面且落地后连续稳定，才记录为已完成并选择下一前沿；
   任一证据失败均保留在待完成清单。自主任务终端每 5 秒以及清单变化时直接显示“已越过/
-  未越过”；Nav2 连续 5 秒无位姿进展或越障控制器 5 秒未就绪会放弃当前尝试、保留待办并
-  选择其他动作。无新目标时最多原地补扫两圈，然后携带当前清单返回启动点，避免无限停留。
+  未越过”；Nav2 连续 5 秒无位姿进展时会取消当前目标：普通探索目标加入临时黑名单后
+  重规划；障碍入口则保留接近前已确认的语义，并以实时空间、粗类型、距离、横偏和航向
+  复核，同一入口且在 2.10 m 安全包络内才移交越障控制器，否则冷却该入口并改选目标。
+  即使近场只能输出通用 STEP/WALL，也会进行空间冷却，不能每 5 秒重发同一目标。越障
+  控制器 5 秒未就绪同样保留待办并继续探索。无新目标时最多原地补扫两圈，然后携带当前
+  清单返回启动点，避免无限停留。
   算法不读取 Gazebo 模型名或 world 坐标。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、协方差
   和里程计突跳；跳变会锁存到连续稳定样本确认恢复，输入断流则重新发布 false。
@@ -364,9 +368,9 @@ Nav2 空载规划 → 低速运动 → 单障碍 Action → 自主任务与故�
 
 | 传感器 | 建议类型 | 大概位置（相对 `base_link`） | 安装姿态与用途 |
 |---|---|---|---|
-| 主雷达 | 360° 2D ToF 激光雷达，10 Hz 以上，室内有效距离 12 m 以上，直接发布 `LaserScan` | 机身顶部中心或略靠前：`x=0～+0.08 m`、`y≈0`、`z=+0.10～+0.15 m` | 扫描面水平，正方向对齐 `+x`；用于 SLAM、Nav2 和碰撞保护 |
-| 主相机 | 主动双目 RGB-D，深度端优先全局快门，水平视场约 80°～95°，近端深度不大于 0.3 m，USB 3 | 前脸中央：`x=+0.28～+0.32 m`、`y≈0`、`z=0～+0.06 m` | 光轴朝前并向下俯 `10°～15°`；用于 OpenCV、台阶/坡面高度和局部点云 |
-| 可选 3D 雷达 | 小型多线 3D ToF 雷达，输出 `PointCloud2` | 顶部中心，尽量接近主雷达位置并高于遮挡物 | 仅在 RGB-D 受强光或需要更远三维感知时增加；初版不是必需 |
+| 主雷达（性价比方案） | 360° 2D ToF；暗色目标有效距离至少 8 m、10 Hz 以上、角分辨率不大于 0.5°、精度约 3 cm，直接发布 `LaserScan`。推荐 RPLIDAR S2E 规格档 | 机身顶部中心或略靠前：`x=0～+0.08 m`、`y≈0`、`z=+0.10～+0.15 m` | 扫描面水平，正方向对齐 `+x`；优先选 Ethernet、IP65 及有 Jazzy/aarch64 驱动的版本 |
+| 主相机 | 主动双目 RGB-D；深度和 RGB 均优先全局快门，深度近端不大于 0.25 m、有效距离至少 3 m、水平 FOV 不小于 80°、最低 640×400@15 Hz、USB 3、支持 RGB/Depth 同步和 `PointCloud2`。推荐 Orbbec Gemini 2 L 规格档 | 前脸中央：`x=+0.28～+0.32 m`、`y≈0`、`z=0～+0.06 m` | 光轴朝前并向下俯 `10°～15°`；真机先用 640×400/480@15～30 Hz，算法仍限频 5 Hz |
+| 可选 3D 雷达（增强方案） | 360° 小型 3D ToF；近盲区不大于 0.2 m、垂直 FOV 至少 45°、10 Hz、点频至少 100k/s、Ethernet/PTP、IP65 以上。推荐 Livox Mid-360 规格档 | 顶部中心，尽量接近 2D 雷达位置并高于遮挡物 | 输出 `PointCloud2`，另经 `pointcloud_to_laserscan` 生成 `/scan`；适合强光、远距三维和 RGB-D 失效冗余 |
 
 除这两类传感器外，机身 IMU、关节编码器和足端接触仍要参与状态估计并生成可靠 `/odom`；
 雷达不能替代里程计。若暂时只装普通 RGB 相机，OpenCV 仍可提示障碍，但无法提供真实高度
@@ -390,19 +394,23 @@ Nav2 空载规划 → 低速运动 → 单障碍 Action → 自主任务与故�
 仓库通用 URDF 已在范围内采用一个便于 RViz 调试的名义值：`lidar_link=(0.04, 0, 0.12) m`，
 `camera_link=(0.29, 0, 0.03) m` 且向下俯 12°。真机完成后必须用实测值替换。
 
-当前方案优先推荐“一个 2D 雷达 + 一个主动双目 RGB-D”，无需一开始购买 3D 雷达。RGB-D
-可参考 Orbbec Gemini 2 一类设备：官方参数为主动双目、近端约 0.15 m、理想范围约
-0.2～5 m、USB 3 且深度在设备端处理，较适合近距离地形；若机器运动很快，应优先考虑
-RGB 和深度均为全局快门的型号。OAK-D Pro 一类设备也能在设备端计算主动双目深度，
-但其官方理想深度范围约从 0.8 m 起，购买前需确认近距离台阶是否满足要求。2D 雷达可从
-RPLIDAR S2、YDLIDAR/LDLiDAR 或 Hokuyo 的 ROS 2 兼容型号中选择；重点不是品牌，而是稳定
-`LaserScan`、有效时间戳、供电、重量、抗环境光和驱动对 Jazzy/aarch64 的支持。
-若计划在阳光直射环境运行，必须先实测主动红外深度有效率；不满足时再考虑室外双目或
-3D 激光雷达，不能只依据室内标称距离采购。
+采购优先级建议如下：预算和开发周期优先时采用 **RPLIDAR S2E + Orbbec Gemini 2 L**。
+S2E 官方规格档为 360°、10 Hz、32 ksample/s、0.1125°、Ethernet、IP65；比赛场地只有
+14 m × 6 m，其暗色目标 10 m 量程已经够用。Gemini 2 L 为主动双目，RGB/IR 全局快门，
+深度 0.2～10 m、H91°×V66°、1280×800@30 Hz、USB、144 g，适合运动中的近距离地形。
+若场地存在强日光、RGB-D 深度有效率不足，或希望一个雷达同时承担三维地形冗余，升级为
+**Livox Mid-360 + Gemini 2 L**：Mid-360 为 H360°×V59°、0.1 m 近盲区、40 m@10%反射率、
+200 kpoint/s@10 Hz、Ethernet/PTPv2、IP67、6.5 W、265 g。RK3588 不直接全量重复处理；驱动
+发布 10 Hz 后由现有节点限到 5 Hz/40000 点并体素降采样，同时从水平高度带生成 `/scan`。
 
-参考资料：[Orbbec Gemini 2 官方规格](https://store.orbbec.com/products/gemini-2)、
-[Luxonis OAK-D Pro 官方规格](https://docs.luxonis.com/hardware/products/OAK-D%20Pro)、
-[SLAMTEC RPLIDAR S2 数据表](https://wiki.slamtec.com/download/attachments/83066883/SLAMTEC_rplidar_datasheet_S2_v2.0_en.pdf?api=v2)。
+主动红外 RGB-D 在阳光下仍必须实测；相机深度失效时，本算法会降级为纯点云，但不能用
+室内标称距离替代比赛现场 rosbag。采购前还要在 Ubuntu 24.04/aarch64 实机编译厂商驱动，
+确认 Header 时间戳、`frame_id`、硬件同步和连续运行温度。参考资料：
+[SLAMTEC RPLIDAR S2 官方规格](https://www.slamtec.com/en/s2/spec)、
+[Orbbec Gemini 2 L 官方规格](https://www.orbbec.com/products/stereo-vision-camera/gemini-2l/)、
+[Livox Mid-360 官方规格](https://www.livoxtech.com/cn/mid-360/specs)；Mid-360 的官方
+[`livox_ros_driver2`](https://github.com/Livox-SDK/livox_ros_driver2) 已列出
+Ubuntu 24.04/ROS 2 Jazzy 构建入口。
 
 ### 4.2 默认通信接口
 
