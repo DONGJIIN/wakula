@@ -21,6 +21,7 @@ from quadruped_planning.autonomous_mission import (
     extract_coverage_goals,
     extract_frontiers,
     frontier_goal_in_known_free_space,
+    inventory_display,
     is_actionable_semantic_id,
     mission_score,
     mission_inventory,
@@ -34,6 +35,7 @@ from quadruped_planning.autonomous_mission import (
     select_full_semantic_vote,
     select_semantic_vote,
     target_is_in_heading_cone,
+    timeout_reached,
     traversal_crossing_evidence,
     world_to_cell,
 )
@@ -364,6 +366,34 @@ def test_inventory_lists_completed_and_pending_in_stable_rule_order():
     assert '"count":2' in text
     assert '"ids":["right_angle_poles","height_bar"]' in text
     assert "直角绕杆区" in text
+    display = inventory_display(completed, pending)
+    assert "已越过(1/3): 高墙" in display
+    assert "未越过(2/3): 直角绕杆区, 限高杆" in display
+
+
+def test_five_second_watchdog_uses_monotonic_deadline():
+    """No-motion/controller waits recover at five seconds, never before the deadline."""
+    assert not timeout_reached(10.0, 14.99, 5.0)
+    assert timeout_reached(10.0, 15.0, 5.0)
+    assert not timeout_reached(0.0, 100.0, 5.0)
+    assert not timeout_reached(10.0, 15.0, 0.0)
+
+
+def test_shipped_mission_uses_bounded_recovery_and_return_policy():
+    """Protect the operator-requested five-second recovery and finite search defaults."""
+    from pathlib import Path
+
+    import yaml
+
+    path = Path(__file__).parents[1] / "config" / "autonomous_mission.yaml"
+    params = yaml.safe_load(path.read_text(encoding="utf-8"))["autonomous_mission"][
+        "ros__parameters"
+    ]
+    assert params["nav_stall_timeout"] == 5.0
+    assert params["controller_wait_timeout"] == 5.0
+    assert params["approach_stall_handoff_count"] == 1
+    assert params["maximum_search_turns"] == 8
+    assert params["inventory_log_period"] == 5.0
 
 
 def test_active_search_prefers_one_near_known_unfinished_obstacle():
@@ -469,7 +499,11 @@ def test_completed_segment_requires_same_competition_semantic():
 def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     from pathlib import Path
 
-    source = (Path(__file__).parents[1] / "quadruped_planning" / "autonomous_mission.py").read_text(encoding="utf-8")
+    source = (
+        Path(__file__).parents[1]
+        / "quadruped_planning"
+        / "autonomous_mission.py"
+    ).read_text(encoding="utf-8")
     assert '"/traverse_obstacle"' in source
     assert '"/autonomy/set_enabled"' not in source
     assert '"/autonomy/toggle"' not in source

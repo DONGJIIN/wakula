@@ -91,6 +91,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
   输出：调用 /navigate_to_pose 和 /traverse_obstacle；发布 /autonomy/state、/autonomy/event、
         /autonomy/progress，以及 transient-local 的 /autonomy/completed_obstacles 和
         /autonomy/pending_obstacles（String 内为 count/ids/names_zh JSON）。
+  进度显示：自主任务终端每 5 秒及清单变化时显示“已越过/未越过”；上述三个话题用于其他
+        节点、UI 或晚启动终端读取同一账本。
   生命周期：仅随 autonomous_navigation.launch.py 存在；启动 launch 即执行，Ctrl-C 即取消退出。
   安全输出：/navigation/autonomy_stop（std_msgs/Bool，可靠 + transient_local）。启动发布
   false；退出先发布 true。最终仲裁器收到 true 后只锁自动导航分支；有效键盘/手柄输入
@@ -109,6 +111,8 @@ ROS 2 Jazzy；长度单位 m，角度 rad，时间来自消息 Header。算法�
         平面，并连续稳定 0.75 s。失败或 5 s 内无法证实则不计完成，障碍继续留在待办清单。
         足端接触、机身姿态、关节/驱动故障和完整离开障碍由真机 Action 服务端负责；仅仅
         接受 Goal、走到入口或播放完动作序列都不能返回 success=true。
+  防卡死：Nav2 连续 5 秒无位姿进展就取消并重规划；越障 Action 服务端未就绪只等待 5 秒，
+        原障碍保留为未完成。无可用目标时分 8 次转满两圈复查，仍无新目标便返回启动点。
 
 2.3 SLAM 与导航监控节点
 

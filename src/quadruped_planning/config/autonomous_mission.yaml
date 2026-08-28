@@ -41,9 +41,9 @@ autonomous_mission:
     handoff_fallback_spatial_tolerance: 0.90
     # Action 前最终航向必须在约 7° 内，不使用下面仅供停滞恢复的宽松门限。
     handoff_alignment_tolerance: 0.12
-    # 坑沿/墙脚/台阶立面会被 Nav2 正确视为不可通行。对同一语义目标连续两次入口停滞，
-    # 且点云仍确认其位于正前方时，任务层切换到越障 Action，避免永久重发不可达目标。
-    approach_stall_handoff_count: 2
+    # 坑沿/墙脚/台阶立面会被 Nav2 正确视为不可通行。入口连续 5 秒无位姿进展后，
+    # 只要距离、横偏、航向和语义门限仍成立，就立即切换越障 Action，不重复原目标。
+    approach_stall_handoff_count: 1
     # 若 Nav2 连续停在更远的膨胀边界，允许把“最后一段接近”也交给 TraverseObstacle。
     # Action 目标携带实测 entry_distance，真机控制器仍须自行完成低速接近和姿态闭环。
     approach_stall_handoff_max_distance: 1.85
@@ -66,6 +66,8 @@ autonomous_mission:
     # need more time than a single step.  Keep this above the longest adapter
     # duration so a valid traverse is not cancelled halfway across.
     traversal_timeout: 45.0
+    # 到达入口后越障 Action 服务仍未就绪，最多原地等待 5 秒；随后保留为未完成并换目标。
+    controller_wait_timeout: 5.0
     minimum_obstacle_confidence: 0.55
     obstacle_confirmation_frames: 3
     # 2.5 m 内先累计同一 map 入口的语义历史，避免坡面接近后因局部裁剪误变为台阶；
@@ -101,14 +103,18 @@ autonomous_mission:
     # 一次回访后给感知/地图 8 秒更新，同时允许先探索其他方向，避免在单一误检处循环。
     obstacle_revisit_cooldown: 8.0
     # 无前沿不是结束条件：连续约 1 秒无候选后原地转 90° 补扫，四次补扫后重新尝试
-    # 暂时失败的前沿。只有八项完成或总任务超时才转向终点。
+    # 暂时失败的前沿；达到下面的补扫上限仍无新目标，才携带当前清单返回终点。
     empty_frontier_confirmations: 4
+    # 每次 90°，最多补扫两圈；仍无前沿/覆盖/待办目标就返回任务启动点。
+    maximum_search_turns: 8
     search_turn_angle: 1.570796
-    # Nav2 Action 尚未结束但 map 位姿连续 8 秒既没有 8 cm 平移，也没有 0.10 rad 转动，
+    # Nav2 Action 尚未结束但 map 位姿连续 5 秒既没有 8 cm 平移，也没有 0.10 rad 转动，
     # 视为局部停滞并取消重规划，避免表现成“自动导航走到一半自己停下”。
-    nav_stall_timeout: 8.0
+    nav_stall_timeout: 5.0
     nav_progress_translation: 0.08
     nav_progress_rotation: 0.10
+    # 自主导航终端每 5 秒显示一次已越过/未越过清单，清单变化时立即显示。
+    inventory_log_period: 5.0
     # 规则比赛时长尚可能调整；该软件上限保证异常时仍会携带已有清单前往终点。
     mission_timeout: 900.0
     return_home_tolerance: 0.40

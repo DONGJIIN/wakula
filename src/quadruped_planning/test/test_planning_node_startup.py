@@ -145,3 +145,35 @@ def test_speed_gate_real_timer_stops_after_command_timeout(ros_context):
         driver.destroy_node()
         gate.destroy_node()
         executor.shutdown()
+
+
+def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
+    """Construct the production node and protect the requested non-blocking policy."""
+    mission = AutonomousMission()
+    try:
+        assert mission.params["nav_stall_timeout"] == 5.0
+        assert mission.params["controller_wait_timeout"] == 5.0
+        assert mission.params["approach_stall_handoff_count"] == 1
+        assert mission.params["maximum_search_turns"] == 8
+    finally:
+        mission.destroy_node()
+
+
+def test_missing_traversal_controller_keeps_task_pending_and_changes_action(ros_context):
+    """A controller timeout must clear HANDOFF, cool the entry, and resume recovery."""
+    mission = AutonomousMission()
+    try:
+        mission.pending_traverse = object()
+        mission.pending_traverse_id = "high_wall"
+        mission.pending_traverse_position = (1.0, 2.0)
+        mission.pending_traverse_robot_start = (0.0, 0.0)
+        mission.controller_wait_reported = True
+        mission._abandon_controller_wait()
+        assert mission.pending_traverse is None
+        assert mission.pending_traverse_id == ""
+        assert not mission.controller_wait_reported
+        assert mission.state == "RECOVERY"
+        assert mission.blocked_obstacles
+        assert mission.cooldown_until > 0.0
+    finally:
+        mission.destroy_node()

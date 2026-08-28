@@ -178,7 +178,7 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
         "frontier_minimum_cells", "approach_stall_handoff_count",
         "obstacle_confirmation_frames", "semantic_confirmation_votes",
         "semantic_recent_window", "semantic_verification_max_attempts",
-        "empty_frontier_confirmations",
+        "empty_frontier_confirmations", "maximum_search_turns",
     )
     for name in integer_names:
         _integer(values, name, errors)
@@ -201,7 +201,8 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
         errors.append("post_traversal_stable_duration must be below verification timeout")
     for name in (
         "map_timeout", "guidance_timeout", "goal_timeout", "traversal_timeout",
-        "nav_stall_timeout", "mission_timeout", "front_name_timeout",
+        "controller_wait_timeout", "nav_stall_timeout", "mission_timeout",
+        "front_name_timeout", "inventory_log_period",
     ):
         _positive(values, name, errors)
     for name in (

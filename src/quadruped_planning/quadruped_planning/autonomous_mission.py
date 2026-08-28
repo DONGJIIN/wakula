@@ -100,6 +100,34 @@ def inventory_message(ids: Sequence[str]) -> str:
     )
 
 
+def inventory_display(completed: Sequence[str], pending: Sequence[str]) -> str:
+    """Return one concise Chinese terminal line for the competition task ledger."""
+    completed_names = [
+        COMPETITION_OBSTACLE_NAMES_ZH.get(str(item), str(item)) for item in completed
+    ]
+    pending_names = [
+        COMPETITION_OBSTACLE_NAMES_ZH.get(str(item), str(item)) for item in pending
+    ]
+    total = len(completed_names) + len(pending_names)
+    return (
+        f"[任务清单] 已越过({len(completed_names)}/{total}): "
+        f"{', '.join(completed_names) or '无'} | "
+        f"未越过({len(pending_names)}/{total}): "
+        f"{', '.join(pending_names) or '无'}"
+    )
+
+
+def timeout_reached(started: float, now: float, timeout: float) -> bool:
+    """Safely evaluate a monotonic inactivity deadline; invalid clocks fail closed."""
+    values = (started, now, timeout)
+    return (
+        all(isfinite(float(value)) for value in values)
+        and float(started) > 0.0
+        and float(timeout) > 0.0
+        and float(now) - float(started) >= float(timeout)
+    )
+
+
 def canonical_obstacle_id(name: str) -> str:
     """把终端显示名称转换为稳定比赛语义 ID；未知名称返回空字符串。
 
@@ -909,7 +937,11 @@ def extract_coverage_goals(
     return sorted(candidates, key=lambda item: item.score, reverse=True)
 
 
-def choose_frontier(candidates: Sequence[Frontier], blocked: Sequence[Tuple[float, float]], exclusion_radius: float) -> Optional[Frontier]:
+def choose_frontier(
+    candidates: Sequence[Frontier],
+    blocked: Sequence[Tuple[float, float]],
+    exclusion_radius: float,
+) -> Optional[Frontier]:
     """跳过近期失败或刚访问的前沿，返回当前最高分候选。"""
     radius = max(0.0, float(exclusion_radius))
     for candidate in candidates:
@@ -1130,7 +1162,7 @@ class AutonomousMission(Node):
             # Nav2 会把坑沿、墙脚等正确地标为不可通行，因此“入口导航失败”并不等于
             # “不能越障”。同一语义目标连续停滞、且仍位于正前方时，任务层应结束普通
             # 底盘规划，转入 TraverseObstacle；否则会永久重发同一个不可达入口点。
-            "approach_stall_handoff_count": 2,
+            "approach_stall_handoff_count": 1,
             # Nav2 may stop at the inflation boundary before the nominal 1.20 m
             # handoff.  A repeated stall may transfer the remaining approach to
             # TraverseObstacle, whose goal carries the measured entry distance.
@@ -1149,6 +1181,9 @@ class AutonomousMission(Node):
             # seconds for a long bridge.  This is a safety ceiling, not the
             # nominal duration, and therefore must exceed every valid action.
             "goal_timeout": 45.0, "traversal_timeout": 45.0,
+            # 到达入口但越障 Action 服务未就绪时不能永久停留；短暂等待后保留该障碍
+            # 为未完成，换一个目标继续探索。真机服务应在启动自主任务前先就绪。
+            "controller_wait_timeout": 5.0,
             # Geometry and image-topic are time-aligned by ROS header.  If safety
             # data is older than this window, we hold in verification instead
             # of triggering action handoff.
@@ -1187,10 +1222,14 @@ class AutonomousMission(Node):
             # 没有前沿不等于比赛完成：先原地分段转向补扫，再重试曾被 Nav2 暂时拒绝
             # 的方向；只有八项任务全部完成或总任务超时才转向终点。
             "empty_frontier_confirmations": 4,
+            # 无前沿、无覆盖目标、无可执行待办时最多补扫两圈；仍无新证据就携带当前
+            # 已完成/未完成清单返回任务启动点，避免永远原地旋转。
+            "maximum_search_turns": 8,
             "search_turn_angle": 1.570796,
-            "nav_stall_timeout": 8.0,
+            "nav_stall_timeout": 5.0,
             "nav_progress_translation": 0.08,
             "nav_progress_rotation": 0.10,
+            "inventory_log_period": 5.0,
             "mission_timeout": 900.0,
             "return_home_tolerance": 0.40,
             "front_name_timeout": 1.2,
@@ -1204,7 +1243,12 @@ class AutonomousMission(Node):
         map_qos.reliability = ReliabilityPolicy.RELIABLE
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(OccupancyGrid, "/map", self._map_callback, map_qos)
-        self.create_subscription(TraversalGuidance, "/traversal/guidance", self._guidance_callback, 10)
+        self.create_subscription(
+            TraversalGuidance,
+            "/traversal/guidance",
+            self._guidance_callback,
+            10,
+        )
         # 中文话题供人读，任务内部立即转换为上方稳定 ID。它仍来自实时几何/视觉，绝不
         # 读取 Gazebo 实体名；换成真机传感器后通信合同不变。
         self.create_subscription(
@@ -1306,6 +1350,8 @@ class AutonomousMission(Node):
         # 的全是实时 map 位姿，不含规则图或 Gazebo 实体坐标。
         self.completed_traversal_segments = []
         self.completed_semantics = []
+        self.last_inventory_signature = None
+        self.last_inventory_log_time = 0.0
         # semantic_id -> 最近一次可靠观察。比赛八项 ID 唯一，因此字典天然保证任务清单
         # 不会因同一障碍多帧观测而膨胀；真正完成仍只能由 Action success 写入。
         self.observed_obstacles: Dict[str, ObservedObstacle] = {}
@@ -1340,15 +1386,37 @@ class AutonomousMission(Node):
         self.returned_home = False
         self.return_attempts = 0
         self.search_turn_index = 0
+        self.exploration_exhausted = False
         self.mission_started = time.monotonic()
         self.create_timer(0.25, self._tick)
         self._publish_state("mission node ready")
 
     def _publish_state(self, event=""):
         self.state_pub.publish(String(data=self.state))
+        self._publish_inventory(force_publish=bool(event))
+        if event:
+            self.event_pub.publish(String(data=event))
+            self.get_logger().info(f"Autonomy {self.state}: {event}")
+
+    def _publish_inventory(self, force_publish=False):
+        """Publish machine-readable lists and periodically print the human task ledger.
+
+        The two transient-local topics remain the integration contract.  The terminal line is
+        intentionally periodic as well as change-driven, so an operator does not need a second
+        ``ros2 topic echo`` window to see completed and pending obstacles.
+        """
         completed, pending = mission_inventory(
             self.params["expected_obstacle_ids"], self.completed_semantics
         )
+        now = time.monotonic()
+        signature = (completed, pending)
+        changed = signature != self.last_inventory_signature
+        periodic = (
+            now - self.last_inventory_log_time
+            >= float(self.params["inventory_log_period"])
+        )
+        if not (force_publish or changed or periodic):
+            return
         self.completed_pub.publish(String(data=inventory_message(completed)))
         self.pending_pub.publish(String(data=inventory_message(pending)))
         progress = (
@@ -1359,9 +1427,10 @@ class AutonomousMission(Node):
             f"pending_ids={','.join(pending) or 'none'}"
         )
         self.progress_pub.publish(String(data=progress))
-        if event:
-            self.event_pub.publish(String(data=event))
-            self.get_logger().info(f"Autonomy {self.state}: {event}")
+        if changed or periodic:
+            self.get_logger().info(inventory_display(completed, pending))
+            self.last_inventory_signature = signature
+            self.last_inventory_log_time = now
 
     def _publish_immediate_stop(self) -> None:
         """锁住核心速度门；用于独立 launch 退出时确定性停车。"""
@@ -1799,12 +1868,18 @@ class AutonomousMission(Node):
 
     def _fresh_target(self):
         msg = self.guidance
-        if (msg is None or time.monotonic() - self.guidance_received > float(self.params["guidance_timeout"])
-                or not msg.perception_valid or not msg.traversal_required
-                or not isfinite(float(msg.confidence))
-                or msg.confidence < float(self.params["minimum_obstacle_confidence"])
-                or self.obstacle_frames < int(self.params["obstacle_confirmation_frames"])
-                or self._already_completed(msg)):
+        if (
+            msg is None
+            or time.monotonic() - self.guidance_received
+            > float(self.params["guidance_timeout"])
+            or not msg.perception_valid
+            or not msg.traversal_required
+            or not isfinite(float(msg.confidence))
+            or msg.confidence < float(self.params["minimum_obstacle_confidence"])
+            or self.obstacle_frames
+            < int(self.params["obstacle_confirmation_frames"])
+            or self._already_completed(msg)
+        ):
             return None
         position = self._obstacle_position(msg)
         now = time.monotonic()
@@ -1948,7 +2023,11 @@ class AutonomousMission(Node):
         standard map-frame PoseStamped, so neither the planner nor a future base driver
         needs to understand competition obstacle names.
         """
-        if self.nav_handle is not None or self.nav_send_pending or not self.nav_client.server_is_ready():
+        if (
+            self.nav_handle is not None
+            or self.nav_send_pending
+            or not self.nav_client.server_is_ready()
+        ):
             return
         goal = NavigateToPose.Goal()
         goal.pose = pose
@@ -1967,7 +2046,13 @@ class AutonomousMission(Node):
 
     def _nav_goal_response(self, future):
         self.nav_send_pending = False
-        handle = future.result()
+        try:
+            handle = future.result()
+            response_error = ""
+        except Exception as exc:  # DDS/server loss may complete the future exceptionally.
+            handle = None
+            response_error = f": {exc}"
+            self.get_logger().error(f"Nav2 goal response failed{response_error}")
         if handle is None or not handle.accepted:
             # Action server 在 Nav2 lifecycle 激活之前已经可被发现，但会拒绝目标。这不是
             # 路径规划失败，不能污染 blocked_frontiers；短暂退避后原目标可重新选择。
@@ -1981,7 +2066,7 @@ class AutonomousMission(Node):
             )
             if self.enabled:
                 self.state = "EXPLORING"
-            self._publish_state("Nav2 rejected goal")
+            self._publish_state("Nav2 rejected goal" + response_error)
             return
         self.nav_handle, self.nav_started = handle, time.monotonic()
         self.nav_progress_pose = self._robot_pose()
@@ -2274,16 +2359,52 @@ class AutonomousMission(Node):
                 "entry reached; waiting for /traverse_obstacle controller"
             )
 
+    def _abandon_controller_wait(self) -> None:
+        """Leave a missing controller after a bounded wait and continue elsewhere.
+
+        The obstacle remains in the pending ledger and its map neighborhood receives the same
+        cooldown used for a failed traversal.  This prevents the next 4 Hz tick from selecting
+        the identical entry again while still allowing a later revisit after the controller or
+        perception recovers.
+        """
+        semantic_id = self.pending_traverse_id
+        position = self.pending_traverse_position
+        self.pending_traverse = None
+        self.pending_traverse_position = None
+        self.pending_traverse_robot_start = None
+        self.pending_traverse_id = ""
+        self.controller_wait_reported = False
+        self._reject_traversal_completion(
+            semantic_id,
+            position,
+            "TraverseObstacle controller unavailable for "
+            f"{float(self.params['controller_wait_timeout']):.1f} seconds",
+        )
+
     def _traverse_goal_response(self, future):
         self.traverse_send_pending = False
-        handle = future.result()
+        try:
+            handle = future.result()
+            response_error = ""
+        except Exception as exc:  # Treat transport failure exactly like a rejected handoff.
+            handle = None
+            response_error = f": {exc}"
+            self.get_logger().error(
+                f"TraverseObstacle goal response failed{response_error}"
+            )
         if handle is None or not handle.accepted:
+            semantic_id = self.pending_traverse_id
+            position = self.pending_traverse_position
             self.pending_traverse = None
             self.pending_traverse_position = None
             self.pending_traverse_robot_start = None
             self.pending_traverse_id = ""
-            self.state = "EXPLORING" if self.enabled else "STOPPED"
-            self._publish_state("TraverseObstacle unavailable/rejected")
+            self.controller_wait_reported = False
+            self._reject_traversal_completion(
+                semantic_id,
+                position,
+                "TraverseObstacle unavailable/rejected" + response_error,
+            )
             return
         self.traverse_handle = handle
         if not self.enabled:
@@ -2481,10 +2602,14 @@ class AutonomousMission(Node):
 
     def _tick(self):
         self.state_pub.publish(String(data=self.state))
+        self._publish_inventory()
         if not self.enabled:
             return
         now = time.monotonic()
-        if self.nav_handle is not None and now - self.nav_started > float(self.params["goal_timeout"]):
+        if (
+            self.nav_handle is not None
+            and now - self.nav_started > float(self.params["goal_timeout"])
+        ):
             self._cancel_nav("timeout")
             self._publish_state("Nav2 goal timeout; cancelling")
             return
@@ -2590,9 +2715,22 @@ class AutonomousMission(Node):
             return
         if self.pending_traverse is not None:
             if (
+                self.state == "WAITING_FOR_TRAVERSAL_CONTROLLER"
+                and timeout_reached(
+                    self.pending_traverse_started,
+                    now,
+                    float(self.params["controller_wait_timeout"]),
+                )
+            ):
+                self._abandon_controller_wait()
+                return
+            if (
                 self.state != "WAITING_FOR_TRAVERSAL_CONTROLLER"
-                and now - self.pending_traverse_started
-                > float(self.params["traversal_timeout"])
+                and timeout_reached(
+                    self.pending_traverse_started,
+                    now,
+                    float(self.params["traversal_timeout"]),
+                )
             ):
                 self.pending_traverse = None
                 self.pending_traverse_position = None
@@ -2615,7 +2753,11 @@ class AutonomousMission(Node):
         mission_timed_out = now - self.mission_started >= float(
             self.params["mission_timeout"]
         )
-        if self._all_obstacles_complete() or mission_timed_out:
+        if (
+            self._all_obstacles_complete()
+            or mission_timed_out
+            or self.exploration_exhausted
+        ):
             if self.nav_handle is not None:
                 if self.nav_purpose != "return_home":
                     self._cancel_nav("return_home")
@@ -2631,12 +2773,19 @@ class AutonomousMission(Node):
                 self._make_pose(*terminal_pose),
                 "return_home",
             )
-            reason = "all eight obstacles complete" if self._all_obstacles_complete() else "mission time limit reached"
+            if self._all_obstacles_complete():
+                reason = "all eight obstacles complete"
+            elif self.exploration_exhausted:
+                reason = "bounded exploration complete"
+            else:
+                reason = "mission time limit reached"
             destination = "configured finish" if self.finish_pose is not None else "start/finish"
             self._publish_state(f"{reason}; navigating to {destination}")
             return
         target = None if now < self.cooldown_until else self._fresh_target()
         if target is not None:
+            self.search_turn_index = 0
+            self.exploration_exhausted = False
             if not self._matches_obstacle_lock(target):
                 # 多个障碍同时进入宽视场时，保持已确认入口，不在两个 Nav2 目标之间来回
                 # cancel。旧目标结束后会释放锁，再处理新目标。
@@ -2827,6 +2976,8 @@ class AutonomousMission(Node):
             now,
         )
         if pending_record is not None:
+            self.search_turn_index = 0
+            self.exploration_exhausted = False
             distance_to_view = hypot(
                 pending_record.view_x - robot[0],
                 pending_record.view_y - robot[1],
@@ -2854,14 +3005,20 @@ class AutonomousMission(Node):
                 f"view_distance={distance_to_view:.2f} m"
             )
             return
-        candidates = extract_frontiers(self.map_msg, (robot[0], robot[1]),
+        candidates = extract_frontiers(
+            self.map_msg,
+            (robot[0], robot[1]),
             minimum_cells=int(self.params["frontier_minimum_cells"]),
             minimum_distance=float(self.params["frontier_minimum_distance"]),
             maximum_distance=float(self.params["frontier_maximum_distance"]),
             goal_standoff=float(self.params["frontier_goal_standoff"]),
-            goal_clearance=float(self.params["frontier_goal_clearance"]))
-        frontier = choose_frontier(candidates, self.blocked_frontiers,
-                                   float(self.params["frontier_exclusion_radius"]))
+            goal_clearance=float(self.params["frontier_goal_clearance"]),
+        )
+        frontier = choose_frontier(
+            candidates,
+            self.blocked_frontiers,
+            float(self.params["frontier_exclusion_radius"]),
+        )
         if frontier is None:
             # 激光的长视距可能早于相机/深度 ROI 把整场变成 known；没有 frontier 时不能
             # 直接认定探索结束。先走访尚未靠近的已知自由区，让近距感知覆盖每个障碍。
@@ -2881,6 +3038,8 @@ class AutonomousMission(Node):
             )
             if coverage is not None:
                 self.empty_frontier_count = 0
+                self.search_turn_index = 0
+                self.exploration_exhausted = False
                 yaw = atan2(coverage.y - robot[1], coverage.x - robot[0])
                 self.state = "COVERAGE_EXPLORING"
                 self._send_nav_goal(
@@ -2893,6 +3052,15 @@ class AutonomousMission(Node):
             self.empty_frontier_count += 1
             if self.empty_frontier_count >= int(self.params["empty_frontier_confirmations"]):
                 self.empty_frontier_count = 0
+                if self.search_turn_index >= int(
+                    self.params["maximum_search_turns"]
+                ):
+                    self.exploration_exhausted = True
+                    self.state = "EXPLORATION_EXHAUSTED"
+                    self._publish_state(
+                        "bounded missing-obstacle scan exhausted; returning with current ledger"
+                    )
+                    return
                 self.search_turn_index += 1
                 # 分段旋转而不是一次 360°：每个 90° 目标都由 Nav2/碰撞监控接管，并在
                 # 转动过程中持续更新 SLAM 和障碍识别。转满一圈后清除临时失败前沿，允许
@@ -2914,6 +3082,8 @@ class AutonomousMission(Node):
                 )
             return
         self.empty_frontier_count = 0
+        self.search_turn_index = 0
+        self.exploration_exhausted = False
         yaw = atan2(frontier.y - robot[1], frontier.x - robot[0])
         self.state = "EXPLORING"
         self._send_nav_goal(self._make_pose(frontier.x, frontier.y, yaw), "frontier")
