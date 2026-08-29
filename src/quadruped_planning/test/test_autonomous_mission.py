@@ -40,6 +40,7 @@ from quadruped_planning.autonomous_mission import (
     semantic_id_for_action,
     semantic_vote_is_confirmed,
     replacement_semantic_vote,
+    recovery_station_in_known_free_space,
     select_full_semantic_vote,
     select_semantic_vote,
     semantic_after_approach_stall,
@@ -115,6 +116,34 @@ def test_frontier_goal_rejects_unknown_clearance_disk():
     # 2 m 净空在这个小已知区域内无法满足，必须跳过而不是发布危险目标。
     assert frontier_goal_in_known_free_space(
         grid, (1.25, 0.25), (0.0, 0.0), standoff=0.5, clearance=2.0
+    ) is None
+
+
+def test_recovery_station_avoids_occupied_forward_corridor():
+    """Recovery must choose a free side instead of blindly re-entering a step."""
+    grid = OccupancyGrid()
+    grid.info.width = 60
+    grid.info.height = 60
+    grid.info.resolution = 0.10
+    grid.info.origin.position.x = -3.0
+    grid.info.origin.position.y = -3.0
+    grid.info.origin.orientation.w = 1.0
+    grid.data = [0] * (grid.info.width * grid.info.height)
+    # Block a wide east-facing strip directly in front of the robot.
+    for row in range(27, 34):
+        for col in range(33, 48):
+            grid.data[row * grid.info.width + col] = 100
+    goal = recovery_station_in_known_free_space(
+        grid, (0.0, 0.0, 0.0), 0.80, clearance=0.20
+    )
+    assert goal is not None
+    assert abs(goal[1]) > 0.20 or goal[0] < 0.0
+
+
+def test_recovery_station_fails_closed_without_body_clearance():
+    grid = map_with_unknown_border()
+    assert recovery_station_in_known_free_space(
+        grid, (0.0, 0.0, 0.0), 0.80, clearance=2.0
     ) is None
 
 

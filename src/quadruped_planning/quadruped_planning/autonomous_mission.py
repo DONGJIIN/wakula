@@ -1195,6 +1195,78 @@ def frontier_goal_in_known_free_space(
     return None
 
 
+def recovery_station_in_known_free_space(
+    grid: OccupancyGrid,
+    robot_pose: Tuple[float, float, float],
+    distance: float,
+    *,
+    clearance: float = 0.35,
+    occupied_threshold: int = 50,
+) -> Optional[Tuple[float, float, float]]:
+    """Choose a collision-free observation station from an online costmap.
+
+    The previous recovery always moved ``distance`` metres along the newly rotated
+    body axis.  That works in open space but repeatedly selected another point on the
+    same slope/step in the full-field run.  This helper checks both the swept centre
+    line and a circular body-clearance footprint, preferring forward, then diagonal,
+    lateral and reverse alternatives.  Unknown cells are rejected; no venue size,
+    obstacle name or fixed world coordinate is used.
+    """
+    resolution = float(grid.info.resolution)
+    width, height = int(grid.info.width), int(grid.info.height)
+    if (
+        resolution <= 0.0
+        or width <= 0
+        or height <= 0
+        or len(grid.data) != width * height
+        or not all(isfinite(float(value)) for value in (*robot_pose, distance, clearance))
+        or float(distance) <= 0.0
+    ):
+        return None
+    clearance_cells = max(0, int(ceil(max(0.0, float(clearance)) / resolution)))
+
+    def is_clear(x: float, y: float) -> bool:
+        cell = world_to_cell(grid, x, y)
+        if cell is None:
+            return False
+        col, row = cell
+        for oy in range(-clearance_cells, clearance_cells + 1):
+            for ox in range(-clearance_cells, clearance_cells + 1):
+                if ox * ox + oy * oy > clearance_cells * clearance_cells:
+                    continue
+                checked_col, checked_row = col + ox, row + oy
+                if not (0 <= checked_col < width and 0 <= checked_row < height):
+                    return False
+                value = int(grid.data[checked_row * width + checked_col])
+                if value < 0 or value >= int(occupied_threshold):
+                    return False
+        return True
+
+    start_x, start_y, start_yaw = map(float, robot_pose)
+    # Preserve the requested 0.8 m when possible. Shorter candidates allow recovery
+    # in narrow passages without silently increasing the configured maximum motion.
+    lengths = tuple(dict.fromkeys((float(distance), 0.75 * float(distance), 0.50 * float(distance))))
+    angle_offsets = (0.0, pi / 4.0, -pi / 4.0, pi / 2.0, -pi / 2.0, pi)
+    sample_step = max(0.05, resolution * 0.5)
+    for length in lengths:
+        for offset in angle_offsets:
+            heading = normalized_angle(start_yaw + offset)
+            steps = max(1, int(ceil(length / sample_step)))
+            if all(
+                is_clear(
+                    start_x + cos(heading) * length * step / steps,
+                    start_y + sin(heading) * length * step / steps,
+                )
+                for step in range(1, steps + 1)
+            ):
+                return (
+                    start_x + cos(heading) * length,
+                    start_y + sin(heading) * length,
+                    heading,
+                )
+    return None
+
+
 def extract_coverage_goals(
     grid: OccupancyGrid,
     robot_xy: Tuple[float, float],
@@ -1628,6 +1700,15 @@ class AutonomousMission(Node):
         map_qos.reliability = ReliabilityPolicy.RELIABLE
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(OccupancyGrid, "/map", self._map_callback, map_qos)
+        # Nav2's standard global costmap also contains the filtered depth/3-D point
+        # cloud layer. It is therefore authoritative for selecting a recovery motion;
+        # the SLAM map alone may not contain a low step seen below the 2-D lidar plane.
+        self.create_subscription(
+            OccupancyGrid,
+            "/global_costmap/costmap",
+            self._costmap_callback,
+            map_qos,
+        )
         self.create_subscription(Odometry, "/odom", self._odom_callback, 20)
         self.create_subscription(
             TraversalGuidance,
@@ -1696,6 +1777,8 @@ class AutonomousMission(Node):
         self.enabled = bool(self.params["autostart"])
         self.state = "WAITING_FOR_INPUTS" if self.enabled else "IDLE"
         self.map_msg = None
+        self.costmap_msg = None
+        self.costmap_received = float("-inf")
         self.map_received = 0.0
         self.latest_odom = None
         self.odom_received = 0.0
@@ -1864,6 +1947,11 @@ class AutonomousMission(Node):
     def _map_callback(self, msg):
         self.map_msg = msg
         self.map_received = time.monotonic()
+
+    def _costmap_callback(self, msg: OccupancyGrid) -> None:
+        """Cache the standard Nav2 costmap used only for bounded recovery goals."""
+        self.costmap_msg = msg
+        self.costmap_received = time.monotonic()
 
     def _odom_callback(self, msg: Odometry) -> None:
         """Cache local motion only; map coordinates remain authoritative for tasks."""
@@ -3606,16 +3694,33 @@ class AutonomousMission(Node):
             escape_distance = float(self.failed_entry_escape_pending)
             self.failed_entry_escape_pending = 0.0
             self.state = "RECOVERY"
+            # Prefer the global costmap because it contains both laser and filtered
+            # terrain points. Fall back to the current SLAM map only if costmap data
+            # has not arrived; both use the same standard OccupancyGrid contract.
+            recovery_grid = (
+                self.costmap_msg
+                if self.costmap_msg is not None and now - self.costmap_received <= 2.0
+                else self.map_msg
+            )
+            station = recovery_station_in_known_free_space(
+                recovery_grid,
+                robot,
+                escape_distance,
+                clearance=float(self.params["coverage_goal_clearance"]),
+            ) if recovery_grid is not None else None
+            if station is None:
+                self.nav_retry_until = now + float(self.params["nav_failure_retry_delay"])
+                self._publish_state(
+                    "no costmap-clear recovery station; skipping blind translation"
+                )
+                return
             self._send_nav_goal(
-                self._make_pose(
-                    robot[0] + cos(robot[2]) * escape_distance,
-                    robot[1] + sin(robot[2]) * escape_distance,
-                    robot[2],
-                ),
+                self._make_pose(*station),
                 "entry_escape",
             )
             self._publish_state(
-                f"moving {escape_distance:.2f} m to a new observation station"
+                "moving to a costmap-clear observation station "
+                f"({hypot(station[0] - robot[0], station[1] - robot[1]):.2f} m)"
             )
             return
         if abs(self.failed_entry_turn_pending) > 0.0:

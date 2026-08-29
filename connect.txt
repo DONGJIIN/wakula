@@ -94,7 +94,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         记录该障碍；优先回访已知未完成项，再探索未知项，全部完成后去终点。每次只处理
         一个障碍。它负责任务编排，不生成腿部或关节命令。
   输入：/map、/traversal/guidance、/terrain/navigation_safety、
-        /perception/front_obstacle_name、map -> base_link TF、Nav2/越障 Action 结果；可选
+        /perception/front_obstacle_name、/global_costmap/costmap、map -> base_link TF、
+        Nav2/越障 Action 结果；可选
         /autonomy/finish_pose（PoseStamped，map）覆盖默认“起点即终点”。
   输出：调用 /navigate_to_pose 和 /traverse_obstacle；发布 /autonomy/state、/autonomy/event、
         /autonomy/progress，以及 transient-local 的 /autonomy/completed_obstacles 和
@@ -135,6 +136,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         守卫不通过则同时冷却语义记录和空间入口；即使只有通用 STEP/WALL、尚无唯一比赛名，
         也会按 map 位置冷却并改选其他前沿/障碍，不在原观察点每 5 秒重复发送同一目标。
         越障服务端未就绪只等待 5 秒；无可用目标时补扫两圈，仍无结果便返回启动点。
+  换站地图：标准 `/global_costmap/costmap` 同时包含激光与地形点云。任务只选择整条路径和
+        机身净空均为已知自由格的观察站；没有候选就拒绝盲移，不发布绕过速度门的 Twist。
   近距交接：唯一障碍语义、实时点云几何、横偏及航向均通过时，1.45 m 内可直接调用
         /traverse_obstacle，避免入口前重复发送 Nav2 Goal；任一条件失败仍走普通恢复流程。
   结构判定：直角绕杆成功由 Action 结果、有效位移和稳定时间共同确认；其余障碍还要越过
