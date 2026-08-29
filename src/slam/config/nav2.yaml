@@ -217,7 +217,7 @@ local_costmap:
         # 真机窄通道过不去时，先核对实测 footprint，再以 0.5 为步长向上调本值。
         cost_scaling_factor: 3.0
 
-# ---------- 全局代价地图：静态 SLAM 地图 + 2D 激光动态标障 ----------
+# ---------- 全局代价地图：静态 SLAM 地图 + 2D 激光/点云动态标障 ----------
 global_costmap:
   global_costmap:
     ros__parameters:
@@ -242,12 +242,27 @@ global_costmap:
         map_subscribe_transient_local: true
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        observation_sources: scan
+        # 全局规划器必须看到与局部规划器相同的前向地形障碍。仅使用安装较高的
+        # 2D 雷达时，低台阶和赛台落差不会进入 /scan：全局路径会持续穿过它们，
+        # 然后在局部点云安全门前停车。terrain_points 由通用点云几何层发布，坑洞
+        # 已投影成虚拟标障点；不依赖 Gazebo 坐标，真机接入深度相机/3D 雷达后复用。
+        observation_sources: scan terrain_points
         scan:
           topic: /scan
           data_type: "LaserScan"
           clearing: true
           marking: true
+          obstacle_max_range: 3.0
+          raytrace_max_range: 3.5
+        terrain_points:
+          topic: /perception/obstacle_points
+          data_type: "PointCloud2"
+          # 与局部层一致：只标障不清障，避免稀疏深度帧覆盖 2D 雷达结论。
+          clearing: false
+          marking: true
+          min_obstacle_height: -0.50
+          max_obstacle_height: 0.80
+          obstacle_max_range: 1.50
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45

@@ -356,11 +356,11 @@ def test_simulated_traversal_path_is_layout_independent_and_ends_aligned():
     finish = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 1.0, pole=True)
     assert abs(middle[1] - 2.0) > 0.20
     assert_close(list(finish), [4.0, 2.0, 0.0], tolerance=1e-5)
-    # L 形坑先沿入口方向走 60%，再右转；终点航向也必须沿第二条臂。
-    corner = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 0.60, l_turn=-1)
+    # L 形坑先沿入口方向走 48%，再右转；终点航向也必须沿第二条臂。
+    corner = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 0.48, l_turn=-1)
     l_finish = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 1.0, l_turn=-1)
-    assert_close(list(corner), [3.0, 0.0, 0.0], tolerance=1e-5)
-    assert_close(list(l_finish), [3.0, -2.0, -math.pi / 2.0], tolerance=1e-5)
+    assert_close(list(corner), [2.4, 0.0, 0.0], tolerance=1e-5)
+    assert_close(list(l_finish), [2.4, -2.6, -math.pi / 2.0], tolerance=1e-5)
     safe_l = module.choose_safe_l_traversal(
         -5.85, -0.57, math.pi / 2.0, 4.33, 7.0, 3.0, 0.75
     )
@@ -378,6 +378,9 @@ def test_simulated_traversal_path_is_layout_independent_and_ends_aligned():
     # 规划的起点留在障碍物致命代价区内。
     assert '"exit_clearance", 1.20' in source
     assert '"right_angle_poles_span", 1.00' in source
+    # Competition pole semantics must use the same bounded right-angle path
+    # selector as the L-shaped pit, not the legacy centreline S curve.
+    assert '"right_angle_poles", "gravel_wood_pit"' in source
     assert '"t_shaped_stairs_span", 2.80' in source
     assert '"wooden_bridge_b_span", 5.20' in source
     assert "+ semantic_span" in source

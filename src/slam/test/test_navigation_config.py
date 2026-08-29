@@ -45,6 +45,22 @@ def test_local_costmap_fuses_scan_and_depth_points():
     assert obstacle_layer["terrain_points"]["data_type"] == "PointCloud2"
 
 
+def test_global_costmap_fuses_terrain_points_before_planning():
+    """Global paths must not cross low steps or drop-offs invisible to 2D lidar."""
+    nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"
+    with nav2_file.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    obstacle_layer = config["global_costmap"]["global_costmap"]["ros__parameters"][
+        "obstacle_layer"
+    ]
+    assert obstacle_layer["observation_sources"] == "scan terrain_points"
+    terrain = obstacle_layer["terrain_points"]
+    assert terrain["topic"] == "/perception/obstacle_points"
+    assert terrain["data_type"] == "PointCloud2"
+    assert terrain["marking"] is True
+    assert terrain["clearing"] is False
+
+
 def test_nav2_rk3588_budget_keeps_safety_rates_and_bounds_trajectory_samples():
     """性能档只能削减重复计算，不能把局部更新或控制频率降到不可用。"""
     nav2_file = PACKAGE_ROOT / "config" / "nav2.yaml"

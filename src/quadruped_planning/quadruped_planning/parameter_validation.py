@@ -209,6 +209,7 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
         "obstacle_revisit_max_cooldown",
         "handoff_fallback_viewpoint_tolerance",
         "handoff_fallback_view_heading_tolerance",
+        "direct_handoff_max_distance",
         "failed_entry_turn_angle", "failed_entry_settle_time",
         "failed_entry_memory_duration", "failed_entry_station_tolerance",
         "failed_entry_heading_tolerance", "failed_entry_escape_distance",

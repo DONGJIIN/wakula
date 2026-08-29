@@ -55,7 +55,12 @@ def traversal_pose(
         # 规则砂砾/碎木坑为 L 形：先沿第一臂进入，再在拐角转入第二臂。用两段局部
         # 直线近似流程，避免旧版沿入口法向直穿后落到赛台外。l_turn=+1 左转、-1 右转；
         # 仿真后端会预先选择留在场内的一侧。真机控制器应以足端/视觉闭环替换本轨迹。
-        first_leg = total_distance * 0.60
+        # The published L-shaped pit arms are about one metre each.  ``distance``
+        # also includes the camera-to-entry approach and exit clearance, so a 60%
+        # first leg turns too late and crosses the 6 m arena edge.  48% still keeps
+        # the corner inside the body envelope and crosses the observed entry plane
+        # by the task layer's required post-traversal margin.
+        first_leg = total_distance * 0.48
         travelled = total_distance * progress
         forward = min(first_leg, travelled)
         second_leg = max(0.0, travelled - first_leg)
@@ -235,9 +240,10 @@ class SimTraverseObstacle(Node):
         # 这些尺寸。正式坐标或真机 Action server 都不会使用这里的边界参数。
         self.declare_parameter("arena_half_length", 7.0)
         self.declare_parameter("arena_half_width", 3.0)
-        # 测试狗机身长约 0.75 m；只让 base_link 留 0.35 m 余量会使碰撞盒压住边界，
-        # 后续 Nav2 起点落在 lethal cell 中。0.75 m 同时给局部代价地图留出转向空间。
-        self.declare_parameter("arena_margin", 0.75)
+        # 测试狗横向半宽约 0.30 m；物理越界检查留 0.35 m（机身 + 5 cm）。Nav2 的
+        # 0.45 m inflation 是规划代价，不是机身实体，不能再次叠加到规则场地边界；
+        # 否则紧邻北侧合法布置的 L 形坑不存在任何可通过轨迹。
+        self.declare_parameter("arena_margin", 0.35)
         self.publisher = self.create_publisher(
             Twist, str(self.get_parameter("command_topic").value), 10
         )
@@ -418,7 +424,13 @@ class SimTraverseObstacle(Node):
                 -0.40, min(0.40, float(handle.request.heading_error))
             )
             l_turn = 0
-            if str(handle.request.obstacle_id) == "gravel_wood_pit":
+            if str(handle.request.obstacle_id) in {
+                "right_angle_poles", "gravel_wood_pit"
+            }:
+                # Both rule tasks are non-straight. The pit follows its L-shaped
+                # arms; the three mandatory pole zones also form a right angle.
+                # The old S curve returned to zero lateral offset and always left
+                # the model beside the west boundary after the first task.
                 safe_l_path = choose_safe_l_traversal(
                     start_x,
                     start_y,
@@ -499,7 +511,10 @@ class SimTraverseObstacle(Node):
                         traversal_yaw,
                         travel_distance,
                         progress,
-                        pole=int(handle.request.obstacle_type) == 6,
+                        pole=(
+                            int(handle.request.obstacle_type) == 6
+                            and not int(l_turn)
+                        ),
                         l_turn=l_turn,
                     )
                     if not pose_inside_arena(
@@ -537,7 +552,10 @@ class SimTraverseObstacle(Node):
                 traversal_yaw,
                 travel_distance,
                 1.0,
-                pole=int(handle.request.obstacle_type) == 6,
+                pole=(
+                    int(handle.request.obstacle_type) == 6
+                    and not int(l_turn)
+                ),
                 l_turn=l_turn,
             )
             if not pose_inside_arena(

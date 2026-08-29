@@ -211,16 +211,14 @@ def semantic_id_for_action(candidate: str, obstacle_type: int) -> str:
     """
     candidate = str(candidate)
     obstacle_type = int(obstacle_type)
-    # Near clipping can reduce a thin crossbar to one post / a short wall.
-    # Preserve an already-derived height-bar semantic in those two coarse
-    # geometries; only an absent/incompatible name falls back to the unique
-    # generic interpretation.  Repeated temporal voting still gates Action.
+    # Near clipping can reduce a thin crossbar to one post / a short wall. Preserve
+    # only an already-derived specific name: a pit rail, bridge side or arena edge can
+    # produce the same coarse WALL/POLE label, so filling an absent name from type alone
+    # created false high-wall/pole completions during the 2026-08-28 full-field run.
     if obstacle_type == TraverseObstacle.Goal.OBSTACLE_WALL:
-        # 极端近裁剪下限高杆可能先被判作 WALL，优先保留已检测到的特定名词；
-        # 没有可用名字时才按默认高墙处理，避免把真实墙误认成台阶或坑。
-        return candidate if candidate in {"height_bar", "high_wall"} else "high_wall"
+        return candidate if candidate in {"height_bar", "high_wall"} else ""
     if obstacle_type == TraverseObstacle.Goal.OBSTACLE_POLE:
-        return candidate if candidate == "right_angle_poles" else "right_angle_poles"
+        return candidate if candidate in {"right_angle_poles", "height_bar"} else ""
     compatible_by_type = {
         # 木桥 B 的规则板间隙可形成 PIT；砂砾坑自身当然也是 PIT。
         TraverseObstacle.Goal.OBSTACLE_PIT: {
@@ -768,6 +766,40 @@ def traversal_crossing_evidence(
     return (
         displacement >= max(0.0, float(minimum_displacement))
         and beyond >= max(0.0, float(beyond_obstacle_margin))
+    )
+
+
+def traversal_geometry_evidence(
+    semantic_id: str,
+    start: Tuple[float, float],
+    obstacle: Tuple[float, float],
+    end: Tuple[float, float],
+    *,
+    minimum_displacement: float,
+    beyond_obstacle_margin: float,
+) -> bool:
+    """Apply a completion geometry that matches the competition task topology.
+
+    Seven structures have an entrance surface and therefore require the robot to
+    finish beyond the online-observed entry plane.  The right-angle pole course is
+    different: its mandatory zones form a turn, so a valid finish may be lateral to
+    that plane.  For that one semantic the Action controller proves zone execution;
+    the mission layer still independently requires finite map poses and sufficient
+    total displacement.  Stability is checked separately for every task.
+    """
+    if str(semantic_id) == "right_angle_poles":
+        values = (*start, *end, minimum_displacement)
+        return bool(
+            all(isfinite(float(value)) for value in values)
+            and hypot(float(end[0]) - start[0], float(end[1]) - start[1])
+            >= max(0.0, float(minimum_displacement))
+        )
+    return traversal_crossing_evidence(
+        start,
+        obstacle,
+        end,
+        minimum_displacement=minimum_displacement,
+        beyond_obstacle_margin=beyond_obstacle_margin,
     )
 
 
@@ -1325,14 +1357,16 @@ def obstacle_geometry_fits_candidate(
             obstacle_type == NavigationSafety.OBSTACLE_STEP
             and 0.19 <= height <= 0.28
             and 0.55 <= width <= 1.40
-            and roughness >= 0.060
+            and roughness >= 0.078
             and pitch <= 6.0
             and roll <= 12.0
         )
     if obstacle_id == "t_shaped_stairs":
         return (
             obstacle_type == NavigationSafety.OBSTACLE_STEP
-            and 0.28 <= height <= 0.60
+            # Keep the final Action gate consistent with the display classifier:
+            # 0.44 m+ flat STEP crops were measured on the main-slope side.
+            and 0.28 <= height <= 0.43
             and width >= 0.45
             and 0.020 <= roughness <= 0.080
             and pitch <= 15.0
@@ -1341,18 +1375,38 @@ def obstacle_geometry_fits_candidate(
     if obstacle_id == "gravel_wood_pit":
         if obstacle_type == NavigationSafety.OBSTACLE_PIT:
             return 0.06 <= depth <= 0.30 and 0.05 <= height <= 0.34
-        return (
+        regular_pit = (
             obstacle_type == NavigationSafety.OBSTACLE_STEP
             and 0.10 <= height <= 0.22
             and 0.07 <= depth <= 0.30
             and roughness >= 0.020
             and 0.30 <= width <= 1.20
         )
+        close_fill = (
+            obstacle_type == NavigationSafety.OBSTACLE_STEP
+            and 0.19 <= height <= 0.23
+            and 0.02 <= depth <= 0.08
+            and 0.045 <= roughness < 0.078
+            and 0.40 <= width <= 1.40
+        )
+        return regular_pit or close_fill
     if obstacle_id == "high_wall":
+        # The real wall is 0.30 m high and about 1.00 m wide. The gravel-pit rail that
+        # was falsely counted as a wall measured 0.10--0.25 m high; requiring the full
+        # wall face rejects that crop. A separately recognised occlusion-as-PIT shape
+        # remains admissible only with the strict metrics used by the name layer.
+        if obstacle_type == NavigationSafety.OBSTACLE_PIT:
+            return (
+                12.0 <= pitch <= 22.0
+                and depth > 0.36
+                and height < 0.10
+                and 0.035 <= roughness <= 0.070
+                and 0.80 <= width <= 1.20
+            )
         return (
             obstacle_type == NavigationSafety.OBSTACLE_WALL
-            and 0.15 <= height <= 0.55
-            and width >= 0.45
+            and 0.27 <= height <= 0.42
+            and 0.75 <= width <= 1.25
             and pitch <= 15.0
         )
     return False
@@ -1449,9 +1503,9 @@ class AutonomousMission(Node):
             "pre_alignment_settle_time": 0.60,
             "nav_rejection_retry_delay": 1.0,
             "nav_failure_retry_delay": 1.0,
-            # TraverseObstacle 拒绝当前入口后，先原地换约 45° 观察方向，再选择新目标。
-            # 这是任务级恢复动作，不是腿部越障命令；真实控制器失败时同样适用。
-            "failed_entry_turn_angle": 0.785398,
+            # TraverseObstacle 拒绝或地形挡住目标后，先原地换 90° 观察方向，再选择
+            # 新目标。这是任务级恢复动作，不是腿部越障命令；真机应从 60° 标定。
+            "failed_entry_turn_angle": 1.570796,
             "failed_entry_settle_time": 0.80,
             "failed_entry_memory_duration": 45.0,
             "failed_entry_station_tolerance": 0.65,
@@ -1459,6 +1513,7 @@ class AutonomousMission(Node):
             "failed_entry_escape_distance": 0.80,
             "handoff_fallback_max_distance": 1.45,
             "handoff_fallback_max_lateral": 0.50,
+            "direct_handoff_max_distance": 1.45,
             "handoff_fallback_spatial_tolerance": 0.90,
             # 障碍前缘漂移过大时，只在机器人真正回到已确认观察位、朝向也接近原方向时
             # 才允许用待办账本恢复 ID；仍必须通过实时粗类型和全部 Action 入口守卫。
@@ -1728,6 +1783,12 @@ class AutonomousMission(Node):
         # 在线语义的失败次数，不包含场地坐标或固定障碍顺序。
         self.failed_entry_turn_pending = 0.0
         self.failed_entry_escape_pending = 0.0
+        # Most failed obstacle entries need a new *position* after the recovery
+        # turn.  Return-to-finish is different: the target is already known and a
+        # pure change of heading is enough for Nav2 to search another homotopy.  A
+        # separate flag prevents return recovery from blindly walking 0.8 m farther
+        # into the structure that blocked the original path.
+        self.failed_entry_escape_after_turn = True
         self.failed_entry_failures: Dict[str, int] = {}
         self.failed_entries: List[FailedEntry] = []
         # 模糊结构耗尽换视角次数后，左右交替选择新观察站，避免每次都向
@@ -2490,9 +2551,10 @@ class AutonomousMission(Node):
                     expiry,
                 ))
             # 仅屏蔽障碍像素不会改变相机视角；现场回归中机器人因此在主坡
-            # 长侧反复看到 0.13 m 边缘。排队一次左右交替的 45° 原地转向；
+            # 长侧反复看到 0.13 m 边缘。排队一次左右交替的 90° 原地转向；
             # 转向成功后 entry_recovery 回调再排队 0.8 m 普通 Nav2 平移。
             # 平移不获得零限速旁路，仍要通过地形、雷达和导航健康门。
+            self.failed_entry_escape_after_turn = True
             self.failed_entry_turn_pending = (
                 self.ambiguous_recovery_sign
                 * float(self.params["failed_entry_turn_angle"])
@@ -2571,8 +2633,9 @@ class AutonomousMission(Node):
             # sending another Action, then use the next alternating recovery view.
             failures = self.failed_entry_failures.get(semantic_id, 1) + 1
             self.failed_entry_failures[semantic_id] = failures
-            signed_steps = min(2, failures) * (1.0 if failures % 2 else -1.0)
-            self.failed_entry_turn_pending = signed_steps * float(
+            turn_sign = 1.0 if failures % 2 else -1.0
+            self.failed_entry_escape_after_turn = True
+            self.failed_entry_turn_pending = turn_sign * float(
                 self.params["failed_entry_turn_angle"]
             )
             self.blocked_obstacles.append((
@@ -2736,7 +2799,7 @@ class AutonomousMission(Node):
             self.semantic_settle_until = time.monotonic() + float(
                 self.params["failed_entry_settle_time"]
             )
-            if succeeded:
+            if succeeded and self.failed_entry_escape_after_turn:
                 # The rotation changed only the viewing direction.  Queue a short
                 # normal Nav2 translation along that new heading so the next
                 # observation comes from a genuinely new station.  cmd_vel_gate does
@@ -2745,6 +2808,9 @@ class AutonomousMission(Node):
                 self.failed_entry_escape_pending = float(
                     self.params["failed_entry_escape_distance"]
                 )
+            # The flag belongs to one queued recovery only.  Restore the ordinary
+            # obstacle policy even when Nav2 aborts the yaw goal.
+            self.failed_entry_escape_after_turn = True
         elif purpose == "prealign_obstacle":
             self.pre_alignment_settle_until = time.monotonic() + float(
                 self.params["pre_alignment_settle_time"]
@@ -2928,13 +2994,14 @@ class AutonomousMission(Node):
                 recovery_now = time.monotonic()
                 # 同一观察点不能在下一 tick 立刻被 pending-obstacle 分支再次选择。
                 # 仅加冷却仍会让前沿规划器在障碍边缘反复选择不可达目标：排队一次
-                # 交替方向的 45° 转向；转向成功后统一恢复链还会通过普通 Nav2 前移
+                # 交替方向的 90° 转向；转向成功后统一恢复链还会通过普通 Nav2 前移
                 # failed_entry_escape_distance，从物理上改变观察站。该平移没有任何
                 # 安全旁路，前方仍不安全时会被速度门保持为零并再次触发看门狗。
                 self._defer_obstacle_revisit(
                     semantic_id or approach_initial_id,
                     recovery_now,
                 )
+                self.failed_entry_escape_after_turn = True
                 self.failed_entry_turn_pending = (
                     self.ambiguous_recovery_sign
                     * float(self.params["failed_entry_turn_angle"])
@@ -3229,10 +3296,11 @@ class AutonomousMission(Node):
         if is_actionable_semantic_id(semantic_id):
             failures = self.failed_entry_failures.get(semantic_id, 0) + 1
             self.failed_entry_failures[semantic_id] = failures
-            # Alternate left/right and increase only up to two 45-degree steps.  This
-            # samples another side without accumulating an unbounded spin.
-            signed_steps = min(2, failures) * (1.0 if failures % 2 else -1.0)
-            self.failed_entry_turn_pending = signed_steps * float(
+            # Alternate one 90-degree turn left/right. Multiplying the new angle on a
+            # repeated failure would create a 180-degree turn and waste the budget.
+            turn_sign = 1.0 if failures % 2 else -1.0
+            self.failed_entry_escape_after_turn = True
+            self.failed_entry_turn_pending = turn_sign * float(
                 self.params["failed_entry_turn_angle"]
             )
             robot = self._robot_pose()
@@ -3321,7 +3389,8 @@ class AutonomousMission(Node):
                 # could incorrectly appear stable forever.
                 verification.last_pose = robot
                 verification.stable_since = now
-        crossed = traversal_crossing_evidence(
+        crossed = traversal_geometry_evidence(
+            verification.semantic_id,
             verification.robot_start,
             verification.obstacle_position,
             (robot[0], robot[1]),
@@ -3478,6 +3547,11 @@ class AutonomousMission(Node):
                 stalled_purpose in ("frontier", "coverage", "return_home")
                 and guidance_is_blocking
             ):
+                # Exploration needs a genuinely new camera station.  Returning to
+                # a known pose instead retries immediately after the yaw change;
+                # translating along an arbitrary recovery heading can move farther
+                # from home or into the same obstacle.
+                self.failed_entry_escape_after_turn = stalled_purpose != "return_home"
                 self.failed_entry_turn_pending = (
                     self.ambiguous_recovery_sign
                     * float(self.params["failed_entry_turn_angle"])
@@ -3706,6 +3780,41 @@ class AutonomousMission(Node):
                 )
                 return
             if target.phase in (TraversalGuidance.PHASE_APPROACH, TraversalGuidance.PHASE_ALIGN):
+                # The real TraverseObstacle controller contract includes the
+                # remaining entry distance and performs the final slow approach.
+                # Once a multi-frame semantic, metric geometry, lateral alignment
+                # and strict heading are already valid, waiting for Nav2 to reach a
+                # point inside the obstacle inflation layer adds no safety.  In the
+                # field regression that wait consumed 20--35 s and repeatedly
+                # toggled STOP/WALK at the same pose.  Handoff early, but only within
+                # this deliberately smaller direct distance; the wider 2.35 m gate
+                # remains reserved for a measured five-second approach stall.
+                direct_id = self._action_semantic_id(
+                    target,
+                    self.locked_obstacle_id or self._current_obstacle_id(now),
+                )
+                direct_position = (
+                    self.locked_obstacle_position or self._obstacle_position(target)
+                )
+                if close_handoff_is_safe(
+                    direct_id,
+                    target.distance,
+                    target.lateral_offset,
+                    target.heading_error,
+                    float(self.params["direct_handoff_max_distance"]),
+                    float(self.params["handoff_fallback_max_lateral"]),
+                    float(self.params["handoff_alignment_tolerance"]),
+                ):
+                    queued = self._queue_traversal_handoff(
+                        target, direct_id, direct_position, now
+                    )
+                    if queued:
+                        self._cancel_nav("handoff")
+                        self._publish_state(
+                            "metric entry and body alignment confirmed; "
+                            f"handing off {direct_id} before inflation-layer stall"
+                        )
+                    return
                 approach = self._relative_approach_pose(target)
                 if self.nav_handle is not None and self.nav_purpose in (
                     "frontier", "coverage", "revisit_obstacle"

@@ -47,6 +47,7 @@ from quadruped_planning.autonomous_mission import (
     target_is_in_heading_cone,
     timeout_reached,
     traversal_crossing_evidence,
+    traversal_geometry_evidence,
     verification_station_matches,
     world_to_cell,
 )
@@ -274,6 +275,20 @@ def test_traversal_completion_requires_reaching_far_side_of_entry():
     )
 
 
+def test_right_angle_pole_completion_allows_lateral_finish_but_requires_motion():
+    """The pole course turns; its valid finish need not lie beyond one entry plane."""
+    limits = dict(minimum_displacement=0.45, beyond_obstacle_margin=0.12)
+    assert traversal_geometry_evidence(
+        "right_angle_poles", (0.0, 0.0), (1.0, 0.0), (0.2, 1.5), **limits
+    )
+    assert not traversal_geometry_evidence(
+        "right_angle_poles", (0.0, 0.0), (1.0, 0.0), (0.1, 0.1), **limits
+    )
+    assert not traversal_geometry_evidence(
+        "high_wall", (0.0, 0.0), (1.0, 0.0), (0.2, 1.5), **limits
+    )
+
+
 def test_traversal_crossing_evidence_rejects_invalid_or_degenerate_pose():
     limits = dict(minimum_displacement=0.45, beyond_obstacle_margin=0.12)
     assert not traversal_crossing_evidence(
@@ -314,6 +329,13 @@ def test_semantic_name_is_cross_checked_against_action_geometry():
     assert semantic_id_for_action(
         "wooden_bridge_unknown", TraverseObstacle.Goal.OBSTACLE_SLOPE
     ) == "wooden_bridge_unknown"
+    # Coarse geometry is not a unique competition identity. Pit rails and bridge
+    # sides can look like WALL, while one height-bar post can look like POLE.
+    assert semantic_id_for_action("", TraverseObstacle.Goal.OBSTACLE_WALL) == ""
+    assert semantic_id_for_action("", TraverseObstacle.Goal.OBSTACLE_POLE) == ""
+    assert semantic_id_for_action(
+        "height_bar", TraverseObstacle.Goal.OBSTACLE_POLE
+    ) == "height_bar"
 
 
 def test_stable_semantic_controls_final_action_when_near_view_degrades():
@@ -411,6 +433,19 @@ def test_bridge_platform_alone_cannot_be_traversed_without_a_or_b_evidence():
     assert not obstacle_geometry_fits_candidate("wooden_bridge_unknown", deck)
 
 
+def test_high_wall_geometry_rejects_pit_rail_but_accepts_full_face():
+    from quadruped_interfaces.msg import NavigationSafety
+
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.25
+    safety.width = 1.0
+    assert not obstacle_geometry_fits_candidate("high_wall", safety)
+    safety.obstacle_height = 0.30
+    assert obstacle_geometry_fits_candidate("high_wall", safety)
+
+
 def test_competition_score_counts_unique_tasks_and_return_bonus():
     completed = ["high_wall", "high_wall", "height_bar"]
     assert mission_score(completed, False) == 300
@@ -488,6 +523,7 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["approach_stall_handoff_count"] == 1
     assert params["approach_stall_handoff_max_distance"] == 2.35
     assert params["approach_stall_handoff_max_heading_error"] == 0.22
+    assert params["direct_handoff_max_distance"] == 1.45
     assert params["maximum_search_turns"] == 8
     assert params["inventory_log_period"] == 5.0
     assert params["mission_timeout"] == 300.0
@@ -496,7 +532,7 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["semantic_confirmation_votes"] == 3
     assert params["semantic_recent_window"] == 6
     assert params["semantic_verification_max_attempts"] == 2
-    assert params["failed_entry_turn_angle"] == 0.785398
+    assert params["failed_entry_turn_angle"] == 1.570796
     assert params["failed_entry_settle_time"] == 0.80
     assert params["failed_entry_memory_duration"] == 45.0
     assert params["failed_entry_station_tolerance"] == 0.65

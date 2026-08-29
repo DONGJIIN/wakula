@@ -68,9 +68,10 @@ autonomous_mission:
     nav_rejection_retry_delay: 1.0
     # 规划中止/取消后留给 costmap、行为树和 SLAM 地图边界的恢复时间，避免高频重发。
     nav_failure_retry_delay: 1.0
-    # 越障服务拒绝当前入口后，先交替左/右旋转换视角，而不是在同一点等待冷却后重试。
-    # 角度过小可能仍看到相同侧面；过大会丢失目标并增加定位压力。真机从约 30° 起标定。
-    failed_entry_turn_angle: 0.785398
+    # 越障服务拒绝或障碍挡住 Nav2 后，交替左/右转 90°，先把结构移出前向安全 ROI，
+    # 再尝试换观察站。实跑的 45° 仍让 1 m 宽结构留在正前方，使换站线速度持续被锁零。
+    # 真机应从 60° 逐步试到 90°；更大角度会丢失局部目标并增加定位压力。
+    failed_entry_turn_angle: 1.570796
     # 转向后至少等待数帧稳定点云；相机曝光较慢或点云频率低时应适当增大。
     failed_entry_settle_time: 0.80
     # 同一站位、同一航向已被 Action 拒绝时，45 秒内不允许重新交接；移动超过 0.65 m
@@ -85,6 +86,10 @@ autonomous_mission:
     # map 位置、且距离/横偏均受限。不是“看见障碍就越”的宽松触发器。
     handoff_fallback_max_distance: 1.45
     handoff_fallback_max_lateral: 0.50
+    # 多帧专名、米制几何、横偏和严格约 7° 航向均已通过时，允许真实越障控制器从
+    # 1.45 m 内接管最后低速接近，避免 Nav2 在障碍膨胀层前额外等待一个停滞周期。
+    # 真机控制器无法可靠闭环接近这么远时减小；不要通过放宽航向或语义条件补偿。
+    direct_handoff_max_distance: 1.45
     handoff_fallback_spatial_tolerance: 0.90
     # 长桥/台阶最近前缘漂移超过 0.90 m 时，仅在机器人回到原确认观察位 0.60 m 内、
     # 航向相差不超过 0.70 rad 且粗类型兼容时恢复待办 ID。相邻障碍误关联时先减小这两项。

@@ -272,6 +272,19 @@ def test_segmented_bridge_b_is_not_named_as_the_gravel_pit():
     assert front_obstacle_name_zh(safety) == "木桥 B（分段桥板）"
 
 
+def test_close_gravel_fill_is_not_named_as_segmented_bridge_b():
+    """Full-field pit fill at 0.070 m roughness must retain the pit semantic."""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.217
+    safety.pit_depth = 0.027
+    safety.width = 1.102
+    safety.roughness = 0.070
+    safety.slope_pitch = -0.020
+    assert front_obstacle_name_zh(safety) == "砂砾与碎木坑（填料区）"
+
+
 def test_main_slope_side_is_not_segmented_bridge_b():
     """整场联调实测的主坡侧边不得再次触发长桥 Action。"""
     safety = NavigationSafety()
@@ -295,8 +308,8 @@ def test_crossbar_vision_preserves_height_bar_during_near_step_crop():
     assert front_obstacle_name_zh(safety, "横杆") == "限高杆"
 
 
-def test_full_height_t_stair_sample_is_not_left_generic():
-    """正对 T 台顶面时约 0.455 m 的带噪量测仍应保持规则语义。"""
+def test_overheight_flat_step_requires_another_view_before_t_stair_handoff():
+    """0.455 m 平整立面也可能是主坡侧面，不能直接授权 T 台 Action。"""
     safety = NavigationSafety()
     safety.perception_valid = True
     safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
@@ -304,7 +317,7 @@ def test_full_height_t_stair_sample_is_not_left_generic():
     safety.width = 1.12
     safety.roughness = 0.037
     safety.slope_pitch = 0.0
-    assert front_obstacle_name_zh(safety) == "T 字形台阶"
+    assert front_obstacle_name_zh(safety) == "台阶或木桥踏板（待结构确认）"
 
 
 def test_clear_fourteen_degree_ramp_is_bridge_a():

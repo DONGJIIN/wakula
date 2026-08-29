@@ -389,7 +389,10 @@ def front_obstacle_name_zh(
             # separates them without using the world pose.
             0.19 <= float(safety.obstacle_height) <= 0.27
             and float(safety.width) >= 0.80
-            and float(safety.roughness) >= 0.070
+            # Complete-field samples: real periodic bridge planks are 0.080--
+            # 0.093 m, while gravel/wood fill produced 0.070 m. Keep a small
+            # separation margin so rough pit material cannot become bridge B.
+            and float(safety.roughness) >= 0.078
             and abs(degrees(float(safety.slope_pitch))) < 5.0
         ):
             return "木桥 B（分段桥板）"
@@ -401,6 +404,17 @@ def front_obstacle_name_zh(
             and float(safety.width) >= 0.40
         ):
             return "砂砾与碎木坑（入口/填料区）"
+        # Close views can lose the 0.10 m pit floor behind the deterministic
+        # gravel/wood samples.  The remaining connected fill is a 0.19--0.23 m
+        # rough STEP with only a shallow negative residual.  Bridge B has already
+        # been removed above by its stronger >=0.078 periodic-gap roughness.
+        if (
+            0.19 <= float(safety.obstacle_height) <= 0.23
+            and 0.02 <= float(safety.pit_depth) <= 0.08
+            and 0.045 <= float(safety.roughness) < 0.078
+            and 0.40 <= float(safety.width) <= 1.40
+        ):
+            return "砂砾与碎木坑（填料区）"
         # 两座木桥的起终平台都是约 0.20 m 高、1 m 宽的平整结构。低残差可将它们与
         # T 台的多级踏面区分；A/B 在看见坡或板间隙前仍保持 unknown 语义。
         if (
@@ -425,15 +439,11 @@ def front_obstacle_name_zh(
             and float(safety.roughness) >= 0.04
         )
         if (
-            # Gazebo 正对 0.40 m T 台时，深度离散和倾斜观察会量到约 0.455 m；
-            # 0.48 m 仍远低于需要独立真机能力确认的高墙/大型未知障碍范围。
-            float(safety.obstacle_height) <= 0.48
-            # 同样高度但残差更大的轮廓来自 10° 主坡的长侧边；高于 0.43 m 时用
-            # 顶面平整度区分，避免把侧向坡面错误计为 T 台任务。
-            and (
-                float(safety.obstacle_height) <= 0.43
-                or float(safety.roughness) <= 0.045
-            )
+            # 规则 T 台总高 0.40 m；保留 3 cm 测量余量。全场回归证明主斜坡长侧面
+            # 会连续输出 0.44--0.45 m、低残差且 roll 近零的 STEP，过去的 0.48 m
+            # 上限会把它稳定误报为 T 台并执行错误长距离 Action。高于 0.43 m 必须
+            # 换视角看到真实多级踏面后再确认，不能用“表面平整”作为放宽理由。
+            float(safety.obstacle_height) <= 0.43
             # 主斜坡从长侧观察时会形成与高台阶相似的橘色立面，但坡面法向在机体
             # 横向留下接近 10° 的 roll；真正从入口对准 T 台时 roll 应接近零。
             # 这是坐标无关的几何校验，不读取 Gazebo 障碍名称或位置。
