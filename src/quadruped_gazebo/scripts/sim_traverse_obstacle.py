@@ -2,9 +2,9 @@
 """Gazebo 通用测试狗的 TraverseObstacle Action 适配器。
 
 此节点只属于仿真包。通用狗没有腿部动力学，普通平面速度会被高墙/坑沿的碰撞体挡住；
-因此它通过 Gazebo 标准 SetEntityPose 服务沿已对正方向平滑跨过障碍，用来验证任务编排、
-取消和逐障碍继续探索。真机绝不能启动它；运动团队应以同名 Action server 替换，核心
-导航节点无需修改。
+因此它在任务层完成语义确认和入口对正后，通过 Gazebo 标准 SetEntityPose 服务一次性
+传送到障碍出口，用来验证任务编排、账本和后续探索。传送不模拟接触、步态或中间轨迹；
+真机绝不能启动它。运动团队应以同名 Action server 替换，核心导航节点无需修改。
 """
 
 from math import atan2, cos, pi, sin
@@ -32,57 +32,31 @@ def yaw_from_odometry(msg: Odometry) -> float:
     )
 
 
-def traversal_pose(
+def traversal_landing_pose(
     start_x,
     start_y,
     start_yaw,
     distance,
-    progress,
-    pole=False,
     l_turn=0,
 ):
-    """返回仿真流程在 world/odom 平面中的目标 ``(x, y, yaw)``。
+    """返回一次性传送的 world/odom 出口 ``(x, y, yaw)``。
 
-    普通结构沿对正方向直线跨越；直角绕杆仅用一条平滑 S 曲线表达流程。该函数完全不含
-    world 坐标和障碍名称，真实位置仍由实时里程计决定，方便替换场地布局。
+    普通结构沿对正方向落到另一侧；L 形坑和直角绕杆把总位移分成互相垂直的两臂。
+    本函数没有 progress 或中间位姿，因而不会在 Gazebo 中模拟穿过碰撞体的过程。
+    它完全不含固定 world 坐标，起点仍来自实时里程计。
     """
-    progress = max(0.0, min(1.0, float(progress)))
     total_distance = max(0.0, float(distance))
-    forward = total_distance * progress
+    forward = total_distance
     lateral = 0.0
     heading_delta = 0.0
     if int(l_turn):
-        # 规则砂砾/碎木坑为 L 形：先沿第一臂进入，再在拐角转入第二臂。用两段局部
-        # 直线近似流程，避免旧版沿入口法向直穿后落到赛台外。l_turn=+1 左转、-1 右转；
-        # 仿真后端会预先选择留在场内的一侧。真机控制器应以足端/视觉闭环替换本轨迹。
-        # The published L-shaped pit arms are about one metre each.  ``distance``
-        # also includes the camera-to-entry approach and exit clearance, so a 60%
-        # first leg turns too late and crosses the 6 m arena edge.  48% still keeps
-        # the corner inside the body envelope and crosses the observed entry plane
-        # by the task layer's required post-traversal margin.
+        # 48%/52% only defines the landing displacement of the two rule arms; no
+        # intermediate corner pose is sent to Gazebo.
         first_leg = total_distance * 0.48
-        travelled = total_distance * progress
-        forward = min(first_leg, travelled)
-        second_leg = max(0.0, travelled - first_leg)
+        forward = first_leg
+        second_leg = total_distance - first_leg
         lateral = float(int(l_turn)) * second_leg
-        if second_leg > 0.0:
-            # 拐角处逐步转向，最终机头与第二臂切向一致，不横着结束 Action。
-            turn_progress = min(
-                1.0,
-                second_leg / max(0.01, total_distance - first_leg),
-            )
-            heading_delta = float(int(l_turn)) * (pi / 2.0) * turn_progress
-    elif pole:
-        # 起终点横偏均为零，中段左右绕行；导数决定机身切向方向，避免模型横着跳。
-        lateral = 0.32 * sin(2.0 * pi * progress) * sin(pi * progress)
-        lateral_derivative = 0.32 * (
-            2.0 * pi * cos(2.0 * pi * progress) * sin(pi * progress)
-            + pi * sin(2.0 * pi * progress) * cos(pi * progress)
-        )
-        heading_delta = atan2(
-            lateral_derivative,
-            max(0.01, float(distance)),
-        )
+        heading_delta = float(int(l_turn)) * (pi / 2.0)
     x = start_x + cos(start_yaw) * forward - sin(start_yaw) * lateral
     y = start_y + sin(start_yaw) * forward + cos(start_yaw) * lateral
     return x, y, start_yaw + heading_delta
@@ -100,8 +74,8 @@ def choose_safe_l_traversal(
 ):
     """选择不会越界的 L 形坑路线，返回 ``(入口航向, 转向符号)``。
 
-    同时检查拐角和出口，避免只验证终点却让第一条臂穿过边界。优先小航向修正，并按
-    左/右两种出口都尝试；算法任务层不知道这些仿真几何细节。
+    传送模式没有中间轨迹，所以只检查最终落点。优先小航向修正，并按左/右两种出口
+    都尝试；算法任务层不知道这些仿真几何细节。
     """
     offsets = [0.0]
     maximum_steps = max(0, int(float(maximum_adjustment) / (pi / 36.0)))
@@ -111,21 +85,10 @@ def choose_safe_l_traversal(
     for offset in offsets:
         candidate = float(requested_yaw) + offset
         for turn in (-1, 1):
-            samples = (
-                traversal_pose(
-                    start_x,
-                    start_y,
-                    candidate,
-                    distance,
-                    progress,
-                    l_turn=turn,
-                )
-                for progress in (0.60, 0.80, 1.0)
+            x, y, _yaw = traversal_landing_pose(
+                start_x, start_y, candidate, distance, l_turn=turn
             )
-            if all(
-                pose_inside_arena(x, y, half_length, half_width, margin)
-                for x, y, _yaw in samples
-            ):
+            if pose_inside_arena(x, y, half_length, half_width, margin):
                 return candidate, turn
     return None
 
@@ -176,35 +139,18 @@ class SimTraverseObstacle(Node):
     def __init__(self):
         super().__init__("sim_traverse_obstacle")
         self.declare_parameter("command_topic", "/cmd_vel_teleop")
-        self.declare_parameter("forward_speed", 0.20)
-        # 通用载体没有接触/落脚状态，只能按规则障碍长度给出确定性的流程模拟时间。
-        # 坑洞最长，限高杆只需通过其投影区；这些值绝不能复制到真机控制器。
-        self.declare_parameter("step_duration", 4.0)
-        self.declare_parameter("pit_duration", 11.5)
-        self.declare_parameter("wall_duration", 4.0)
-        self.declare_parameter("bar_duration", 5.0)
-        self.declare_parameter("pole_duration", 9.0)
-        self.declare_parameter("slope_duration", 9.0)
-        # 语义专名用于区分共享粗几何的规则障碍。时长按当前参考模型总长度/0.20 m/s
-        # 留少量出口余量；它们只验证任务编排，绝不是可移植到真机的开环控制参数。
-        self.declare_parameter("main_slope_duration", 17.0)
-        self.declare_parameter("wooden_bridge_a_duration", 23.0)
-        self.declare_parameter("wooden_bridge_b_duration", 30.0)
-        # 单视角只确认木桥平台、还未看到坡/板缝时，先模拟跨过当前横向结构。不能沿用
-        # B 桥 5.70 m 的全长，否则从桥侧接近会把测试模型直接移出 6 m 宽赛场。
-        self.declare_parameter("wooden_bridge_unknown_duration", 14.0)
-        self.declare_parameter("t_shaped_stairs_duration", 16.0)
-        # 参考时长按 0.20 m/s 写成；仿真任务回归使用 0.75 倍时间，相当于约
-        # 0.27 m/s 的平滑位姿更新，可把八项 Action 总时长从约 116 秒压到约 87 秒。
-        # 该系数只加速无腿 Gazebo 替身，不进入 SLAM/自主算法，也不能用于估算真机步态。
-        self.declare_parameter("duration_scale", 0.75)
-        self.declare_parameter("stabilize_duration", 0.6)
+        # 任务层通常要求约 7° 对正；停滞交接最多允许约 12.6°，由真实控制器在
+        # PREPARING 中闭环修正。仿真传送替身没有控制闭环，因此超过该范围直接拒绝，
+        # 防止“看见障碍但没对准”也被伪造为成功。
+        self.declare_parameter("maximum_alignment_error", 0.22)
+        # SetEntityPose 成功后短暂等待里程计发布新位姿，让任务层的越过/稳定后验读取
+        # 到出口位置。它是墙钟等待，不代表真实越障耗时。
+        self.declare_parameter("teleport_settle_duration", 0.25)
         self.declare_parameter("model_name", "generic_quadruped")
         self.declare_parameter(
             "pose_service", "/world/robocon_obstacle_field/set_pose"
         )
         self.declare_parameter("odometry_topic", "/odom")
-        self.declare_parameter("pose_update_rate", 10.0)
         # 从 Action 触发点到障碍表面仍有 request.distance；跨越后不仅要让约 0.75 m 长的
         # 测试机身完全离开碰撞体，还要越过 Nav2 inflation layer。0.75 m 的旧值会让
         # base_link 落在高墙旁的 lethal cell 中，随后所有全局规划都会从非法起点失败。
@@ -280,6 +226,9 @@ class SimTraverseObstacle(Node):
             # CLEAR=1 不应交接；坡面由任务层显式映射为 SLOPE=7。
             and goal.obstacle_type in (2, 3, 4, 5, 6, 7)
             and 0.0 <= goal.confidence <= 1.0
+            and abs(float(goal.heading_error)) <= float(
+                self.get_parameter("maximum_alignment_error").value
+            )
         )
         return GoalResponse.ACCEPT if valid else GoalResponse.REJECT
 
@@ -293,14 +242,6 @@ class SimTraverseObstacle(Node):
                 # ``rclpy.ok()`` 与 publish 之间仍可能收到 launch 的第二个关闭信号；
                 # 这是正常退出竞争，不应把仿真适配器报告成崩溃。
                 pass
-
-    def _simulation_seconds(self):
-        """读取 ROS 仿真时间，暂停 Gazebo 时任务进度也必须同步暂停。
-
-        若用 ``time.monotonic``，Gazebo 被暂停或机器负载过高时 Action 会在真实时间到点后
-        误报成功，尽管测试狗在场景里一步也没走。这会让完整场地回归产生假阳性。
-        """
-        return self.get_clock().now().nanoseconds / 1e9
 
     def _set_model_pose(self, x, y, yaw) -> bool:
         """调用 Gazebo 位姿服务并等待有界墙钟时间，失败时绝不假报越障成功。"""
@@ -328,33 +269,6 @@ class SimTraverseObstacle(Node):
         self.busy = True
         result = TraverseObstacle.Result()
         try:
-            duration_parameter = {
-                2: "step_duration",
-                3: "pit_duration",
-                4: "wall_duration",
-                5: "bar_duration",
-                6: "pole_duration",
-                7: "slope_duration",
-            }[int(handle.request.obstacle_type)]
-            semantic_duration = {
-                "right_angle_poles": "pole_duration",
-                "gravel_wood_pit": "pit_duration",
-                "height_bar": "bar_duration",
-                "high_wall": "wall_duration",
-                "main_slope": "main_slope_duration",
-                "wooden_bridge_a": "wooden_bridge_a_duration",
-                "wooden_bridge_b": "wooden_bridge_b_duration",
-                "wooden_bridge_unknown": "wooden_bridge_unknown_duration",
-                "t_shaped_stairs": "t_shaped_stairs_duration",
-            }.get(str(handle.request.obstacle_id))
-            if semantic_duration:
-                duration_parameter = semantic_duration
-            duration = max(
-                0.5,
-                float(self.get_parameter(duration_parameter).value)
-                * max(0.10, float(self.get_parameter("duration_scale").value)),
-            )
-            speed = max(0.03, min(0.25, float(self.get_parameter("forward_speed").value)))
             if self.latest_odom is None:
                 result.success = False
                 result.message = "simulation odometry unavailable"
@@ -411,11 +325,10 @@ class SimTraverseObstacle(Node):
                         self.get_parameter("wooden_bridge_exit_clearance").value
                     ),
                 )
-            travel_distance = max(
-                speed * duration,
+            travel_distance = (
                 max(0.0, float(handle.request.distance))
                 + semantic_span
-                + exit_clearance,
+                + exit_clearance
             )
             # Action 交接携带当前机身到障碍中心线的剩余航向误差。真实控制器会在
             # PREPARING 阶段闭环消除它；仿真替身过去忽略该字段，导致任务已算出对正
@@ -484,78 +397,32 @@ class SimTraverseObstacle(Node):
                 f"heading_adjust={traversal_yaw - start_yaw:.2f} rad, "
                 f"l_turn={l_turn}"
             )
-            update_period = 1.0 / max(
-                2.0, min(30.0, float(self.get_parameter("pose_update_rate").value))
-            )
-            last_update = -1e9
-            started = self._simulation_seconds()
-            while rclpy.ok() and self._simulation_seconds() - started < duration:
-                if self.shutdown_requested:
-                    self._stop()
-                    handle.abort()
-                    result.success = False
-                    result.message = "simulation traversal stopped during shutdown"
-                    return result
-                if handle.is_cancel_requested:
-                    self._stop()
-                    handle.canceled()
-                    result.success = False
-                    result.message = "simulation traversal cancelled"
-                    return result
-                elapsed = self._simulation_seconds() - started
-                progress = min(1.0, elapsed / duration)
-                if elapsed - last_update >= update_period:
-                    x, y, yaw = traversal_pose(
-                        start_x,
-                        start_y,
-                        traversal_yaw,
-                        travel_distance,
-                        progress,
-                        pole=(
-                            int(handle.request.obstacle_type) == 6
-                            and not int(l_turn)
-                        ),
-                        l_turn=l_turn,
-                    )
-                    if not pose_inside_arena(
-                        x,
-                        y,
-                        self.get_parameter("arena_half_length").value,
-                        self.get_parameter("arena_half_width").value,
-                        self.get_parameter("arena_margin").value,
-                    ):
-                        self._stop()
-                        handle.abort()
-                        result.success = False
-                        result.message = "simulation traversal would leave competition arena"
-                        return result
-                    if not self._set_model_pose(x, y, yaw):
-                        self._stop()
-                        handle.abort()
-                        result.success = False
-                        result.message = "Gazebo pose update failed"
-                        return result
-                    last_update = elapsed
-                # 始终锁住平面速度，防止 DifferentialDrive 在两次 pose update 之间继续
-                # 与碰撞体推挤；位姿服务是本仿真 Action 唯一的运动来源。
+            if self.shutdown_requested:
                 self._stop()
-                feedback = TraverseObstacle.Feedback()
-                feedback.state = TraverseObstacle.Feedback.STATE_TRAVERSING
-                feedback.progress = min(0.9, elapsed / duration * 0.9)
-                feedback.message = "simulation pose-override traversal"
-                handle.publish_feedback(feedback)
-                time.sleep(0.05)
-            # 确保最后一帧精确落在障碍出口，避免 10 Hz 离散更新留下短距离欠行程。
-            final_x, final_y, final_yaw = traversal_pose(
+                handle.abort()
+                result.success = False
+                result.message = "simulation teleport stopped before pose change"
+                return result
+            if handle.is_cancel_requested:
+                self._stop()
+                handle.canceled()
+                result.success = False
+                result.message = "simulation teleport cancelled before pose change"
+                return result
+            feedback = TraverseObstacle.Feedback()
+            feedback.state = TraverseObstacle.Feedback.STATE_TRAVERSING
+            feedback.progress = 0.5
+            feedback.message = "simulation teleporting to obstacle exit"
+            handle.publish_feedback(feedback)
+            # Only the landing pose matters: the bundled model has no leg dynamics and
+            # is intentionally allowed to pass through collision geometry. This single
+            # service call is the complete simulation traversal; there is no hidden
+            # velocity command or intermediate pose sequence.
+            final_x, final_y, final_yaw = traversal_landing_pose(
                 start_x,
                 start_y,
                 traversal_yaw,
                 travel_distance,
-                1.0,
-                pole=(
-                    int(handle.request.obstacle_type) == 6
-                    and not int(l_turn)
-                ),
                 l_turn=l_turn,
             )
             if not pose_inside_arena(
@@ -579,9 +446,12 @@ class SimTraverseObstacle(Node):
                 result.success = False
                 result.message = "simulation shutting down"
                 return result
-            stabilize = max(0.0, float(self.get_parameter("stabilize_duration").value))
-            deadline = self._simulation_seconds() + stabilize
-            while rclpy.ok() and self._simulation_seconds() < deadline:
+            settle = max(
+                0.0,
+                float(self.get_parameter("teleport_settle_duration").value),
+            )
+            deadline = time.monotonic() + settle
+            while rclpy.ok() and time.monotonic() < deadline:
                 self._stop()
                 time.sleep(0.05)
             if self.shutdown_requested:
@@ -591,7 +461,7 @@ class SimTraverseObstacle(Node):
                 return result
             handle.succeed()
             result.success = True
-            result.message = "simulation traversal completed"
+            result.message = "simulation teleport reached obstacle exit"
             return result
         finally:
             self._stop()
@@ -620,7 +490,7 @@ def main(args=None):
     try:
         # Jazzy 的 MultiThreadedExecutor 在 Action 第一次完成后，某些 RMW 组合会让
         # ``spin()`` 的主线程持续命中已就绪 waitable，空闲时占满一个 CPU 核。这里给
-        # 调度循环一个明确的 20 ms 让步：100 Hz 传感器由 Gazebo 独立发布、10 Hz 位姿
+        # 调度循环一个明确的 20 ms 让步：100 Hz 传感器由 Gazebo 独立发布、一次性位姿
         # 服务仍有足够余量，
         # 但健康监控、SLAM 和 Nav2 不会再被仿真替身饿死。仍保留两个 executor 线程，
         # 因为 Action 执行期间必须由另一线程接收 SetEntityPose 的异步服务响应。

@@ -464,8 +464,8 @@ def test_simulation_entry_locks_clock_and_tf_ownership():
     assert 'package="quadruped_gazebo"' not in source
 
 
-def test_autonomous_entry_keeps_field_separate_and_selects_sim_action_backend():
-    """核心入口不创建任务；第三入口仅在仿真时补齐可替换 Action 后端。"""
+def test_autonomous_entry_has_no_simulation_action_backend():
+    """自主任务只运行标准 Action 客户端，不能自动加载 Gazebo 传送后端。"""
     main = (PACKAGE_ROOT / "launch" / "slam.launch.py").read_text(encoding="utf-8")
     compatibility = (
         PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
@@ -478,11 +478,10 @@ def test_autonomous_entry_keeps_field_separate_and_selects_sim_action_backend():
     assert "IncludeLaunchDescription" not in compatibility
     assert 'FindPackageShare("quadruped_gazebo")' not in main
     assert "sim_traverse_obstacle" not in main
-    assert 'package="quadruped_gazebo"' in compatibility
-    assert 'executable="sim_traverse_obstacle"' in compatibility
-    assert '"simulation_traversal_backend"' in compatibility
-    # 仿真 Action 仅按需解析，不能写成 slam 的硬依赖，否则把算法移植到真机仓库时
-    # rosdep/colcon 会无谓要求复制 Gazebo 包。
+    assert 'package="quadruped_gazebo"' not in compatibility
+    assert 'executable="sim_traverse_obstacle"' not in compatibility
+    assert '"simulation_traversal_backend"' not in compatibility
+    # 算法移植到真机仓库时不得要求复制或安装 Gazebo 包。
     manifest = (PACKAGE_ROOT / "package.xml").read_text(encoding="utf-8")
     assert "<exec_depend>quadruped_gazebo</exec_depend>" not in manifest
 

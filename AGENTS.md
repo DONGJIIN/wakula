@@ -21,7 +21,10 @@ Action as proof that a real quadruped can traverse an obstacle.
 
 1. Gazebo, the core SLAM stack, and autonomous navigation remain three independent
    launch processes. Core algorithms must not read Gazebo entity names, world files, or
-   fixed competition coordinates.
+   fixed competition coordinates. The optional simulation-only TraverseObstacle server
+   belongs exclusively to `quadruped_gazebo`: `robocon_field_teleport.launch.py` may
+   start it with the field, while `autonomous_navigation.launch.py` must never start,
+   detect, import, or depend on that backend.
 2. The hardware boundary uses standard topics and frames: `/scan`, `/odom`, `/tf`,
    camera `Image`, terrain `PointCloud2`, `/cmd_vel`, `map`, `odom`, and `base_link`.
 3. OpenCV is supporting evidence. Metric point-cloud geometry is authoritative for

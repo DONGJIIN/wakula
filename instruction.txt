@@ -30,8 +30,8 @@ Action 成功也不能声称真机已经具备越障能力。
    即探索；Ctrl-C 先发布 /navigation/autonomy_stop=true，再取消所有 Action 并退出，核心
    地图和感知继续运行。该信号只锁自动导航分支，键盘/手柄仍有更高优先级并可人工接管；
    下一次启动会发布 false 解锁自动导航速度。
-   仿真时它检测到 /clock 后自动启动通用测试狗的 TraverseObstacle Action 替身，避免入口
-   到达后因没有服务端永久等待；真机时间下不启动替身，必须接入真实运动控制器。
+   它只运行标准 TraverseObstacle Action 客户端，不检测或启动 Gazebo 后端。完整仿真用
+   quadruped_gazebo 的 robocon_field_teleport.launch.py 显式提供替身；真机必须接入真实控制器。
    当 Nav2 在已确认障碍的膨胀边界中止入口跟踪时，任务层不会无限重试：只有最新点云仍
    指向同一 map 位置、置信度/距离/横偏全部满足守卫，才允许交给 Action。控制器返回成功
    后先进入 VERIFYING_TRAVERSAL_RESULT：任务层用独立 TF 检查机体至少前进 0.45 m、越过
@@ -47,7 +47,8 @@ Action 成功也不能声称真机已经具备越障能力。
    按坡面轴或障碍前缘法向主动对正，再提交入口平移目标。单次修正最多 30°，转完等待
    新点云；最终 Action 交接要求航向误差约 7° 内。验证歧义障碍的旋转目标执行期间不会
    被下一帧 READY 提前取消，剩余 0.15 m 以上的入口平移也不会落入无命令死区。
-   正常联调固定为三个独立进程：robocon_field.launch.py（Gazebo 数据源）、slam.launch.py
+   正常完整联调固定为三个独立进程：robocon_field_teleport.launch.py（Gazebo 数据源和
+   一次性传送 Action）、slam.launch.py
    （核心算法）、autonomous_navigation.launch.py（自主任务）。只启动前两项不会自主运动；
    真机只需用真实传感器/底盘替换第一项，核心算法和任务入口不变。
    任一 Nav2 目标连续 5 秒既没有 0.04 m 平移、也没有 0.06 rad 旋转进展，就取消当前
@@ -85,7 +86,7 @@ Action 成功也不能声称真机已经具备越障能力。
    自由格才发送换站目标；无候选时保持停车并改选任务。在线测试证明选择器能找到自由目标，
    但 /terrain/speed_limit 为零时 Nav2 线速度仍被正确拦截，所以“地图上可行”不等于当前
    地形允许移动。不要直接旁路速度门；后续应增加由感知确认撤离方向、短时限、急停和健康
-   心跳共同约束的恢复合同。该轮 300 秒为 1/8 且未返航，当前全工作区 278 项测试通过。
+   心跳共同约束的恢复合同。该轮 300 秒为 1/8 且未返航，当时全工作区 278 项测试通过。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
@@ -267,9 +268,11 @@ Action 成功也不能声称真机已经具备越障能力。
    “rviz2 process has finished cleanly”，则该弹窗不代表当前 SLAM/Nav2/OpenCV 已崩溃。
    TF 诊断统一使用 scripts/diagnose.sh。tf2_echo 是持续输出程序，不要直接接 head 等会
    提前关闭读取管道的命令；否则 ros2run 可能产生与算法无关的 BrokenPipeError 弹窗。
-   robocon_field.launch.py：只启动独立场地、测试载体和传感器/标准接口，不启动任何算法。
-   sim_traversal_controller.launch.py：需要验证越障合同才单独启动仿真 Action；只按障碍类别用受限
-   速度和规则长度估算时长驱动测试载体；它不进入真机入口、不模拟落脚/接触。
+   robocon_field.launch.py：只启动独立场地、测试载体和传感器/标准接口，不启动算法或 Action。
+   robocon_field_teleport.launch.py：在纯场地上增加 Gazebo 专属 `/traverse_obstacle` 替身；任务
+   对准后只调用一次 SetEntityPose 传送到出口并返回成功，不模拟中间轨迹、碰撞、落脚或接触。
+   sim_traversal_controller.launch.py：只在场地已经运行时单独排查该 Action。三个入口均不进入
+   核心算法；autonomous_navigation.launch.py 永远只运行 Action 客户端。
 
 三、决策原则
 ----------
@@ -463,8 +466,7 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    自主任务需要 `/map`、`map -> base_link`、标准 Nav2 `/navigate_to_pose`、实时
    `/traversal/guidance` 和 `/perception/front_obstacle_name`。复制 `slam` 包时使用：
 
-     ros2 launch slam autonomous_navigation.launch.py \
-       use_sim_time:=false simulation_traversal_backend:=false
+     ros2 launch slam autonomous_navigation.launch.py use_sim_time:=false
 
    真机运动组必须提供 `/traverse_obstacle` Action 服务端；没有服务端时任务只会等待，不会
    生成腿部动作。目标仓库仍负责 Action 控制权仲裁、接触/姿态闭环和硬件急停。
@@ -472,8 +474,8 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    默认 `autonomous_mission.yaml` 使用 300 秒总预算和 60 秒返程预留。真机场地、步态速度或
    规则时限变化时，应先用 rosbag/任务日志统计“自由空间导航、识别对正、单项 Action、返程”
    四类耗时，再调整 mission_timeout/return_time_reserve；后者必须小于前者。不要为抢时间
-   删除语义、空间、横偏、航向或完成后验守卫。Gazebo 的 duration_scale 只压缩无腿替身时间，
-   真机 Action 用接触、姿态和落地稳定判据决定何时结束。
+   删除语义、空间、横偏、航向或完成后验守卫。Gazebo 替身是一次位姿传送，没有可移植的
+   动作时长；真机 Action 用接触、姿态和落地稳定判据决定何时结束。
 
    若返程日志反复出现 return_home made no pose progress，同时 terrain mode=CLIMB/STOP、
    `/cmd_vel_smoothed` 是“小线速度 + yaw”而最终 `/cmd_vel` 为零，先检查
@@ -646,8 +648,7 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
    Action 接管、真实控制器完成动作并稳定落地、任务层再次用地图位姿确认已经越过入口。
    只有以上条件全部满足才允许 Result.success=true。单障碍重复通过后才启动自主任务：
 
-     ros2 launch slam autonomous_navigation.launch.py \
-       use_sim_time:=false simulation_traversal_backend:=false
+     ros2 launch slam autonomous_navigation.launch.py use_sim_time:=false
 
    观察 `/autonomy/state`、`/autonomy/event`、`/autonomy/completed_obstacles` 和
    `/autonomy/pending_obstacles`。不要在真机启动 Gazebo 的 `sim_traverse_obstacle` 替身。

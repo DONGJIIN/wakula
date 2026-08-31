@@ -69,7 +69,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，278 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，279 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -179,7 +179,7 @@ wakula/
 | 包 | 主要职责 | 关键入口 |
 |---|---|---|
 | `quadruped_description` | 未标定的 RViz 外形和雷达/相机占位坐标系 | `display.launch.py` |
-| `quadruped_gazebo` | 独立比赛障碍 world、测试载体与传感器数据源，不启动任何算法 | `robocon_field.launch.py` |
+| `quadruped_gazebo` | 独立比赛场地/传感器；可选一次性传送越障替身，不启动任何算法 | `robocon_field.launch.py`、`robocon_field_teleport.launch.py` |
 | `quadruped_bringup` | 感知、地形决策、速度门和占位模型公共入口 | `bringup.launch.py` |
 | `quadruped_interfaces` | 带时间戳的感知、导航与越障交接合同 | 五个 `msg/` + `TraverseObstacle.action` |
 | `quadruped_perception` | OpenCV、栅格地面分割、几何分类、时间同步融合 | 三个感知节点 |
@@ -648,12 +648,12 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 正常联调只运行下面三个命令，每个终端一个命令，职责互不包含：
 
 ```bash
-ros2 launch quadruped_gazebo robocon_field.launch.py
+ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
 ros2 launch slam slam.launch.py
 ros2 launch slam autonomous_navigation.launch.py
 ```
 
-第一条只提供独立 Gazebo 场地、测试载体和标准传感器/运动接口；第二条只运行核心
+第一条只提供独立 Gazebo 场地、测试载体、标准传感器/运动接口和仿真传送 Action；第二条只运行核心
 SLAM、Nav2、OpenCV、点云和 RViz，且默认没有自主任务；第三条才启动自主探索与越障编排。
 真机联调时用真实驱动替换第一条，后两条保持不变。
 
@@ -672,9 +672,10 @@ OpenCV、RViz 和地图继续运行。退出时先通过 `/navigation/autonomy_s
 每次只锁定一个障碍；历史记录只负责回到曾经安全的观察位，真正越障前仍要重新通过实时
 点云、视觉、距离、横偏和航向门。前沿目标来自 `/map`，代码不读比赛 world 坐标；正式
 坐标改变不需要修改任务算法。真机必须由运动控制团队实现
-`quadruped_interfaces/action/TraverseObstacle` 服务端。第三个命令检测到 `/clock` 时会自动
-启动通用测试狗的平面越障 Action 替身，使三命令仿真能够完成“入口—越障—继续探索”；
-真机时间下不会启动该替身。
+`quadruped_interfaces/action/TraverseObstacle` 服务端。核心第三个命令永远不启动仿真后端；
+仿真传送服务完全归第一条 Gazebo 组合入口所有。任务确认障碍并把航向误差收敛到 0.22 rad
+以内后，替身只调用一次 Gazebo SetEntityPose，把测试狗放到按实时入口距离和规则结构长度
+计算的出口并返回成功；不模拟碰撞、步态或中间轨迹。
 
 入口导航若在已确认比赛障碍的膨胀边界中止，任务层只在最新点云仍指向同一 `map`
 位置且置信度、距离、横偏全部满足守卫时交给 Action，避免永久重试，也不会把普通规划
@@ -698,8 +699,8 @@ ros2 topic echo /autonomy/progress
 
 默认任务总预算为 300 秒，其中最后 60 秒是返程保留窗口；因此最迟约第 240 秒停止发起
 新探索并导航到终点。若正在执行 TraverseObstacle，会先完成或安全失败再返程；返程受阻
-仍继续恢复重试，不会在第 300 秒突然原地停车。Gazebo 无腿 Action 替身单独使用 0.75
-时长系数，把八项模拟动作总时长由约 116 秒降到约 87 秒；该参数不属于算法和真机控制器。
+仍继续恢复重试，不会在第 300 秒突然原地停车。Gazebo 无腿 Action 替身使用一次性传送，
+没有仿真动作时长；它只验证上层任务是否正确发现、对正、登记并继续探索。
 当正前方危险使地形限速为零时，DWB 可能输出约 `0.10 m/s + 0.20 rad/s` 的转向主导命令；
 速度门会强制丢弃其中线速度，只放行最大 0.30 rad/s 的 yaw，使机器人能转离障碍继续返程。
 导航健康、超时、外部停车和全向 0.22 m 雷达急停仍具有否决权。
@@ -734,16 +735,21 @@ ros2 topic echo /autonomy/progress
 `/autonomy/finish_pose`（`PoseStamped`、`frame_id=map`）覆盖；这只是标准 ROS 接口，不让
 任务算法依赖 Gazebo 或固定场地坐标。
 
-Gazebo 场地与算法完全分开。仿真时场地只提供测试模型和传感器数据：
+Gazebo 场地与算法完全分开。只测试传感器/建图时使用纯场地入口：
 
 ```bash
 ros2 launch quadruped_gazebo robocon_field.launch.py
 ```
 
-然后分别运行核心 `slam.launch.py` 和可选 `autonomous_navigation.launch.py`。Gazebo 入口
-不加载 SLAM、Nav2、OpenCV、自主任务或越障 Action。仿真 Action 替身由第三个命令按
-`/clock` 自动选择，仍不属于 Gazebo 场地入口，也不读取 world 坐标；它只验证流程，不能
-代表真实四足越障能力。
+需要测试完整自主任务时，第一条改为：
+
+```bash
+ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
+```
+
+该组合入口仍只属于 Gazebo：它在纯场地基础上增加 `/traverse_obstacle` 一次性传送替身，
+不加载 SLAM、Nav2、OpenCV 或自主任务。`autonomous_navigation.launch.py` 不再检测或启动
+任何仿真节点；真机由真实控制器提供同名 Action。
 
 启动 `slam.launch.py` 后先看终端摘要。仿真联调必须显示
 `simulation_detected=true, use_sim_time=true, robot_model=false`；入口会对 `/clock` 做多次
@@ -776,6 +782,12 @@ Nav2 或 OpenCV。
 
 ```bash
 ros2 launch quadruped_gazebo robocon_field.launch.py
+```
+
+场地、传感器和“对准后传送到出口”的仿真 Action（整场上层流程测试推荐）：
+
+```bash
+ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
 ```
 
 无显示器运行，或只看场地而不生成测试载体：
@@ -1175,8 +1187,9 @@ Action 交接、完成去重、任务清单和终点导航；默认把实时起�
 | `quadruped_interfaces/msg/`、`action/` | 地形、视觉、融合消息与越障 Action 合同 |
 | `quadruped_description/urdf/` | 未标定外形、关节和传感器占位坐标系 |
 | `quadruped_gazebo/worlds/robocon_obstacle_field.sdf` | 规则障碍尺寸、颜色和集中式参考布局 |
-| `quadruped_gazebo/launch/robocon_field.launch.py` | 独立 Gazebo/传感器桥入口，不加载算法 |
-| `quadruped_gazebo/launch/sim_traversal_controller.launch.py` | 可选仿真 Action 替身；不启动场地或算法 |
+| `quadruped_gazebo/launch/robocon_field.launch.py` | 纯 Gazebo/传感器桥入口，不加载算法或越障替身 |
+| `quadruped_gazebo/launch/robocon_field_teleport.launch.py` | Gazebo 场地 + 对准后一次传送 Action；不加载算法 |
+| `quadruped_gazebo/launch/sim_traversal_controller.launch.py` | 仅单独排查仿真 Action，不启动场地或算法 |
 | `quadruped_perception/config/vision.yaml` | HSV、Canny、多帧确认、图像资源限制 |
 | `quadruped_perception/config/terrain.yaml` | 点云话题、ROI、采样和地形阈值 |
 | `quadruped_planning/config/terrain_navigation.yaml` | 地形分类阈值、视觉辅助和速度门超时 |

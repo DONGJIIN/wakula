@@ -17,9 +17,8 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>quadruped_bringup</exec_depend>
   <exec_depend>quadruped_planning</exec_depend>
-  <!-- autonomous_navigation.launch.py 可在仿真时选择 Gazebo 测试 Action 后端，但 Gazebo
-       不是核心/真机运行依赖。仿真工作空间自行提供 quadruped_gazebo；算法移植时不应
-       被迫复制或安装它，slam.launch.py 也不会启动任何 Gazebo 进程。 -->
+  <!-- Gazebo 不是核心/真机运行依赖。仿真 TraverseObstacle 后端只由
+       quadruped_gazebo 自己的 launch 启动；本包永远只运行标准 Action 客户端。 -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ros2lifecycle</exec_depend>
   <exec_depend>lifecycle_msgs</exec_depend>

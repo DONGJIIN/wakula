@@ -53,17 +53,7 @@ def _launch_mission(context):
     if requested not in {"auto", "true", "false"}:
         raise RuntimeError("use_sim_time must be auto, true or false")
     use_sim_time = _clock_is_available() if requested == "auto" else requested == "true"
-    requested_backend = LaunchConfiguration("simulation_traversal_backend").perform(
-        context
-    ).lower()
-    if requested_backend not in {"auto", "true", "false"}:
-        raise RuntimeError(
-            "simulation_traversal_backend must be auto, true or false"
-        )
-    start_sim_backend = (
-        use_sim_time if requested_backend == "auto" else requested_backend == "true"
-    )
-    actions = [
+    return [
         Node(
             package="quadruped_planning",
             executable="autonomous_mission",
@@ -75,21 +65,6 @@ def _launch_mission(context):
             ],
         )
     ]
-    if start_sim_backend:
-        # 这是无腿部动力学测试狗的可替换 Action 后端，不读取 world 坐标，也不进入
-        # slam.launch.py。真机 use_sim_time=false 时绝不会启动，由真实运动控制器提供
-        # 完全相同的 /traverse_obstacle Action。
-        actions.insert(
-            0,
-            Node(
-                package="quadruped_gazebo",
-                executable="sim_traverse_obstacle",
-                name="sim_traverse_obstacle",
-                output="screen",
-                parameters=[{"use_sim_time": use_sim_time}],
-            ),
-        )
-    return actions
 
 
 def generate_launch_description():
@@ -98,14 +73,6 @@ def generate_launch_description():
             "use_sim_time",
             default_value="auto",
             description="auto detects /clock; true for simulation, false for hardware",
-        ),
-        DeclareLaunchArgument(
-            "simulation_traversal_backend",
-            default_value="auto",
-            description=(
-                "auto starts the generic TraverseObstacle test backend only when "
-                "simulation time is detected; set false for a real controller"
-            ),
         ),
         DeclareLaunchArgument(
             "mission_params_file",

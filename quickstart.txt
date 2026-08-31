@@ -11,7 +11,7 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、278 项测试记录通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
+当前基线：9 个 ROS 2 包、279 项测试记录通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
 多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
 前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
 这里只代表 Gazebo 软件链，不代表真机验收。
@@ -143,6 +143,16 @@ returned_home=true、elapsed_seconds<=300 三项同时成立。
 安全目标，但地形速度门仍锁住线速度，砂砾坑仿真 L 轨迹也因会越出场地而被后验拒绝。
 300 秒结果为 1/8、未回起点；当前 278 项自动测试通过，但整场验收仍失败。
 
+2026-08-31 仿真边界整理：无动力学测试狗不再逐帧“穿过”碰撞体。完整流程第一条改用
+`ros2 launch quadruped_gazebo robocon_field_teleport.launch.py`，任务层完成实时识别和对正后，
+Gazebo 替身只调用一次 SetEntityPose 将模型传送到出口并返回 Action 成功。纯传感器/SLAM
+测试仍用 `robocon_field.launch.py`。`autonomous_navigation.launch.py` 已完全移除 Gazebo 后端
+选择和启动代码，真机只需提供同名 `/traverse_obstacle` 服务端。当前 279 项自动测试通过。
+隔离 ROS 域实测中，高墙测试 Goal 只产生一帧 0.5 进度反馈，模型从 (-2.50,-0.20) 一次
+到达 (-4.25,-0.20)，Result 为 SUCCEEDED/success=true；0.30 rad 未对准 Goal 被拒绝。
+随后启动 autonomous_navigation 仍只有一个 /sim_traverse_obstacle 节点，证明核心没有
+暗中创建第二个后端。测试结束后场地、传送器和自主任务进程均已停止。
+
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
 入口、Action 客户端/合同和后续探索；没有真实服务端时不会抬腿或完成真实跨越。当前 Gazebo
@@ -215,14 +225,14 @@ SLAM 产生 map -> odom。启用地形感知还需：
   cd ~/wakula
   source /opt/ros/jazzy/setup.bash
   source install/setup.bash
-  # 终端 1：仅 Gazebo 场地、测试载体、传感器和运动接口
-  ros2 launch quadruped_gazebo robocon_field.launch.py
+  # 终端 1：Gazebo 场地/传感器 + 独立的一次性传送越障替身
+  ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
   # 终端 2：仅核心 SLAM、Nav2、OpenCV、点云和 RViz
   ros2 launch slam slam.launch.py
   # 终端 3：独立自主探索与越障任务；启动即运行
   ros2 launch slam autonomous_navigation.launch.py
 
-第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo；现实传感器和 Gazebo 传感器接口
+第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo，也不启动仿真越障后端；现实传感器和 Gazebo 传感器接口
 一致。在第三个终端按 Ctrl-C，会先锁住自动导航速度并停车，再取消 Action；第一、二条
 进程继续运行。键盘或手柄持续发布时仍可人工接管，不需要重新启动第三条。
 
@@ -243,8 +253,9 @@ SLAM 产生 map -> odom。启用地形感知还需：
 第一条在 GUI 模式下会自动打开 `Wakula Simulation Keyboard` 窗口；点击该窗口后使用
 i/k 前后、j/l 原地旋转、任意其他键停车。无需运行第四条键盘命令。
 
-真机要求运动组提供 /traverse_obstacle Action 服务端。仿真时第三个命令检测到 /clock 后
-自动启动通用测试狗的 Action 替身，不再需要第四个常规命令。Gazebo 场地仍独立启动：
+真机要求运动组提供 /traverse_obstacle Action 服务端。仿真三命令模式由第一个 Gazebo
+组合入口提供一次性传送 Action；第三个自主任务命令不包含任何仿真代码。只做 SLAM/感知、
+不测试任务越障时可改用纯场地入口：
 
   ros2 launch quadruped_gazebo robocon_field.launch.py
 
@@ -301,6 +312,10 @@ Ctrl-C。自主任务默认不启动；按住不会重复触发。下键只结�
 Gazebo 比赛参考场地（同样独立，不加入 slam.launch.py）：
 
   ros2 launch quadruped_gazebo robocon_field.launch.py
+
+完整自主流程使用 Gazebo 组合入口（场地 + 对准后一次传送 Action，仍不含算法）：
+
+  ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
 
 无 GUI：
 

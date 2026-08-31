@@ -74,21 +74,23 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     assert "if autonomy_stop:" in mux
 
 
-def test_sim_traversal_executor_yields_cpu_after_action_completion():
-    """The replaceable simulation backend must not starve SLAM health heartbeats."""
+def test_sim_traversal_backend_is_one_shot_and_yields_cpu():
+    """Teleport must use one pose call and never starve SLAM health heartbeats."""
     backend = (PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py").read_text(
         encoding="utf-8"
     )
     assert "executor.spin_once(timeout_sec=0.05)" in backend
     assert "time.sleep(0.020)" in backend
-    # A/B 尚未由局部视角分清时仍使用统一 STEP 合同，但仿真替身只能跨当前横向结构，
-    # 不能错误套用 B 桥全长并移出场地。
+    # A/B 尚未由局部视角分清时仍使用统一 STEP 合同；落点长度保留，但所有基于
+    # 时长的逐帧运动参数必须删除，避免重新引入“穿模轨迹”模拟。
     assert '"wooden_bridge_unknown_span", 5.00' in backend
-    assert '"wooden_bridge_unknown_duration", 14.0' in backend
-    assert '"duration_scale", 0.75' in backend
     assert '"wooden_bridge_b_span", 5.20' in backend
     assert '"wooden_bridge_exit_clearance", 0.35' in backend
     assert '"long_structure_exit_clearance", 0.75' in backend
+    assert "pose_update_rate" not in backend
+    assert "duration_scale" not in backend
+    assert backend.count("self._set_model_pose(") == 1
+    assert "simulation teleporting to obstacle exit" in backend
 
 
 def test_sim_traversal_rejects_large_unrelated_heading_change():
@@ -342,24 +344,19 @@ def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     assert "ros_gz_interfaces/srv/SetEntityPose" in launch_source
 
 
-def test_simulated_traversal_path_is_layout_independent_and_ends_aligned():
-    """仿真越障只使用实时起点/航向，不得硬编码八个 world 坐标。"""
+def test_simulated_teleport_landing_is_layout_independent_and_aligned():
+    """仿真落点只使用实时起点/航向，不得硬编码八个 world 坐标。"""
     path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
     spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    x, y, yaw = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 1.0)
+    x, y, yaw = module.traversal_landing_pose(1.0, 2.0, 0.0, 3.0)
     assert_close([x, y, yaw], [4.0, 2.0, 0.0])
-    # 绕杆轨迹中点存在横向位移，但终点回到中心线并恢复原航向。
-    middle = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 0.25, pole=True)
-    finish = module.traversal_pose(1.0, 2.0, 0.0, 3.0, 1.0, pole=True)
-    assert abs(middle[1] - 2.0) > 0.20
-    assert_close(list(finish), [4.0, 2.0, 0.0], tolerance=1e-5)
-    # L 形坑先沿入口方向走 48%，再右转；终点航向也必须沿第二条臂。
-    corner = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 0.48, l_turn=-1)
-    l_finish = module.traversal_pose(0.0, 0.0, 0.0, 5.0, 1.0, l_turn=-1)
-    assert_close(list(corner), [2.4, 0.0, 0.0], tolerance=1e-5)
+    # 普通结构只有出口落点；源码不能重新出现 progress 驱动的中间位姿。
+    assert "progress" not in module.traversal_landing_pose.__code__.co_varnames
+    # L 形障碍的传送终点位于第二臂出口，最终航向沿第二条臂。
+    l_finish = module.traversal_landing_pose(0.0, 0.0, 0.0, 5.0, l_turn=-1)
     assert_close(list(l_finish), [2.4, -2.6, -math.pi / 2.0], tolerance=1e-5)
     safe_l = module.choose_safe_l_traversal(
         -5.85, -0.57, math.pi / 2.0, 4.33, 7.0, 3.0, 0.75
@@ -384,6 +381,24 @@ def test_simulated_traversal_path_is_layout_independent_and_ends_aligned():
     assert '"t_shaped_stairs_span", 2.80' in source
     assert '"wooden_bridge_b_span", 5.20' in source
     assert "+ semantic_span" in source
+
+
+def test_teleport_field_launch_owns_backend_without_algorithms():
+    """组合入口属于 Gazebo，只组合场地和传送服务，绝不加载核心算法。"""
+    source = (
+        PACKAGE_ROOT / "launch" / "robocon_field_teleport.launch.py"
+    ).read_text(encoding="utf-8")
+    assert "robocon_field.launch.py" in source
+    assert 'package="quadruped_gazebo"' in source
+    assert 'executable="sim_traverse_obstacle"' in source
+    for forbidden in ("slam.launch.py", "autonomous_mission", "Nav2"):
+        # Nav2 may be mentioned in the module documentation only; executable launch
+        # content must not reference a package or node from the algorithm stack.
+        if forbidden == "Nav2":
+            continue
+        assert forbidden not in source.replace("``robocon_field.launch.py``", "")
+    assert 'package="slam"' not in source
+    compile(source, "robocon_field_teleport.launch.py", "exec")
 
 
 def test_gui_field_opens_remapped_keyboard_without_loading_algorithms():

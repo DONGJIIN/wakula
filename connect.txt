@@ -114,8 +114,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   false；退出先发布 true。最终仲裁器收到 true 后只锁自动导航分支；有效键盘/手柄输入
   仍可人工接管。标准优先级：人工输入 > 自动导航锁 > 自动导航输入 > 零速度。
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
-        /traverse_obstacle 服务端。仿真时 autonomous_navigation.launch.py 自动启动
-        sim_traverse_obstacle 替身；它不属于场地或真机算法。
+        /traverse_obstacle 服务端。autonomous_navigation.launch.py 永远不启动仿真服务端；
+        仿真替身只由 quadruped_gazebo 的独立 launch 显式启动。
   对正：确认唯一障碍后先调用 /navigate_to_pose 做同位置纯 yaw 对正，再接近入口；单次
         最多修正 0.524 rad，转后等待 0.6 s 新感知，Action 交接航向门限为 0.12 rad。
   回访：多帧语义确认后记录“障碍 map 位置 + 当时安全观察位”。若尚未完成，空闲时优先
@@ -227,7 +227,7 @@ stack_regression（测试工具，不随一键启动运行）
         Nav2 Action；额外检查错误 READY 和 ALIGN/READY 快速往返。
   输出：reports/*.json；真机禁止运行运动阶段。
 
-2.7 独立 Gazebo 节点（只随 robocon_field.launch.py 启动）
+2.7 独立 Gazebo 节点（只由 quadruped_gazebo 的 launch 管理）
 
 /robocon_clock_bridge（ros_gz_bridge / parameter_bridge）
   作用：独立发布 /clock，避免其他传感器转换阻塞所有 use_sim_time 节点。
@@ -245,13 +245,14 @@ stack_regression（测试工具，不随一键启动运行）
   输出：/cmd_vel_teleop；i/k 前后、j/l 原地旋转，其他键停车。
   注意：只属于仿真输入，不启动或关闭 SLAM、自主任务；命令仍由 sim_cmd_vel_mux 仲裁。
 
-/sim_traverse_obstacle（仿真越障 Action 替身）
-  作用：在无动力学测试载体上实现 /traverse_obstacle，验证任务交接与继续探索流程。
-  输入：TraverseObstacle goal；输出：Action feedback/result 和受限仿真速度。运行时长按障碍
-        类别和规则长度给出可重复估计，不使用 Gazebo 模型坐标。
-  生命周期：仿真时由 autonomous_navigation.launch.py 自动启动；也可由开发者单独运行
-        sim_traversal_controller.launch.py 验证合同。不随 robocon_field.launch.py、
-        slam.launch.py 或真机入口启动，不能代表真实越障。
+/sim_traverse_obstacle（仿真一次性传送 Action 替身）
+  作用：在无动力学测试载体上实现 /traverse_obstacle；任务对准后把模型一次传送到障碍出口，
+        用于验证任务登记与继续探索，不模拟碰撞、步态或中间轨迹。
+  输入：TraverseObstacle goal、/odom、Gazebo set_pose 服务；航向误差绝对值必须不超过
+        0.22 rad。输出：一次 Action feedback、Result 和停止用零 Twist。
+  生命周期：推荐随 quadruped_gazebo/robocon_field_teleport.launch.py 启动；也可在纯场地
+        已运行时单独启动 sim_traversal_controller.launch.py。绝不随 slam.launch.py、
+        autonomous_navigation.launch.py 或真机入口启动，不能代表真实越障。
 
 /robocon_aux_sensor_bridge（ros_gz_bridge / parameter_bridge）
   作用：桥接 /imu/data 和 /camera/camera_info；辅助数据异常不影响导航桥。
