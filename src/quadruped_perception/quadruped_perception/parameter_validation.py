@@ -39,6 +39,8 @@ VISION_PARAMETER_NAMES = (
     "min_bar_aspect_ratio",
     "max_bar_width_ratio",
     "max_bar_height_ratio",
+    "segmented_bar_max_gap_ratio",
+    "segmented_bar_max_gap_cv",
     "min_image_quality",
     "history_size",
     "confirmation_frames",
@@ -224,6 +226,8 @@ def validate_vision_parameters(values: Mapping[str, object]) -> None:
         errors.append("min_bar_aspect_ratio must be >= 1")
     _range(values, "max_bar_width_ratio", 0.0, 1.0, errors)
     _range(values, "max_bar_height_ratio", 0.0, 1.0, errors)
+    _positive(values, "segmented_bar_max_gap_ratio", errors)
+    _range(values, "segmented_bar_max_gap_cv", 0.0, 2.0, errors)
     _range(values, "min_image_quality", 0.0, 1.0, errors)
     history_size = _integer(values, "history_size", errors)
     confirmation_frames = _integer(values, "confirmation_frames", errors)

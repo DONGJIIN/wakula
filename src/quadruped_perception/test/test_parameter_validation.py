@@ -42,6 +42,8 @@ def test_vision_validation_reports_all_related_mistakes_at_once():
         roi_bottom_ratio=0.2,
         history_size=2,
         confirmation_frames=3,
+        segmented_bar_max_gap_ratio=0.0,
+        segmented_bar_max_gap_cv=3.0,
     )
     with pytest.raises(ValueError) as error:
         validate_vision_parameters(values)
@@ -49,6 +51,8 @@ def test_vision_validation_reports_all_related_mistakes_at_once():
     assert "processing_hz" in message
     assert "roi_top_ratio" in message
     assert "confirmation_frames" in message
+    assert "segmented_bar_max_gap_ratio" in message
+    assert "segmented_bar_max_gap_cv" in message
 
 
 def test_vision_validation_rejects_invalid_hsv_and_topics():

@@ -110,6 +110,18 @@ def test_detects_blue_white_segmented_competition_height_bar():
     assert evidence.center_y >= 0.80
 
 
+def test_segmented_bar_rejects_irregular_aligned_blue_clutter():
+    """Three blue objects on one row are not a bar without repeated spacing."""
+    empty = np.zeros((240, 320), dtype=np.uint8)
+    blue = np.zeros_like(empty)
+    # Similar blue pieces but gaps of 8 px then 105 px: this models signs/clothing
+    # that previously passed horizontal alignment and could stabilize across frames.
+    for left in (40, 69, 195, 224):
+        cv2.rectangle(blue, (left, 105), (left + 20, 112), 255, -1)
+    evidence = detect_obstacle_evidence(empty, blue, empty, 300.0)
+    assert evidence.hint != "height_bar"
+
+
 def test_height_bar_rejects_scene_spanning_floor_or_horizon_region():
     """贴近左右边界的宽高色块是场地/地平线，不应长期触发横杆限速。"""
     empty = np.zeros((240, 320), dtype=np.uint8)

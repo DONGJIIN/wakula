@@ -87,9 +87,17 @@ class ConservativeAssessmentFilter:
         """初始化非对称迟滞；恢复所需帧数通常大于危险确认帧数。"""
         self.clear_frames = max(1, int(clear_frames))
         self.hazard_frames = max(1, int(hazard_frames))
+        self.initial = initial
         self.current = initial
         self.pending_mode = None
         self.pending_count = 0
+
+    def reset(self) -> Assessment:
+        """Discard pending votes after a sensor session or ROS-clock reset."""
+        self.current = self.initial
+        self.pending_mode = None
+        self.pending_count = 0
+        return self.current
 
     def update(self, candidate: Assessment) -> Assessment:
         """返回经过连续帧确认后的稳定评估。"""
@@ -147,9 +155,17 @@ class ObstacleNameStabilizer:
     ):
         self.confirmation_frames = max(1, int(confirmation_frames))
         self.clear_frames = max(1, int(clear_frames))
-        self.current = str(initial)
+        self.initial = str(initial)
+        self.current = self.initial
         self.pending = ""
         self.pending_count = 0
+
+    def reset(self) -> str:
+        """Forget semantic votes so replay/reconnect starts from invalid data."""
+        self.current = self.initial
+        self.pending = ""
+        self.pending_count = 0
+        return self.current
 
     def update(self, candidate: str, perception_valid: bool) -> str:
         """Return the stable name for one observation."""
@@ -728,6 +744,27 @@ def fused_observation_valid(
     )
 
 
+def observation_stamp_strictly_advances(
+    previous_stamp: float | None, current_stamp: float
+) -> bool:
+    """Reject duplicate/out-of-order fused frames from temporal confirmation.
+
+    Freshness relative to ``now`` is necessary but insufficient: two packets can both
+    be recent while the second is a DDS duplicate or an older driver-buffered sample.
+    Such a packet must not refresh the perception heartbeat or count as another
+    obstacle vote. A caller resets ``previous_stamp`` to ``None`` when ROS time moves
+    backward and a new bag/simulator session begins.
+    """
+    if not isfinite(float(current_stamp)) or float(current_stamp) <= 0.0:
+        return False
+    if previous_stamp is None:
+        return True
+    return (
+        isfinite(float(previous_stamp))
+        and float(current_stamp) > float(previous_stamp) + 1e-9
+    )
+
+
 def select_fused_assessment(
     msg: FusedObstacle,
     min_confidence: float,
@@ -905,6 +942,8 @@ class TerrainSafetyAssessor(Node):
             10,
         )
         self.last_features_time = self.get_clock().now()
+        self.last_fused_stamp = None
+        self.last_fused_clock_seconds = None
         self.last_vision_time = None
         self.visual_target = False
         self.visual_hint_name = ""
@@ -1053,12 +1092,29 @@ class TerrainSafetyAssessor(Node):
         if not self.prefer_fused:
             return
         now = self.get_clock().now()
+        now_seconds = now.nanoseconds * 1e-9
         stamp = (
             float(msg.header.stamp.sec)
             + float(msg.header.stamp.nanosec) * 1e-9
         )
+        clock_rewound = (
+            self.last_fused_clock_seconds is not None
+            and now_seconds < self.last_fused_clock_seconds - 1e-9
+        )
+        self.last_fused_clock_seconds = now_seconds
+        if clock_rewound:
+            # Rosbag/Gazebo restart creates a new timestamp epoch. Old hazard/name
+            # votes and the old watermark cannot be mixed with the new session.
+            self.last_fused_stamp = None
+            self.assessment_filter.reset()
+            self.name_stabilizer.reset()
+            self.latest_observation = None
+            self.perception_valid = False
+            self.get_logger().warning(
+                "ROS clock moved backward; reset fused perception history"
+            )
         if not observation_stamp_is_current(
-            now.nanoseconds * 1e-9,
+            now_seconds,
             stamp,
             self.sensor_timeout,
             self.future_stamp_tolerance,
@@ -1068,6 +1124,18 @@ class TerrainSafetyAssessor(Node):
             self.latest_observation = None
             self._publish_candidate(("STOP", 0.0))
             return
+        if not observation_stamp_strictly_advances(
+            self.last_fused_stamp, stamp
+        ):
+            # Ignore rather than republish: timeout_callback will stop navigation if
+            # the producer keeps replaying one recent stamp, so duplicate traffic
+            # cannot masquerade as a healthy 5 Hz sensor or satisfy semantic votes.
+            self.get_logger().warning(
+                "Ignoring duplicate/out-of-order fused obstacle frame",
+                throttle_duration_sec=2.0,
+            )
+            return
+        self.last_fused_stamp = stamp
         self.last_features_time = now
         self.latest_observation = msg
         self.perception_valid = fused_observation_valid(

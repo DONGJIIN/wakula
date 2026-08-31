@@ -38,6 +38,7 @@ from quadruped_perception.parameter_validation import (
 )
 from quadruped_perception.sensor_contracts import (
     point_cloud_message_contract_valid,
+    source_stamp_strictly_advances,
     source_stamp_is_plausible,
 )
 from quadruped_perception.terrain_geometry import (
@@ -432,6 +433,10 @@ class TerrainAnalyzer(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.latest_cloud = None
         self.last_processed_stamp = None
+        # Header watermark belongs to the currently selected source. Duplicate or
+        # out-of-order clouds must not replace ``latest_cloud`` or refresh ownership,
+        # otherwise one physical scan can be counted as several geometry frames.
+        self.last_received_source_stamp = None
         self.active_topic = None
         self.last_active_cloud_time = None
         # 只由明确 CLEAR 帧更新，用于近场被墙/平台完全遮挡时防止地面层翻转。
@@ -498,11 +503,37 @@ class TerrainAnalyzer(Node):
             self.source_switch_timeout,
         ):
             return
+        clock_rewound = (
+            self.last_active_cloud_time is not None
+            and now.nanoseconds < self.last_active_cloud_time.nanoseconds
+        )
         # 锁定首个有效点云源；当前源超时后允许其他默认话题接管。
-        if source != self.active_topic:
+        if source != self.active_topic or clock_rewound:
             self.active_topic = source
             self.last_processed_stamp = None
-            self.get_logger().info(f"Using point-cloud topic {source}")
+            self.last_received_source_stamp = None
+            # A replay/simulator clock reset starts a new physical observation
+            # session. Keeping the previous ground prior could shift all new relative
+            # heights and turn flat ground into a step until many CLEAR frames arrive.
+            self.ground_height_prior = None
+            if clock_rewound:
+                self.get_logger().warning(
+                    "ROS clock moved backward; reset point-cloud history"
+                )
+            else:
+                self.get_logger().info(f"Using point-cloud topic {source}")
+        if not source_stamp_strictly_advances(
+            msg.header, self.last_received_source_stamp
+        ):
+            self.get_logger().warning(
+                f"Ignoring duplicate/out-of-order PointCloud2 from {source}",
+                throttle_duration_sec=2.0,
+            )
+            return
+        self.last_received_source_stamp = (
+            float(msg.header.stamp.sec)
+            + float(msg.header.stamp.nanosec) * 1e-9
+        )
         self.last_active_cloud_time = now
         self.latest_cloud = msg
 

@@ -13,7 +13,8 @@
 #    并检查膨胀范围；若白色规则结构被吃掉则反向调整，并依赖点云确认。
 # 4. 远处细杆漏检：小步降低 min_area_ratio/min_area_px；误检小碎片增多时提高它们。
 # 5. 横杆被地平线冒充：提高 min_bar_aspect_ratio、降低 max_bar_height_ratio 或缩窄 ROI；
-#    真横杆被截断时反向小调，不能删除长宽/占比守卫。
+#    一排蓝色杂物误报时降低 segmented_bar_max_gap_ratio / segmented_bar_max_gap_cv，真横杆
+#    因强透视漏检时反向小调。不能删除长宽、占比和蓝段规律性守卫。
 # 6. 标签闪烁：增加 confirmation_frames/history_size 或提高 temporal_match_ratio；响应太慢
 #    则反向调整。相机 5 Hz 时每增加一帧确认约增加 0.2 s 延迟。
 # 7. 转弯时全被判模糊：先缩短曝光；再小步降低 min_image_quality。算法阈值不能补偿拖影。
@@ -76,6 +77,11 @@ vision_obstacle_detector:
     min_bar_aspect_ratio: 3.0
     max_bar_width_ratio: 0.85
     max_bar_height_ratio: 0.22
+    # 蓝白横杆必须由间距近似重复的蓝段组成。max_gap_ratio 约束最大空隙相对蓝段中位宽，
+    # max_gap_cv 约束各空隙离散程度；误把一排蓝色杂物当横杆时降低，强透视下真杆漏检时
+    # 小步提高并用标注图确认。两者只影响视觉辅助，米制净空仍由点云决定。
+    segmented_bar_max_gap_ratio: 2.5
+    segmented_bar_max_gap_cv: 0.55
     # 严重欠曝、过曝或模糊帧在进入时序投票前即被拒绝。
     min_image_quality: 0.35
 

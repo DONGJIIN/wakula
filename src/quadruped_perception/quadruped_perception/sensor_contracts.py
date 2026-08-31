@@ -46,6 +46,29 @@ def source_stamp_is_plausible(
     return max(0.0, float(maximum_age)) >= age >= -max(0.0, float(future_tolerance))
 
 
+def source_stamp_strictly_advances(header, previous_seconds) -> bool:
+    """Require one sensor source to advance its Header timestamp monotonically.
+
+    DDS can redeliver a sample and some USB/Ethernet drivers flush an older buffered
+    frame after a newer one.  Treating either packet as a new observation would let a
+    single physical image/cloud contribute several votes to obstacle confirmation.
+    ``previous_seconds=None`` starts a new source session; callers must reset it when
+    the ROS clock rewinds or a different candidate topic takes ownership.
+    """
+    if not header_contract_valid(header):
+        return False
+    current = float(header.stamp.sec) + float(header.stamp.nanosec) * 1e-9
+    if not isfinite(current):
+        return False
+    if previous_seconds is None:
+        return True
+    try:
+        previous = float(previous_seconds)
+    except (TypeError, ValueError):
+        return False
+    return isfinite(previous) and current > previous + 1e-9
+
+
 def image_message_contract_valid(message: Image) -> bool:
     """Reject empty/inconsistent raw Image buffers before selecting their topic.
 

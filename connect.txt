@@ -32,7 +32,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   输出：/terrain/features_stamped、/perception/obstacle_points、/diagnostics。
   注意：点云必须带有效 frame_id 和传感器到 base_link 的 TF。
         只有非零新鲜时间戳、完整缓冲区及 FLOAT32/FLOAT64 单值 x/y/z 字段的消息才会锁定来源；
-        坏主话题不会阻止后续候选点云接管。
+        坏主话题不会阻止后续候选点云接管。当前来源只接受 Header 时间严格递增的点云，
+        重复/乱序包不替换最新帧，也不刷新来源心跳；时钟回拨会开始新会话并清除地面先验。
         确认坑洞会以虚拟障碍点写入局部代价地图；无回波盲区不会被当成坑。
         地面由近场有效栅格锚定；横杆落地支柱和窄立柱分别用高度带/原始回波复核。
 
@@ -43,7 +44,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         /vision/debug_mask（可选）及调试信息。
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
         Image 必须具有非零新鲜时间戳、合法 frame/编码/宽高/step 和完整数据；不合格候选源不锁定。
-        蓝白限高杆需至少三段蓝色短段水平对齐；单根着色细柱可提示立柱。孤立 Canny
+        当前来源只接受 Header 时间严格递增的图像，重复/乱序包不刷新心跳或多帧投票。
+        蓝白限高杆需至少三段尺寸相近、水平对齐且间距规律的蓝色短段；单根着色细柱可提示立柱。孤立 Canny
         横边或大框不会单独输出横杆/墙，WALL 由点云确认。
 
 /perception_fusion（quadruped_perception / perception_fusion）
@@ -65,7 +67,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         会标明“点云未确认/待分类”，且不能覆盖已确认名称。无法由局部数据区分木桥 A/B 时
         明确写“待结构确认”。越障目标在 0.90 m 外保留低速入口接近窗口，进入交接区停车。
         当前只提供导航约束，不发送抬腿、关节或越障动作命令。比赛专名连续 3 帧一致
-        才切换、连续 4 帧无障碍才清除；感知无效立即发布，不保留旧名称。
+        才切换、连续 4 帧无障碍才清除；感知无效立即发布，不保留旧名称。融合 Header 必须
+        严格递增，重复/乱序帧不刷新安全心跳，持续重发最终按感知超时处理。
 
 /traversal_guidance（quadruped_planning / traversal_guidance）
   作用：把障碍几何转换为 Nav2 越障入口的接近、对正和 READY 交接状态。

@@ -9,6 +9,7 @@ from std_msgs.msg import Header
 from quadruped_perception.sensor_contracts import (
     image_message_contract_valid,
     point_cloud_message_contract_valid,
+    source_stamp_strictly_advances,
     source_stamp_is_plausible,
 )
 
@@ -83,3 +84,13 @@ def test_source_stamp_rejects_replay_and_unreasonable_future_data():
     assert source_stamp_is_plausible(header, 1.5, 1.0)
     assert not source_stamp_is_plausible(header, 3.0, 1.0)
     assert not source_stamp_is_plausible(header, 0.5, 1.0, future_tolerance=0.25)
+
+
+def test_source_stamp_requires_strict_progress_within_one_sensor_session():
+    """Duplicate and delayed packets cannot become extra camera/cloud votes."""
+    header = _header()
+    assert source_stamp_strictly_advances(header, None)
+    assert not source_stamp_strictly_advances(header, 1.0)
+    assert not source_stamp_strictly_advances(header, 1.1)
+    header.stamp.nanosec = 100_000_000
+    assert source_stamp_strictly_advances(header, 1.0)

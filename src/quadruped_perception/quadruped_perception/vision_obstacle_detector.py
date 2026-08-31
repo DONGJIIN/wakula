@@ -40,6 +40,7 @@ from quadruped_perception.parameter_validation import (
 )
 from quadruped_perception.sensor_contracts import (
     image_message_contract_valid,
+    source_stamp_strictly_advances,
     source_stamp_is_plausible,
 )
 
@@ -325,6 +326,8 @@ def best_segmented_horizontal_bar(
     image_width: int,
     image_height: int,
     min_fill_ratio: float = 0.0,
+    maximum_gap_ratio: float = 2.5,
+    maximum_gap_cv: float = 0.55,
 ) -> Tuple[List[ContourBox], float]:
     """合并同一水平线上的蓝色短段，识别规则中的蓝白相间限高杆。
 
@@ -359,6 +362,38 @@ def best_segmented_horizontal_bar(
             <= alignment_limit
         ]
         if len(group) < 3:
+            continue
+        group = sorted(group, key=lambda box: box[0])
+        segment_widths = np.asarray([box[2] for box in group], dtype=np.float64)
+        segment_heights = np.asarray([box[3] for box in group], dtype=np.float64)
+        gaps = np.asarray(
+            [
+                next_box[0] - (box[0] + box[2])
+                for box, next_box in zip(group, group[1:])
+            ],
+            dtype=np.float64,
+        )
+        # A rule crossbar produces repeated blue-white segments, not merely three
+        # blue objects at a similar image row. Require positive, roughly regular gaps
+        # and comparable segment sizes. Perspective is allowed by deliberately loose
+        # ratios; one distant sign or team shirt separated by a large empty interval
+        # is rejected before temporal confirmation can make it look stable.
+        median_width = max(1.0, float(np.median(segment_widths)))
+        mean_gap = float(np.mean(gaps)) if gaps.size else 0.0
+        gap_cv = (
+            float(np.std(gaps)) / max(1.0, mean_gap)
+            if gaps.size
+            else float("inf")
+        )
+        if (
+            np.any(gaps <= 0.0)
+            or float(np.max(gaps)) / median_width > max(0.1, float(maximum_gap_ratio))
+            or gap_cv > max(0.0, float(maximum_gap_cv))
+            or float(np.min(segment_widths)) / max(1.0, float(np.max(segment_widths)))
+            < 0.35
+            or float(np.min(segment_heights)) / max(1.0, float(np.max(segment_heights)))
+            < 0.35
+        ):
             continue
         left = min(box[0] for box in group)
         right = max(box[0] + box[2] for box in group)
@@ -612,6 +647,8 @@ def detect_obstacle_evidence(
     min_bar_aspect_ratio: float = 3.0,
     max_bar_width_ratio: float = 0.85,
     max_bar_height_ratio: float = 0.22,
+    segmented_bar_max_gap_ratio: float = 2.5,
+    segmented_bar_max_gap_cv: float = 0.55,
 ) -> ObstacleEvidence:
     """融合颜色与轮廓几何，产生一帧尚未时序确认的候选证据。
 
@@ -641,6 +678,8 @@ def detect_obstacle_evidence(
         image_width,
         image_height,
         min_color_fill_ratio,
+        segmented_bar_max_gap_ratio,
+        segmented_bar_max_gap_cv,
     )
     if segmented_bar:
         confidence = min(0.96, 0.62 + 0.30 * segmented_score)
@@ -858,6 +897,8 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("min_bar_aspect_ratio", 3.0)
         self.declare_parameter("max_bar_width_ratio", 0.85)
         self.declare_parameter("max_bar_height_ratio", 0.22)
+        self.declare_parameter("segmented_bar_max_gap_ratio", 2.5)
+        self.declare_parameter("segmented_bar_max_gap_cv", 0.55)
         self.declare_parameter("min_image_quality", 0.35)
         self.declare_parameter("history_size", 5)
         self.declare_parameter("confirmation_frames", 3)
@@ -947,6 +988,17 @@ class VisionObstacleDetector(Node):
         self.max_bar_height_ratio = float(
             np.clip(self.get_parameter("max_bar_height_ratio").value, 0.02, 1.0)
         )
+        self.segmented_bar_max_gap_ratio = max(
+            0.1,
+            float(self.get_parameter("segmented_bar_max_gap_ratio").value),
+        )
+        self.segmented_bar_max_gap_cv = float(
+            np.clip(
+                self.get_parameter("segmented_bar_max_gap_cv").value,
+                0.0,
+                2.0,
+            )
+        )
         self.min_image_quality = float(
             np.clip(self.get_parameter("min_image_quality").value, 0.0, 1.0)
         )
@@ -989,6 +1041,10 @@ class VisionObstacleDetector(Node):
         self.bridge = CvBridge()
         self.latest_frame = None
         self.last_processed_stamp = None
+        # Separate from the processing watermark: callbacks run faster than the 5 Hz
+        # detector. This prevents an older buffered image from replacing a newer
+        # ``latest_frame`` before the timer gets to it.
+        self.last_received_source_stamp = None
         self.active_topic = None
         self.last_active_image_time = None
         self.geometry_label = "WAITING FOR DEPTH"
@@ -1107,14 +1163,34 @@ class VisionObstacleDetector(Node):
             self.source_switch_timeout,
         ):
             return
+        clock_rewound = (
+            self.last_active_image_time is not None
+            and now.nanoseconds < self.last_active_image_time.nanoseconds
+        )
+        new_source_session = source != self.active_topic or clock_rewound
         # 同时存在多个默认图像话题时只选一个，失联后再自动切换。
-        if source != self.active_topic:
+        if new_source_session:
             self.evidence_history.clear()
             self.last_processed_stamp = None
+            self.last_received_source_stamp = None
             self.active_topic = source
-            self.get_logger().info(f"Using camera topic {source}")
-        elif (
-            self.last_active_image_time is not None
+            if clock_rewound:
+                self.get_logger().warning(
+                    "ROS clock moved backward; reset visual history"
+                )
+            else:
+                self.get_logger().info(f"Using camera topic {source}")
+        if not source_stamp_strictly_advances(
+            msg.header, self.last_received_source_stamp
+        ):
+            self.get_logger().warning(
+                f"Ignoring duplicate/out-of-order Image from {source}",
+                throttle_duration_sec=2.0,
+            )
+            return
+        if (
+            not new_source_session
+            and self.last_active_image_time is not None
             and temporal_history_requires_reset(
                 self.last_active_image_time.nanoseconds * 1e-9,
                 now_seconds,
@@ -1125,6 +1201,10 @@ class VisionObstacleDetector(Node):
             self.evidence_history.clear()
             self.last_processed_stamp = None
             self.get_logger().warning("Camera stream gap; reset visual history")
+        self.last_received_source_stamp = (
+            float(msg.header.stamp.sec)
+            + float(msg.header.stamp.nanosec) * 1e-9
+        )
         self.last_active_image_time = now
         self.latest_frame = (msg, source)
 
@@ -1249,6 +1329,8 @@ class VisionObstacleDetector(Node):
             self.min_bar_aspect_ratio,
             self.max_bar_width_ratio,
             self.max_bar_height_ratio,
+            self.segmented_bar_max_gap_ratio,
+            self.segmented_bar_max_gap_cv,
         )
         raw_evidence = apply_image_quality(
             raw_evidence, quality, self.min_image_quality

@@ -25,6 +25,7 @@ from quadruped_planning.terrain_safety_assessor import (
     nonnegative_finite_or_zero,
     nonnegative_integer_or_zero,
     observation_stamp_is_current,
+    observation_stamp_strictly_advances,
     obstacle_name_zh,
     select_fused_assessment,
     select_terrain_assessment,
@@ -51,6 +52,16 @@ def test_competition_name_requires_repeated_frames_and_invalid_clears_immediatel
     assert filter_.update("高墙", True) == "高墙"
     # 但感知断流不能因时序滤波继续显示旧障碍。
     assert filter_.update("高墙", False) == "感知数据无效"
+    assert filter_.reset() == "感知数据无效"
+
+
+def test_duplicate_or_out_of_order_fused_stamp_cannot_add_a_temporal_vote():
+    """Several recent DDS packets are still only one physical observation."""
+    assert observation_stamp_strictly_advances(None, 10.0)
+    assert observation_stamp_strictly_advances(10.0, 10.1)
+    assert not observation_stamp_strictly_advances(10.0, 10.0)
+    assert not observation_stamp_strictly_advances(10.0, 9.9)
+    assert not observation_stamp_strictly_advances(10.0, float("nan"))
 
 
 def test_front_obstacle_names_and_status_are_human_readable():
@@ -691,3 +702,5 @@ def test_filter_confirms_hazard_and_clearance_but_stops_immediately():
     assert filter_.update(("WALK", 1.0))[0] == "CLIMB"
     assert filter_.update(("WALK", 1.0))[0] == "WALK"
     assert filter_.update(("STOP", 0.0))[0] == "STOP"
+    # A new rosbag/simulator time epoch must not inherit the old STOP vote.
+    assert filter_.reset() == ("WALK", 1.0)
