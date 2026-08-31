@@ -16,7 +16,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 |---|---|---|
 | `README.md` | 项目简介、总体架构、安装和启动入口 | 第一次了解或运行项目 |
 | `quickstart.txt` | 新电脑完整复现、依赖插件、当前进度和后续路线 | 换电脑部署或接手开发 |
-| `instruction.txt` | 各模块作用、算法原理、参数和调试步骤 | 修改 SLAM、Nav2、OpenCV 或越障算法 |
+| `instruction.txt` | 各模块作用、算法原理、真机 rosbag 标定和调试步骤 | 修改 SLAM、Nav2、OpenCV 或越障算法 |
 | `connect.txt` | 节点作用、关键输入输出、接口字段和真机通信约定 | 接入相机、雷达、真机或排查通信 |
 | `AGENTS.md` | 仓库边界、参数归属、注释规范和验证命令 | 让另一台电脑的 Codex/代码助手继续开发 |
 
@@ -1108,7 +1108,11 @@ clearing，防止短暂深度空洞错误清除障碍；激光清障和滚动窗
 
 ### rosbag 离线标定与准确率报告
 
-完整采集和回放建议直接使用：
+完整采集矩阵、CSV 标签含义、HSV/横杆间距/点云阈值调整顺序、原始话题离线重算和首轮
+验收线见 `instruction.txt` 第五节。这里仅保留命令速查。
+
+先固定相机曝光/白平衡，确认 CameraInfo、点云单位、共同时间源和传感器到 `base_link` 的
+外参，再采集；基础数据错误不能靠放宽识别阈值解决。标准话题可直接使用：
 
 ```bash
 ./scripts/record_bag.sh                    # 默认写入 bags/时间戳目录
@@ -1132,6 +1136,11 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 匹配数量和时间对齐误差。默认至少需要每类链路 20 个已匹配样本；达到数量后按时间将最新
 30% 留作验证集，只在较早 70% 上搜索 `vision_min_confidence` 与高度阈值，避免用同一批
 数据调参又验收造成指标虚高。建议值写入独立 YAML，不会自动覆盖正式配置。
+
+需要区分两类标定：评估器可在已有低带宽结果上搜索 `vision_min_confidence` 和
+`step/climb/stop_threshold`；HSV、ROI、`segmented_bar_max_gap_ratio/max_gap_cv`、地面分割、
+坑/墙/杆几何阈值发生变化后，必须按 instruction 第五节重新播放原始 Image/PointCloud2，
+重新运行感知节点并录制新结果。旧 bag 中的算法输出不能代表新参数。
 
 ## 10. 速度与失效安全
 

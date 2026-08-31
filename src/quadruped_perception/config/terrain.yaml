@@ -1,28 +1,34 @@
-# 点云几何是真实高度、坑深、坡度和净空的主要证据。所有空间参数单位为 m，坐标统一到
-# base_link（x 前、y 左、z 上）；坡度输出在消息中为角度，旧数组 max_slope 为 dz/dx。
+# ========================== 点云真机标定入口 ============================
+# 作用边界：点云是高度、坑深、坡度和净空的米制主证据；不生成足端或关节动作。
+# 坐标/单位：base_link（x 前、y 左、z 上），长度 m；强类型坡角 rad，旧数组坡度 dz/dx。
+# 唯一参数源：只修改本文件；完整采集、真值记录和验收方法见 instruction.txt 第五节。
 #
-# ======================== 真机调参快速入口（先读） ========================
-# 在改阈值前，先用 RViz 验证 base_link -> 传感器 TF、点云单位和地面方向。外参高度偏差
-# 会同时伪造台阶、坑洞和坡度，不能靠分别修改三个类别阈值补偿。
+# A. 标定前提
+# 1. 先验证点云单位、Header、sensor_frame -> base_link TF 和静态平地方向。外参错误会同时
+#    伪造台阶、坑和坡，禁止靠分别放宽三个类别阈值补偿。
+# 2. 使用卷尺/角度仪记录真值，采集平地、5/7/10 cm 台阶、不同坡度、可见坑底、墙、
+#    横杆、立柱以及黑色/反光/无回波负样本。
+# 3. 每次只改一个参数组，用 TerrainFeatures 的米制字段和独立验证 bag 复核。
 #
-# 现象 -> 优先参数 -> 调整方向：
-# 1. 看不到脚前近处：减小 front_x_min、检查相机近盲区/俯角；过小会把机身和前腿纳入。
-# 2. 障碍太晚出现：增大 front_x_max；必须同时确认深度在该距离仍可靠，且 CPU 可承受。
-# 3. 左右边缘误检/漏检：调 lateral_half_width；宽于机体通道会把旁侧障碍当正前方。
-# 4. 平地总报台阶：先修 TF/地面拟合，再增大 ground_height_bin 或 warning_height；调高
-#    warning_height 会漏掉低台阶，必须用已知 5/7/10 cm 标定块验证。
-# 5. 低台阶漏检：小步降低 warning_height/nav2_obstacle_min_height_above_ground，或减小
-#    grid_cell_size；噪点风险和计算量会上升，需同时检查连通区回波数量。
-# 6. 坑洞误报：增大 pit_depth_threshold、min_connected_region_cells/points；真实浅坑漏检
-#    时反向调，并验证坑底确实有回波。无回波不等于可可靠测得坑深。
-# 7. 墙/高台被当普通台阶：降低 wall_height_threshold；深度飞点导致假墙时提高它及连通门。
-# 8. 横杆漏检：先确认点云能看到杆底，再降低 bar_min_clearance；该值过低会把普通凸起
-#    当悬空杆。RGB 只能辅助名称，不能补出缺失深度。
-# 9. 坡面被 Nav2 标成墙：先修地面平面与外参，再提高地面吸收带；不要在 costmap 删除点云。
-# 10. CPU 高/延迟：依次降低 transform_max_points、max_points、processing_hz；离线对比准确率
-#     后再定。nav2_cloud_max_points 只影响发布给 costmap 的稀疏程度。
+# B. 固定调参顺序
+# TF/时间/单位 -> ROI -> 地面模型 -> 台阶/坑/墙/杆 -> 连通回波 -> 点数与频率。
 #
-# 调参顺序：TF/时间 -> ROI -> 地面 -> 台阶/坑/墙/杆 -> 连通区 -> 点数与频率。
+# C. 现场问题速查（现象 -> 参数 -> 调整方向/代价）
+# [ROI]
+# - 脚前盲区：减小 front_x_min 并检查近盲区/俯角；过小会纳入机身和前腿。
+# - 障碍出现太晚：增大 front_x_max；必须同时确认远距深度仍可靠且 CPU 可承受。
+# - 旁侧误报：减小 lateral_half_width；过小会漏掉机身通道边缘。
+# [地面与类别]
+# - 平地报台阶：先修 TF/地面，再增 ground_height_bin 或 warning_height；后者会漏低台阶。
+# - 低台阶漏检：降低 warning_height/nav2_obstacle_min_height_above_ground 或 grid_cell_size；
+#   代价是噪点和计算量上升，必须复核连通回波。
+# - 坑误报：增 pit_depth_threshold 或连通门；真浅坑漏检时反向调，且必须实际看到坑底回波。
+# - 墙被报台阶：降低 wall_height_threshold；飞点假墙时提高它及连通门。
+# - 横杆漏检：先确认点云看到杆底，再降低 bar_min_clearance；过低会把普通凸起当悬空杆。
+# - 坡面被 Nav2 标墙：先修外参/平面，再调地面吸收带；不得从 costmap 删除点云层。
+# [算力]
+# - RK3588 延迟：依次降低 transform_max_points、max_points、processing_hz；每一步都要比较
+#   分类召回率和米制误差。nav2_cloud_max_points 只控制代价地图发布稀疏度。
 terrain_analyzer:
   ros__parameters:
     # ---------- 输入、坐标系与算力上限 ----------

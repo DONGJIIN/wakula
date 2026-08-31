@@ -207,7 +207,8 @@ Action 成功也不能声称真机已经具备越障能力。
 
 5. quadruped_tools
    perception_bag_evaluator.py：读取 rosbag 与标签文件，按时间匹配预测和真值，输出每类
-   TP/FP/FN、precision、recall、F1、混淆矩阵以及连续量误差，帮助客观调整阈值。
+   precision、recall、F1 和混淆矩阵，并有限搜索视觉置信度及三个高度等级。它不自动计算
+   米制几何误差，也不搜索 HSV、横杆间距或全部点云阈值；这些按第五节回放逐组标定。
    stack_regression.py：仿真专用长测工具；只有显式 --allow-motion 才向 /cmd_vel_teleop
    发布速度。它执行双向整圈旋转、前进、倒退、回环、多目标、1 m 绕杆窄通道和不可达
    目标恢复，持续记录 map/scan/odom/正前方名称/越障引导间隔、闭环误差、READY 消息
@@ -333,13 +334,135 @@ Action 成功也不能声称真机已经具备越障能力。
 
 五、rosbag 标注与评估
 -------------------
-先运行 scripts/record_bag.sh。标签建议按秒记录，类别使用 CLEAR、STEP、PIT、WALL、BAR、
-POLE，并可附 obstacle_height、pit_depth、slope 等真值。执行：
+本节是更换真机相机、雷达、镜头、安装位姿或比赛光照后的标准标定流程。先校准硬件和
+坐标，再调整识别参数；阈值无法补偿错误时间戳、错误 TF、自动曝光漂移或深度单位错误。
 
-  ros2 run quadruped_tools perception_bag_evaluator --help
+5.1 标定前必须完成的检查
 
-每次参数变化保留：参数文件版本、bag 名称、场景、光照、设备、安装位姿、类别数量、
-precision/recall/F1 和误差统计。不要只看总体准确率，危险类别优先关注漏检率。
+1. 相机固定曝光、增益和白平衡；确认 Image 与 CameraInfo 分辨率一致，Header 非零且递增。
+2. 点云确认 x/y/z 单位为 m，静态平地在 base_link 中方向正确；用
+   `ros2 run tf2_ros tf2_echo base_link <点云frame>` 检查外参。
+3. 相机和点云必须使用同一时钟。查看 `/perception/fused_obstacle.time_skew`；若偏差随时间
+   单向增长，先修驱动/PTP/NTP，不能靠增大 `sync_slop` 掩盖。
+4. 用卷尺、直尺和角度仪记录标定物真值：台阶高度、坑深、坡角、横杆下沿净空、立柱宽度、
+   相机到障碍距离和观察角。真值与 bag 名称写入同一张测试记录表。
+
+5.2 采集矩阵
+
+每一类障碍和 CLEAR 空场都至少覆盖：正对、左右约 15°/30°；近、中、远；静止和低速运动；
+正常光、阴影、逆光、过曝。视觉负样本必须包含地平线、队服、蓝色散物、灯具、反光金属、
+局部遮挡和运动模糊；点云负样本必须包含黑色表面、反光面、无回波区、孤立/相邻飞点和坡面。
+工具的硬下限是每条链路 20 个已匹配标签，但这只够检查流程；建议每个关键类别至少 50 个
+有效样本，并另录一份不同路线/光照的验证 bag，不能从同一次静止画面复制样本凑数。
+
+标准话题使用：
+
+  ./scripts/record_bag.sh
+  # 指定外置硬盘目录时：
+  ./scripts/record_bag.sh /media/<用户>/<磁盘>/wakula_bags
+  ros2 bag info bags/<bag名>
+
+若驱动没有 remap 到默认话题，先在 sensor_profiles.yaml 对齐；临时采集则按
+scripts/record_bag.sh 中的话题清单替换成实际 Image、CameraInfo 和 PointCloud2 名称。
+
+5.3 生成并填写标签
+
+  mkdir -p reports
+  ros2 run quadruped_tools perception_bag_evaluator bags/<bag名> \
+    --write-label-template labels.csv --sample-period 0.5
+
+CSV 列固定为 `timestamp_ns,elapsed_s,vision_label,terrain_label,notes`。不要修改 timestamp_ns：
+
+- vision_label：`none`、`poles`、`height_bar`、`wall`、`colored_obstacle`。标签表示该时刻
+  相机前向有效区内的人工真值；不想评价视觉的行留空，不能用 `none` 代替“不确定”。
+- terrain_label：`WALK`、`STEP`、`CLIMB`、`STOP`。WALK 表示几何可由 Nav2 通行/绕杆，
+  STEP 和 CLIMB 表示按团队冻结的高度能力分级，坑、墙、限高杆等必须交接或禁止通行的
+  危险结构标 STOP；不想评价点云风险分级的行留空。
+- notes：记录实际障碍名、卷尺高度/坑深/净空、角度、距离、光照和异常。当前评估器不解析
+  notes 中的米制真值，它用于人工对照 TerrainFeatures，不能谎称工具已自动计算几何误差。
+
+标签必须根据原始图像、点云和现场记录填写，不能照着算法终端输出抄答案。模糊到人工也
+无法判断的帧应留空，并在 notes 写明原因。
+
+5.4 生成报告和有限参数建议
+
+  ros2 run quadruped_tools perception_bag_evaluator bags/<bag名> \
+    --labels labels.csv \
+    --report reports/perception_report.json \
+    --suggestions reports/calibration_suggestions.yaml \
+    --validation-fraction 0.30 --minimum-samples 20
+
+报告包含混淆矩阵、accuracy/Wilson 95% 区间、macro-F1 和逐类 precision/recall/F1。优先看
+危险类别 recall（漏检）和 CLEAR/none 的 false positive（误停），不能只看总体 accuracy。
+建议文件只会搜索 `vision_min_confidence` 与 `step_threshold/climb_threshold/stop_threshold`；
+它不会自动优化 HSV、ROI、蓝段间距、地面分割、坑/墙/杆阈值，也不会自动写入正式 YAML。
+先看 validation 指标，再手工把通过的单个建议复制到参数归属文件并注明 bag/commit。
+
+5.5 三类参数分别怎么调
+
+A. 相机颜色和图像质量（vision.yaml）
+
+1. 从正常光与最暗仍可用帧抽取 HSV；先确定 H，再收紧 S/V 排除灰白地面和灯光。
+2. 在 `/vision/debug_mask` 检查颜色像素，在 `/vision/annotated_image` 检查最终框。颜色掩膜
+   正确但没有框，才调整面积/结构；原图已拖影，先缩短曝光而不是降低质量门。
+3. 依次调整 HSV、CLAHE/高光、面积、质量、多帧确认；每次只动一组并重新跑报告。
+
+B. 蓝白横杆间距（vision.yaml）
+
+1. 收集真横杆在近/中/远和 ±30° 下的蓝段，同时加入同排蓝色杂物、队服和广告牌负样本。
+2. `segmented_bar_max_gap_ratio` 是“最大白色间隙 / 蓝段中位宽”；
+   `segmented_bar_max_gap_cv` 是各间隙离散系数。误报时小步降低，强透视真杆漏检时小步提高。
+3. 必须同时保留最少三段、尺寸相似、水平对齐、长宽比和画面占比门；不得为召回率删除守卫。
+4. 每组值在独立验证 bag 上统计 height_bar 的 precision/recall，并检查 poles 不被混淆。
+
+C. 点云几何（terrain.yaml 与 terrain_navigation.yaml）
+
+1. 空场先调 ROI、`ground_height_bin` 和 `grid_cell_size`，要求地面高度/坡度稳定且不报障碍。
+2. 用 5/7/10 cm 标定块调低台阶；用已知坑深调 `pit_depth_threshold`；用墙高、横杆净空和
+   立柱宽度分别调对应阈值。每类都要检查 `valid_points` 和连通区，不能让单个飞点通过。
+3. 对同一真值至少取多个角度/距离，比较 TerrainFeatures 的 `obstacle_height`、`pit_depth`、
+   `slope_pitch/roll`、`clearance_height`、`width`。先消除系统偏差，再收紧类别阈值。
+4. 几何稳定后才把风险分界写入 terrain_navigation.yaml；STEP/CLIMB/STOP 是导航标签，
+   不是四足真实能力。真机可跨越上限必须由运动团队逐障碍安全测试确认。
+5. 最后依次降低 `transform_max_points`、`max_points`、`processing_hz` 测 RK3588；任何降采样
+   都要重新比较危险类别 recall 和米制误差，不能只看 CPU 下降。
+
+5.6 修改 HSV/间距/点云算法后的离线重算
+
+评估器能在原有低带宽结果上搜索置信度/高度阈值，但 HSV、横杆间距或点云几何改变后必须
+用原始话题重新运行节点。三个终端按下面方式操作，播放时不要把 bag 内旧算法输出一起发布：
+
+  # 终端 1a：启动视觉节点（只测点云时省略）
+  ros2 run quadruped_perception vision_obstacle_detector --ros-args \
+    --params-file src/quadruped_perception/config/vision.yaml \
+    -p use_sim_time:=true -p image_topic:=/实际image
+
+  # 终端 1b：另开终端启动点云节点（只测视觉时省略）
+  ros2 run quadruped_perception terrain_analyzer --ros-args \
+    --params-file src/quadruped_perception/config/terrain.yaml \
+    -p use_sim_time:=true -p input_topic:=/实际points
+
+  # 终端 2：只记录本次参数重新计算的低带宽输出
+  ros2 bag record --use-sim-time -o derived_<参数组> --topics \
+    /vision/obstacle_evidence /terrain/features
+
+  # 终端 3：只播放原始传感器和 TF；按实际话题替换
+  ros2 bag play bags/<bag名> --clock --topics \
+    /实际image /实际points /tf /tf_static
+
+然后为 `derived_<参数组>` 重新生成标签模板/报告。若只测视觉或只测点云，录制和播放命令
+删除另一条链路即可。所有节点退出后再开始下一组，防止多个发布者污染结果。
+
+5.7 建议的首轮验收线
+
+以下只是拿到真机后的首轮工程门槛，不是比赛官方指标：验证集每个关键类别不少于 50 个
+独立样本；危险类 recall 建议不低于 0.90，STOP 类建议不低于 0.95，macro-F1 建议不低于
+0.85；已知尺寸标定物的高度/坑深/净空中位绝对误差建议不超过 0.02 m。若传感器规格或
+运动安全要求更严，应提高门槛。任何类别样本不足、置信区间过宽、时间对齐异常或只在训练
+bag 上达标，都不能宣称标定完成。
+
+每次参数变化必须保留：参数文件/commit、bag、标签、报告、设备和固件、安装位姿、光照、
+每类样本数、逐类指标与米制误差表。不要只写“识别正常”。
 
 六、真机接入时的最小改动
 ----------------------
@@ -586,35 +709,17 @@ ROS 2 源码包和接口合同，不是整个 ~/wakula 目录；`build/`、`inst
 
    6.4 标定和调整 OpenCV/点云识别
 
-   分别采集空场及每类比赛障碍的正对、左右偏、远近样本，并覆盖正常光、暗光、阴影、过曝
-   和运动模糊。终端名称只是人工速查，程序验收应以强类型消息为准：
+   完整采集矩阵、CSV 标签含义、离线重算、参数归属和首轮验收线统一按第五节执行，不在
+   真机接入章节复制第二套流程。终端名称只是人工速查，程序验收应以强类型消息为准：
 
      ros2 topic echo /perception/fused_obstacle
      ros2 topic echo /perception/front_obstacle_name
      ros2 topic echo /terrain/navigation_safety
 
-   同时录制原始输入、TF 和算法输出：
-
-     ros2 bag record -o real_perception_debug \
-       /scan /odom /tf /tf_static \
-       /实际image /实际camera_info /实际points \
-       /vision/obstacle_evidence /terrain/features \
-       /vision/obstacle_stamped /terrain/features_stamped \
-       /perception/fused_obstacle /terrain/navigation_safety /traversal/guidance
-
-   先完成相机内参以及相机—点云—`base_link` 外参标定，再调
-   `quadruped_perception/config/vision.yaml` 和 `terrain.yaml`。不得用一次现场观察直接改阈值；
-   应把 bag 带回开发工作空间，用离线工具比较修改前后结果：
-
-     ros2 run quadruped_tools perception_bag_evaluator real_perception_debug \
-       --write-label-template labels.csv --sample-period 0.5
-     # 人工填写 labels.csv 后再生成报告
-     ros2 run quadruped_tools perception_bag_evaluator real_perception_debug \
-       --labels labels.csv --report perception_report.json \
-       --suggestions calibration_suggestions.yaml
-
-   报告至少查看各类别 precision/recall/F1 和混淆矩阵，不能只看总体 accuracy。调试工具可留在
-   开发机，不是目标机器人的运行包。
+   先完成 CameraInfo、相机/点云共同时间源和 `sensor_frame -> base_link` 外参，再运行
+   `scripts/record_bag.sh`。禁止只看一次终端输出就改阈值；HSV/横杆间距/点云几何修改后必须
+   用原始话题重新计算低带宽输出，不能直接用旧 bag 内的预测冒充新参数结果。调试工具可留在
+   开发机，不是目标机器人的运行依赖。
 
    6.5 启动 Nav2，但先不接电机
 

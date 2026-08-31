@@ -1,27 +1,30 @@
-# 纯导航安全参数：本文件没有任何关节、腿部或真实越障动作命令。
+# ======================== 导航安全真机标定入口 ==========================
+# 作用边界：把已标定感知转换为速度限制和入口引导；不含关节、步态或真实越障动作。
+# 唯一参数源：只修改本文件。必须先完成 vision.yaml 与 terrain.yaml 的传感器标定。
 #
-# ======================== 真机调参快速入口（先读） ========================
-# 本文件把感知变成速度限制和入口引导。调参必须与 terrain.yaml、nav2.yaml、
-# autonomous_mission.yaml 联动，不能把“识别阈值、停车距离、Action 交接”当成一件事。
+# A. 固定调参顺序
+# 感知高度等级 -> 风险/名称迟滞 -> 数据超时 -> Nav2 停车距离 -> 对正/READY -> 急停。
+# 识别阈值、停车距离和 Action 接管是三类问题，禁止同时放宽来追求“先动起来”。
 #
-# 现象 -> 优先参数 -> 调整方向：
-# 1. 感知已报低台阶但仍按 WALK：让 step_threshold 与 terrain.warning_height 一致；真机
-#    首次用标定块验证。climb/stop_threshold 只是风险标签，不代表四足实际能力。
-# 2. 偶发噪点导致模式跳变：增加 hazard_confirmation_frames；危险响应会变慢，STOP 仍立即。
-#    恢复太慢可减小 clear_confirmation_frames，但会增加 CLEAR/危险来回闪烁。
-# 3. 在障碍前停得太远：先核对 nav2 robot_radius/inflation_radius 和点云前缘，再小步减小
-#    hard_stop_distance；过小会让 Nav2 线速度进入真实越障区域，必须留给 Action 接管。
-# 4. 到入口仍不 READY：检查 handoff_distance、alignment_tolerance、max_lateral_target；放宽
-#    距离/角度会提高接管率，也增加斜着越障风险。先修对正算法，不要一次全放宽。
-# 5. 极近距离未急停：增大 emergency_stop_distance 或扇区；数值必须大于制动距离和雷达
-#    盲区。过大会阻止靠近比赛障碍；Action 接管后仍由真机控制器负责自身急停。
-# 6. 感知偶发断流就停车：先修驱动和 CPU；只有确认最大正常间隔后才能增大 timeout。
-#    command_timeout/assessment_timeout/health_timeout 越大，故障停车越慢。
-# 7. 对正/返程时不能转身：检查 DWB 输入的 linear/angular；若是小线速度叠加 yaw，可小步
-#    增大 stopped_rotation_linear_tolerance，门后仍强制 linear=0。过大可能增加原地转向次数。
+# B. 现场问题速查（现象 -> 参数 -> 调整方向/代价）
+# [分类/迟滞]
+# - 低台阶仍为 WALK：使 step_threshold 与 terrain.warning_height 一致，并用已知高度块验证。
+#   climb/stop_threshold 只是风险标签，不代表真机跨越能力。
+# - 模式跳变：增加 hazard_confirmation_frames；危险响应会变慢。恢复慢再减
+#   clear_confirmation_frames，但 CLEAR/危险闪烁会增加，STOP 仍第一帧生效。
+# [入口]
+# - 停得太远：先核对 robot_radius/inflation/点云前缘，再减 hard_stop_distance；过小会让
+#   Nav2 进入应由真实越障控制器接管的区域。
+# - 到入口不 READY：检查 handoff_distance/alignment_tolerance/max_lateral_target；放宽会
+#   增加斜着越障风险，优先修正外参和结构航向。
+# [失效/急停]
+# - 正常数据偶发超时：先修驱动和 CPU，再依据 rosbag 最大正常间隔增加 timeout；越大停车越慢。
+# - 极近距离未停车：emergency_stop_distance 必须覆盖雷达盲区与制动距离；过大会阻止接近。
+# - 对正时不能转：检查 DWB linear/angular，再小步调 stopped_rotation_linear_tolerance。
 #
-# 必须联动核验：nav2 两处半径/膨胀、hard_stop_distance、handoff_distance、
-# autonomous_mission 的 handoff/stall 最大距离，以及真实 TraverseObstacle 的接近能力。
+# C. 必须联动核验
+# nav2 两处机身/膨胀参数、hard_stop_distance、handoff_distance、自主任务 handoff/stall
+# 距离，以及真实 TraverseObstacle 控制器可接受的接近位姿。
 terrain_safety_assessor:
   ros__parameters:
     # 高度分类只表示感知标签（单位 m），不是可直接执行的步态模式。

@@ -36,6 +36,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         重复/乱序包不替换最新帧，也不刷新来源心跳；时钟回拨会开始新会话并清除地面先验。
         确认坑洞会以虚拟障碍点写入局部代价地图；无回波盲区不会被当成坑。
         地面由近场有效栅格锚定；横杆落地支柱和窄立柱分别用高度带/原始回波复核。
+        真机标定只改 terrain.yaml；必须用已知尺寸标定物核对 TerrainFeatures 米制字段，
+        再调整类别阈值，不能用算法自身输出作为真值。
 
 /vision_obstacle_detector（quadruped_perception / vision_obstacle_detector）
   作用：用 OpenCV 提取颜色、轮廓和多帧稳定证据，辅助判断比赛障碍。
@@ -47,6 +49,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         当前来源只接受 Header 时间严格递增的图像，重复/乱序包不刷新心跳或多帧投票。
         蓝白限高杆需至少三段尺寸相近、水平对齐且间距规律的蓝色短段；单根着色细柱可提示立柱。孤立 Canny
         横边或大框不会单独输出横杆/墙，WALL 由点云确认。
+        真机标定只改 vision.yaml；颜色、横杆间距和图像质量需按 instruction.txt 第五节用
+        原始 Image 回放复算，不能只对旧检测结果改置信度。
 
 /perception_fusion（quadruped_perception / perception_fusion）
   作用：按时间戳同步点云几何与视觉结果，并检查视觉框与前向通道相交，输出统一障碍信息。
@@ -221,7 +225,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   实际退出状态为准，`process has finished cleanly` 表示当前通信与算法未受影响。
 
 perception_bag_evaluator（离线工具，不随一键启动运行）
-  作用：读取 rosbag 和人工标签，统计识别准确率、召回率及连续量误差。
+  作用：读取 rosbag 和人工标签，统计分类 accuracy、precision、recall、F1 与混淆矩阵；
+        有限搜索视觉置信度和三个高度等级。米制几何误差需用已知尺寸真值另行对照。
 
 stack_regression（测试工具，不随一键启动运行）
   作用：在 Gazebo 中验证旋转/倒退回环、多目标、1 m 窄通道、恢复行为和资源占用。

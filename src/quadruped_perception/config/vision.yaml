@@ -1,31 +1,36 @@
-# OpenCV 只提供类别辅助证据，不提供米制高度，也不能独立批准越障。
+# ========================== OpenCV 真机标定入口 ==========================
+# 作用边界：视觉只输出类别辅助证据，不提供米制尺寸，也不能独立批准越障。
+# 唯一参数源：只修改本文件；不要在 Python、launch 或临时 YAML 复制一套阈值。
+# 完整命令、CSV 标签和验收方法：见根目录 instruction.txt 第五节。
 #
-# ======================== 真机调参快速入口（先读） ========================
-# 必须录制包含正常光、阴影、过曝、运动模糊和各类障碍的 rosbag，并查看
-# /vision/annotated_image；需要检查二值过程时临时打开 publish_debug_mask。
+# A. 标定前提
+# 1. 固定曝光、增益和白平衡；确认 CameraInfo、Header 时间戳及相机安装方向正确。
+# 2. 每类障碍与空场都采集正对/斜视、近/中/远、正常光/阴影/过曝/运动模糊样本；
+#    真负样本必须包含地平线、蓝色杂物、队服、灯光和反光金属。
+# 3. 同时观察 /vision/annotated_image；检查二值过程时临时启用 publish_debug_mask。
+# 4. 每次只改下面一个参数组，用未参与调整的 bag 比较逐类 precision/recall/F1。
 #
-# 现象 -> 优先参数 -> 调整方向：
-# 1. 颜色整体识别不到：固定相机曝光/白平衡后，用实际图像重采 orange/blue_hsv_*；
-#    先扩 H，再按阴影调整 S/V。范围过宽会把地板、灯光和队服并入，不能只追求召回率。
-# 2. 阴影漏检：保留 illumination_normalization 与 dual_illumination_color_mask，适当提高
-#    clahe_clip_limit；噪声/色偏增多时反向降低。不要先关闭图像质量门。
-# 3. 灯光/金属反光误检：提高 glare_saturation_max 或降低 glare_value_min 可扩大高光掩膜，
-#    并检查膨胀范围；若白色规则结构被吃掉则反向调整，并依赖点云确认。
-# 4. 远处细杆漏检：小步降低 min_area_ratio/min_area_px；误检小碎片增多时提高它们。
-# 5. 横杆被地平线冒充：提高 min_bar_aspect_ratio、降低 max_bar_height_ratio 或缩窄 ROI；
-#    一排蓝色杂物误报时降低 segmented_bar_max_gap_ratio / segmented_bar_max_gap_cv，真横杆
-#    因强透视漏检时反向小调。不能删除长宽、占比和蓝段规律性守卫。
-# 6. 标签闪烁：增加 confirmation_frames/history_size 或提高 temporal_match_ratio；响应太慢
-#    则反向调整。相机 5 Hz 时每增加一帧确认约增加 0.2 s 延迟。
-# 7. 转弯时全被判模糊：先缩短曝光；再小步降低 min_image_quality。算法阈值不能补偿拖影。
-# 8. RK3588 CPU 高/延迟累积：先减小 resize_width 或 processing_hz，关闭调试图发布；
-#    不要增加订阅队列，节点设计为只处理最新帧。
-# 9. 换镜头/分辨率：重新标定 ROI、面积比例和 HSV；固定 px 阈值仅作下限，比例阈值更通用。
-# 10. 相机/点云总是无法融合：先统一硬件/ROS 时钟和 Header，再小步增大 fusion.sync_slop；
-#     窗口过大会把运动前后的两处观测错配。相机断流时 terrain_only_timeout 决定等待多久
-#     后退化为纯点云，不能大于安全层允许的数据新鲜时间。
+# B. 固定调参顺序
+# 曝光/白平衡 -> ROI -> HSV -> 面积与结构 -> 图像质量 -> 多帧确认 -> 处理频率。
+# 顺序靠前的问题未解决时，不得用放宽后续阈值掩盖。
 #
-# 调参顺序：曝光/白平衡 -> ROI -> HSV -> 面积/几何 -> 质量门 -> 多帧确认 -> 算力。
+# C. 现场问题速查（现象 -> 参数 -> 调整方向/代价）
+# [颜色]
+# - 整体漏检：重采 orange/blue_hsv_*；先扩 H，再按阴影调整 S/V。过宽会引入地板和队服。
+# - 阴影漏检：保留双光照掩膜，小步提高 clahe_clip_limit；噪声/色偏增加时反向降低。
+# - 强反光误检：调整 glare_* 扩大高光掩膜；白色规则结构被吃掉时反向调整。
+# [结构]
+# - 远处细杆漏检：降低 min_area_ratio/min_area_px；代价是小碎片误检增加。
+# - 地平线冒充横杆：提高 min_bar_aspect_ratio、降低 max_bar_height_ratio 或缩窄 ROI。
+# - 同排蓝色杂物冒充横杆：降低 segmented_bar_max_gap_ratio/max_gap_cv；强透视下真杆
+#   漏检时反向小调。不得删除长宽、占比和蓝段规律性守卫。
+# [时序/算力]
+# - 标签闪烁：增加 confirmation_frames/history_size 或提高 temporal_match_ratio；相机 5 Hz
+#   时每增加一帧确认约增加 0.2 s 延迟。
+# - 转弯画面全被判模糊：先缩短曝光，再小步降低 min_image_quality；阈值不能补偿拖影。
+# - RK3588 延迟累积：先减 resize_width/processing_hz，再关闭调试图；不要增大订阅队列。
+# - 融合失败：先统一相机/点云时钟，再按 time_skew 分布调整 fusion.sync_slop；窗口过大
+#   会把机器人运动前后的两个物体错配。
 vision_obstacle_detector:
   ros__parameters:
     # ---------- 输入、输出与算力上限 ----------
