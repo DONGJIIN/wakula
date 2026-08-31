@@ -26,6 +26,7 @@ from quadruped_planning.terrain_safety_assessor import (
     nonnegative_integer_or_zero,
     observation_stamp_is_current,
     observation_stamp_strictly_advances,
+    obstacle_measurements_are_valid,
     obstacle_name_zh,
     select_fused_assessment,
     select_terrain_assessment,
@@ -87,6 +88,26 @@ def test_front_obstacle_names_and_status_are_human_readable():
     text = format_front_obstacle_status(safety, "横杆")
     assert "疑似横杆" in text
     assert "点云未确认" in text
+
+
+def test_competition_name_fails_closed_on_nonfinite_geometry():
+    """消息标为 valid 也不能让 NaN/Inf 进入比赛语义票或 Action 身份链。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.30
+    safety.width = 1.00
+    assert obstacle_measurements_are_valid(safety)
+    assert front_obstacle_name_zh(safety) == "高墙"
+
+    safety.width = float("nan")
+    assert not obstacle_measurements_are_valid(safety)
+    assert front_obstacle_name_zh(safety) == "感知数据无效"
+
+    safety.width = 1.00
+    safety.slope_pitch = float("inf")
+    assert not obstacle_measurements_are_valid(safety)
+    assert front_obstacle_name_zh(safety, "墙面") == "感知数据无效"
 
 
 def test_visual_obstacle_name_requires_valid_integer_code_and_target():
