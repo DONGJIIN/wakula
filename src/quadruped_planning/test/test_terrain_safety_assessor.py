@@ -133,6 +133,14 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.slope_pitch = 0.189
     safety.roughness = 0.032
     assert front_obstacle_name_zh(safety) == "T 字形台阶"
+    # 无闪现全栈回归的规则 T 台入口稳定样本：地面拟合吸收了多数级高，但规则宽度、
+    # 16.23° 阶梯总体趋势与离散残差仍共同成立。该样本防止以后把上限退回 15°。
+    safety.obstacle_height = 0.081
+    safety.slope_pitch = 0.2833
+    safety.slope_roll = 0.0005
+    safety.roughness = 0.029
+    safety.width = 0.998
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
     safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
     assert front_obstacle_name_zh(safety) == "限高杆"
     safety.obstacle_type = NavigationSafety.OBSTACLE_POLE
@@ -279,6 +287,15 @@ def test_segmented_bridge_b_is_not_named_as_the_gravel_pit():
     safety.obstacle_height = 0.261
     safety.width = 1.113
     safety.roughness = 0.093
+    safety.slope_pitch = 0.0
+    assert front_obstacle_name_zh(safety) == "木桥 B（分段桥板）"
+
+    # 无闪现回归中从不与主斜坡重叠的西侧入口观测；0.71 m 是 1 m 桥面被前向
+    # ROI 横向裁切后的有效连通宽度，0.083 m 残差来自规则 0.40 m 周期板缝。
+    safety.obstacle_height = 0.200
+    safety.pit_depth = 0.0
+    safety.width = 0.708
+    safety.roughness = 0.083
     safety.slope_pitch = 0.0
     assert front_obstacle_name_zh(safety) == "木桥 B（分段桥板）"
 

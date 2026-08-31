@@ -412,7 +412,11 @@ def front_obstacle_name_zh(
             # 0.277 m / 0.059 m with no periodic gaps.  Tightening both bounds
             # separates them without using the world pose.
             0.19 <= float(safety.obstacle_height) <= 0.27
-            and float(safety.width) >= 0.80
+            # 真桥宽 1 m；机器人偏向通道一侧且 ROI 半宽 0.55 m 时，连通桥板只
+            # 保留约 0.71 m。0.65 m 下限仍明显大于孤立立柱/细杆，并继续受高度、
+            # 周期残差和近水平坡向三项约束。若真机点云横向裁切更窄，应先增大
+            # terrain.yaml:lateral_half_width，再按 rosbag 调本门限。
+            and float(safety.width) >= 0.65
             # Complete-field samples: real periodic bridge planks are 0.080--
             # 0.093 m, while gravel/wood fill produced 0.070 m. Keep a small
             # separation margin so rough pit material cannot become bridge B.
@@ -451,7 +455,13 @@ def front_obstacle_name_zh(
         # 高度”小于总高；但它仍表现为宽障碍、7～15° 的阶梯总体趋势和明显离散残差。
         # 同时支持直接看到 0.40 m 顶部与只看到多级踏面的两种距离，避免再误叫坑区。
         stepped_profile = (
-            7.0 <= abs(degrees(float(safety.slope_pitch))) <= 15.0
+            # 规则 T 台的 0.10 m 级高/0.30 m 踏面在完整 Gazebo 深度云中得到
+            # 16.23°，并非理想几何的单一级面角。上限保留到 18°，覆盖约 2° 的
+            # 深度/外参误差；主斜坡和木桥 A 的连续平面会在 terrain_geometry 中
+            # 先归为 CLEAR，侧看主斜坡还会被下面的 roll 门拒绝，因此不会因这次
+            # 放宽被误记为 T 台。真机若反复把粗糙坡误报为 T 台，应先校准外参和
+            # 地面拟合，再结合 rosbag 收紧该上限，不能只提高高度阈值。
+            7.0 <= abs(degrees(float(safety.slope_pitch))) <= 18.0
             and float(safety.roughness) >= 0.02
         )
         # T 台总高 0.40 m，但前一级踏面在近场常只量到约 0.30 m，且相机斜视只能覆盖

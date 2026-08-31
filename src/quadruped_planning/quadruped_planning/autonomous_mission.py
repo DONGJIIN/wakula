@@ -1069,6 +1069,35 @@ def distance_inside_grid_edge(grid: OccupancyGrid, x: float, y: float) -> float:
     return min(local_x, local_y, maximum_x - local_x, maximum_y - local_y)
 
 
+def map_edge_allows_obstacle_handoff(
+    semantic_id: str,
+    obstacle_type: int,
+    edge_distance: float,
+    minimum_margin: float,
+) -> bool:
+    """判断贴近当前 SLAM 栅格边缘的障碍是否仍可进入越障入口流程。
+
+    普通目标必须位于当前地图边框以内，防止把尚未观测的场地外部、斜视边线或地图
+    扩展瞬态误当成障碍入口。高墙是唯一必要的例外：垂直墙面会遮挡其后的激光，墙面
+    中心因此可能始终就是 ``OccupancyGrid`` 的已知区边缘。如果此时比赛语义已经稳定
+    确认为 ``high_wall``，并且实时点云粗类型也确认为 ``WALL``，允许任务层继续对正和
+    Action 交接。调用方仍须先检查“场地边界”名称、感知置信度和多帧确认，所以这个
+    例外不会把普通未知边界直接放行。
+
+    真机调参提示：不要为了高墙把 ``obstacle_map_edge_margin`` 全局调成负数。若真机
+    仍误拦高墙，应先检查墙面高度/宽度标定和 ``front_obstacle_name`` 是否稳定；若其他
+    障碍误靠近地图外框，则应增大 ``minimum_margin``，本例外只影响确认后的高墙。
+    """
+    distance = float(edge_distance)
+    margin = max(0.0, float(minimum_margin))
+    if isfinite(distance) and distance >= margin:
+        return True
+    return (
+        str(semantic_id) == "high_wall"
+        and int(obstacle_type) == int(TraverseObstacle.Goal.OBSTACLE_WALL)
+    )
+
+
 def extract_frontiers(
     grid: OccupancyGrid,
     robot_xy: Tuple[float, float],
@@ -2619,9 +2648,15 @@ class AutonomousMission(Node):
         # view, but every Action hand-off below still requires a confirmed ID.
         if self._arena_boundary_ahead(now):
             return None
-        if distance_inside_grid_edge(
+        edge_distance = distance_inside_grid_edge(
             self.map_msg, position[0], position[1]
-        ) < float(self.params["obstacle_map_edge_margin"]):
+        )
+        if not map_edge_allows_obstacle_handoff(
+            action_id,
+            action_obstacle_type(msg),
+            edge_distance,
+            self.params["obstacle_map_edge_margin"],
+        ):
             return None
         # 唯一障碍一旦成功就不再重复触发，即使局部点云把障碍中心更新到去重半径之外。
         # 木桥 unknown 例外：规则确有两座木桥，仍由空间去重和 resolve 函数补齐 A/B。

@@ -25,6 +25,7 @@ from quadruped_planning.autonomous_mission import (
     frontier_goal_in_known_free_space,
     inventory_display,
     is_actionable_semantic_id,
+    map_edge_allows_obstacle_handoff,
     mission_score,
     mission_inventory,
     navigation_purpose_allows_yaw_only_recovery,
@@ -285,6 +286,19 @@ def test_world_to_cell_rejects_robot_beyond_latest_map_boundary():
     assert abs(distance_inside_grid_edge(grid, 0.0, 0.0) - 2.5) < 1e-6
     assert abs(distance_inside_grid_edge(grid, 2.90, 0.0) - 0.10) < 1e-6
     assert distance_inside_grid_edge(grid, 3.10, 0.0) == 0.0
+
+
+def test_map_edge_guard_only_exempts_confirmed_occluding_high_wall():
+    """墙后未知区不能锁死高墙，同时不得放宽一般地图边界保护。"""
+    from quadruped_interfaces.action import TraverseObstacle
+
+    wall = TraverseObstacle.Goal.OBSTACLE_WALL
+    step = TraverseObstacle.Goal.OBSTACLE_STEP
+    assert map_edge_allows_obstacle_handoff("main_slope", step, 0.08, 0.05)
+    assert not map_edge_allows_obstacle_handoff("main_slope", step, 0.00, 0.05)
+    assert not map_edge_allows_obstacle_handoff("", wall, 0.00, 0.05)
+    assert not map_edge_allows_obstacle_handoff("high_wall", step, 0.00, 0.05)
+    assert map_edge_allows_obstacle_handoff("high_wall", wall, 0.00, 0.05)
 
 
 def test_boundary_guard_allows_targets_that_turn_away():

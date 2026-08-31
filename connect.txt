@@ -123,6 +123,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
         /traverse_obstacle 服务端。autonomous_navigation.launch.py 永远不启动仿真服务端；
         仿真替身只由 quadruped_gazebo 的独立 launch 显式启动。
+  地图边缘：普通目标贴近当前 OccupancyGrid 外框时禁止交接；只有语义已确认为 high_wall、
+        实时粗类型为 WALL 且名称不是场地边界时，才允许墙体遮挡造成的“墙后未知区”特例。
+        该规则不新增话题，也不能用于放行通用 WALL、未知边界或未确认障碍。
   对正：确认唯一障碍后先调用 /navigate_to_pose 做同位置纯 yaw 对正，再接近入口；单次
         最多修正 0.524 rad，转后等待 0.6 s 新感知，Action 交接航向门限为 0.12 rad。
   回访：多帧语义确认后记录“障碍 map 位置 + 当时安全观察位”。若尚未完成，空闲时优先
