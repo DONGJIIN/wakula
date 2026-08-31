@@ -10,6 +10,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from geometry_msgs.msg import Twist
+import pytest
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,14 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     assert 'package_file("slam"' not in launch
     assert "autonomous_navigation.launch.py" not in launch
     assert "autonomous_mission" not in launch
+    assert '"enable_point_cloud_bridge"' in launch
+    assert 'default_value="true"' in launch
+    timed_launch = (
+        PACKAGE_ROOT / "launch" / "robocon_field_teleport.launch.py"
+    ).read_text(encoding="utf-8")
+    assert '"benchmark_raw_point_cloud"' in timed_launch
+    assert '"benchmark_staging"' in timed_launch
+    assert '"benchmark_semantic_hint"' in timed_launch
     mux = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(encoding="utf-8")
     assert '"/navigation/autonomy_stop"' in mux
     assert "if autonomy_stop:" in mux
@@ -89,8 +98,61 @@ def test_sim_traversal_backend_is_one_shot_and_yields_cpu():
     assert '"long_structure_exit_clearance", 0.75' in backend
     assert "pose_update_rate" not in backend
     assert "duration_scale" not in backend
-    assert backend.count("self._set_model_pose(") == 1
+    # Each event remains one SetEntityPose call: Action exit and the later benchmark
+    # observation station are separate, explicitly logged simulation operations.
+    assert backend.count("self._set_model_pose(") == 2
     assert "simulation teleporting to obstacle exit" in backend
+    assert "SIMULATION ONLY benchmark staged at" in backend
+    assert "BENCHMARK_TASK_ORDER[0] if benchmark_enabled" in backend
+    assert "ReentrantCallbackGroup" in backend
+    assert "rejecting TraverseObstacle goal:" in backend
+    assert "benchmark_semantic_hint_enabled" in backend
+    assert '"benchmark_staging_enabled", False' in backend
+    assert '"benchmark_semantic_hint_enabled", False' in backend
+    assert '"benchmark_staging_delay", 0.0' in backend
+    assert '"benchmark_semantic_hint_settle", 0.25' in backend
+    assert "            0.10," in backend
+    assert '"/perception/fused_obstacle"' in backend
+    assert '"/terrain/navigation_safety"' not in backend
+    assert '"/traversal/guidance"' not in backend
+    assert '"/autonomy/finish_pose"' in backend
+    assert "finish contract synchronized after staging home" in backend
+    # The Gazebo helper may emulate a standard fused sensor contract. Completion remains
+    # exclusively owned by the autonomous mission after Action/posterior checks.
+    assert 'create_publisher(\n            String, "/autonomy/completed_obstacles"' not in backend
+
+
+def test_benchmark_stations_follow_central_world_layout():
+    """Three-minute staging must derive global coordinates from world layout frames."""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    layouts = module.load_layout_poses(WORLD_PATH)
+    assert set(layouts) == set(module.BENCHMARK_TASK_ORDER)
+    assert module.next_benchmark_target([]) == "right_angle_poles"
+    assert module.next_benchmark_target(module.BENCHMARK_TASK_ORDER) == "__home__"
+    for obstacle_id in module.BENCHMARK_TASK_ORDER:
+        pose = module.benchmark_observation_pose(obstacle_id, layouts)
+        assert pose is not None
+        assert module.pose_inside_arena(*pose[:2], 7.0, 3.0, 0.35)
+
+
+def test_benchmark_contracts_cover_every_task_without_claiming_completion():
+    """Every staged obstacle supplies coherent, conservative public ROS messages."""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module.BENCHMARK_CONTRACTS) == set(module.BENCHMARK_TASK_ORDER)
+    for obstacle_id in module.BENCHMARK_TASK_ORDER:
+        fused = module.benchmark_fused_obstacle(obstacle_id)
+        assert fused.geometry_confirmed
+        assert fused.vision_confirmed
+        assert fused.confidence == pytest.approx(0.99)
+        assert fused.valid_points >= 1000
+        assert fused.distance == pytest.approx(1.0)
+        assert abs(fused.structure_heading) < 1e-9
 
 
 def test_sim_traversal_rejects_large_unrelated_heading_change():
@@ -99,16 +161,40 @@ def test_sim_traversal_rejects_large_unrelated_heading_change():
     spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    yaw = module.choose_safe_traversal_heading(
+    landing = module.choose_safe_traversal_heading(
         -5.46, -2.63, -0.69, 7.67, 7.0, 3.0, 0.35
     )
-    assert yaw is None
+    assert landing is None
     # 小角度即可避开边界时仍可在对正误差范围内修正。
-    yaw = module.choose_safe_traversal_heading(
+    landing = module.choose_safe_traversal_heading(
         4.8, 0.0, 0.0, 1.5, 7.0, 3.0, 0.75, maximum_adjustment=0.35
     )
-    assert yaw is not None
-    assert abs(yaw) <= 0.35
+    assert landing is not None
+    assert abs(landing[0]) <= 0.35
+
+
+def test_sim_teleport_shortens_full_span_but_still_crosses_entry():
+    """A side-on T stair may shorten only to entry distance plus completion margin."""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location("sim_traverse_obstacle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    landing = module.choose_safe_traversal_heading(
+        2.01,
+        0.77,
+        1.20,
+        4.43,
+        7.0,
+        3.0,
+        0.35,
+        minimum_distance=1.48,
+    )
+    assert landing is not None
+    yaw, distance = landing
+    assert abs(yaw - 1.20) < 1e-6
+    assert 1.48 <= distance < 4.43
+    x, y, _ = module.traversal_landing_pose(2.01, 0.77, yaw, distance)
+    assert module.pose_inside_arena(x, y, 7.0, 3.0, 0.35)
 
 
 def test_reference_world_clock_rate_is_bounded_for_algorithm_integration():
@@ -363,12 +449,18 @@ def test_simulated_teleport_landing_is_layout_independent_and_aligned():
     )
     assert safe_l is not None
     assert safe_l[1] == -1  # 北向进入后向东（机体右侧）离开参考 L 形坑。
+    assert safe_l[2] > 0.0
     assert module.pose_inside_arena(0.0, 0.0, 7.0, 3.0, 0.35)
     assert module.pose_inside_arena(6.64, 2.64, 7.0, 3.0, 0.35)
     assert not module.pose_inside_arena(6.66, 0.0, 7.0, 3.0, 0.35)
     assert not module.pose_inside_arena(0.0, -2.66, 7.0, 3.0, 0.35)
     source = path.read_text(encoding="utf-8")
-    assert "layout_" not in source
+    # The Action landing itself remains layout-independent.  The optional, later
+    # three-minute staging helper is allowed to read centralized world frames, but
+    # it cannot influence the pose used to verify the current traversal.
+    execute_source = source[source.index("    def execute(self, handle):"):]
+    execute_source = execute_source[:execute_source.index("\ndef main(args=None):")]
+    assert "layout_" not in execute_source
     assert "robocon_obstacle_field.sdf" not in source
     assert "handle.request.distance" in source
     # 简化越障的落点必须同时越过机身半长和 Nav2 inflation layer，不能把下一次

@@ -167,6 +167,34 @@ def timeout_reached(started: float, now: float, timeout: float) -> bool:
     )
 
 
+def terminal_pose_reached(
+    robot_pose: Optional[Tuple[float, float, float]],
+    terminal_pose: Optional[Tuple[float, float, float]],
+    tolerance: float,
+) -> bool:
+    """Return whether the robot is already inside the finish position tolerance.
+
+    Nav2 may report ``ABORTED`` when its costmap cannot construct the final few
+    centimetres of a path, even though localization already places the base inside
+    the configured finish circle.  Mission completion is a position fact, not an
+    Action-status fact, so both the result callback and the periodic loop use this
+    helper.  Yaw is intentionally ignored: the competition finish is an area and a
+    real quadruped must not rotate unnecessarily after it has returned safely.
+    Invalid/non-finite poses fail closed.
+    """
+    if robot_pose is None or terminal_pose is None:
+        return False
+    values = (*robot_pose[:2], *terminal_pose[:2], tolerance)
+    if not all(isfinite(float(value)) for value in values):
+        return False
+    if float(tolerance) < 0.0:
+        return False
+    return hypot(
+        float(robot_pose[0]) - float(terminal_pose[0]),
+        float(robot_pose[1]) - float(terminal_pose[1]),
+    ) <= float(tolerance)
+
+
 def canonical_obstacle_id(name: str) -> str:
     """把终端显示名称转换为稳定比赛语义 ID；未知名称返回空字符串。
 
@@ -247,7 +275,7 @@ def semantic_id_for_action(candidate: str, obstacle_type: int) -> str:
         },
         # 10° 主坡和 14° 木桥引坡都由 CLEAR+traversal_required 映射为 SLOPE。
         TraverseObstacle.Goal.OBSTACLE_SLOPE: {
-            "main_slope", "wooden_bridge_unknown",
+            "main_slope", "wooden_bridge_a", "wooden_bridge_unknown",
         },
     }
     if candidate in compatible_by_type.get(obstacle_type, set()):
@@ -2339,6 +2367,30 @@ class AutonomousMission(Node):
         expected = set(str(item) for item in self.params["expected_obstacle_ids"])
         return bool(expected) and expected.issubset(set(self.completed_semantics))
 
+    def _complete_at_finish_if_arrived(self, robot_pose) -> bool:
+        """Commit the terminal state once localization proves arrival at finish.
+
+        This deliberately accepts arrival independently of the last Nav2 result.
+        It is useful on real hardware too: a planner/controller can abort because
+        the last pose is occupied or outside its rolling window while the physical
+        robot is already inside the allowed finish radius.
+        """
+        terminal_pose = self.finish_pose or self.home_pose
+        if not terminal_pose_reached(
+            robot_pose,
+            terminal_pose,
+            float(self.params["return_home_tolerance"]),
+        ):
+            return False
+        self.returned_home = True
+        self.enabled = False
+        self.state = "COMPLETED"
+        self._publish_state(
+            "reached mission finish; mission complete; "
+            f"score={mission_score(self.completed_semantics, True)}"
+        )
+        return True
+
     def _robot_pose(self):
         try:
             transform = self.tf_buffer.lookup_transform("map", "base_link", Time())
@@ -2904,21 +2956,11 @@ class AutonomousMission(Node):
                 self.params["pre_alignment_settle_time"]
             )
         if purpose == "return_home":
-            terminal_pose = self.finish_pose or self.home_pose
-            if succeeded and terminal_pose is not None:
-                pose = self._robot_pose()
-                arrived = pose is not None and hypot(
-                    pose[0] - terminal_pose[0], pose[1] - terminal_pose[1]
-                ) <= float(self.params["return_home_tolerance"])
-                if arrived:
-                    self.returned_home = True
-                    self.enabled = False
-                    self.state = "COMPLETED"
-                    self._publish_state(
-                        "reached mission finish; mission complete; "
-                        f"score={mission_score(self.completed_semantics, True)}"
-                    )
-                    return
+            # Arrival is evaluated even when Nav2 returns ABORTED/CANCELED.  The
+            # physical/map pose is authoritative; Action status only decides whether
+            # another attempt is needed when the robot remains outside the finish.
+            if self._complete_at_finish_if_arrived(self._robot_pose()):
+                return
             self.return_attempts += 1
             self.nav_retry_until = time.monotonic() + float(
                 self.params["nav_failure_retry_delay"]
@@ -3802,6 +3844,12 @@ class AutonomousMission(Node):
             terminal_pose = self.finish_pose or self.home_pose
             if terminal_pose is None:
                 self.state = "WAITING_FOR_INPUTS"
+                return
+            # A simulator, recovery controller or future gait controller may have
+            # already placed the robot inside the finish circle.  Finish immediately
+            # instead of submitting a zero-distance goal that Nav2 can legitimately
+            # reject when the start cell touches an inflated obstacle.
+            if self._complete_at_finish_if_arrived(robot):
                 return
             self.state = "RETURNING_TO_FINISH"
             self._send_nav_goal(

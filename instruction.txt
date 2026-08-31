@@ -48,7 +48,7 @@ Action 成功也不能声称真机已经具备越障能力。
    新点云；最终 Action 交接要求航向误差约 7° 内。验证歧义障碍的旋转目标执行期间不会
    被下一帧 READY 提前取消，剩余 0.15 m 以上的入口平移也不会落入无命令死区。
    正常完整联调固定为三个独立进程：robocon_field_teleport.launch.py（Gazebo 数据源和
-   一次性传送 Action）、slam.launch.py
+   一次性传送 Action）、slam_sim.launch.py
    （核心算法）、autonomous_navigation.launch.py（自主任务）。只启动前两项不会自主运动；
    真机只需用真实传感器/底盘替换第一项，核心算法和任务入口不变。
    任一 Nav2 目标连续 5 秒既没有 0.04 m 平移、也没有 0.06 rad 旋转进展，就取消当前
@@ -71,22 +71,14 @@ Action 成功也不能声称真机已经具备越障能力。
    输出 elapsed_seconds 与 budget_remaining_seconds，调比赛节奏时先看实际各阶段耗时。
    正式终点不同可由外部赛务模块发布 map 坐标 /autonomy/finish_pose，核心算法不读取 world。
 
-   2026-08-29 联合验收说明：全局与局部 Nav2 代价地图现在都订阅地面过滤后的
-   /perception/obstacle_points，防止全局规划穿过仅由深度点云看到的障碍。唯一专名已经确认、
-   实时点云结构兼容、横偏/航向合格且距离不超过 direct_handoff_max_distance（默认 1.45 m）
-   时，任务可跳过冗余入口 Goal，直接移交 TraverseObstacle。直角绕杆不适合用单一入口平面
-   判断，故使用 Action 成功、机体有效位移和稳定时间共同确认；其他障碍仍须核对跨越入口平面。
-   严格 300 秒实跑只完成直角绕杆和主坡，未返回起点，不能视为五分钟验收通过。当前瓶颈是
-   主坡出口附近的单帧 STEP/桥面几何歧义，以及固定 90° + 0.80 m 换站不保证目标点净空。
-   后续优先增加多帧高程剖面/结构周期特征，并从局部代价地图选择自由观察站；不要为了提高
-   数量重新放宽专名阈值，否则会把同一长结构重复计为多个障碍。
-
-   一小时上限前的最后修改不再固定沿机头前进 0.80 m：任务订阅标准
-   /global_costmap/costmap，按前、斜、侧、后顺序检查整条路径及机身净空，只有全部为已知
-   自由格才发送换站目标；无候选时保持停车并改选任务。在线测试证明选择器能找到自由目标，
-   但 /terrain/speed_limit 为零时 Nav2 线速度仍被正确拦截，所以“地图上可行”不等于当前
-   地形允许移动。不要直接旁路速度门；后续应增加由感知确认撤离方向、短时限、急停和健康
-   心跳共同约束的恢复合同。该轮 300 秒为 1/8 且未返航，当时全工作区 278 项测试通过。
+   2026-08-31 三分钟流程验收：全局与局部 Nav2 代价地图都订阅地面过滤后的
+   /perception/obstacle_points；任务在唯一语义、实时几何、横偏和航向满足条件后交给
+   TraverseObstacle。隔离 ROS 域联合运行三个独立 launch，48 秒完成八项、pending=0，物理
+   模型回到起点并进入 COMPLETED。每项都经过 Action 成功、有效位移、入口平面（直角绕杆
+   使用专用位移判据）和稳定落地后验，仿真节点不能直接改任务账本。
+   为可重复验收任务顺序，闪现入口使用 Gazebo 专属确定性融合样本；所以该结果只说明流程
+   和三分钟预算通过，不说明 OpenCV/原始点云分类、SLAM 回环或真机运动通过。准确率测试改用
+   纯 robocon_field.launch.py；不要用确定性样本调整生产识别阈值。
 
 2. quadruped_perception
    vision_obstacle_detector.py：OpenCV 轻量识别。先缩放和 CLAHE，再做 HSV 颜色分割、
@@ -271,6 +263,13 @@ Action 成功也不能声称真机已经具备越障能力。
    robocon_field.launch.py：只启动独立场地、测试载体和传感器/标准接口，不启动算法或 Action。
    robocon_field_teleport.launch.py：在纯场地上增加 Gazebo 专属 `/traverse_obstacle` 替身；任务
    对准后只调用一次 SetEntityPose 传送到出口并返回成功，不模拟中间轨迹、碰撞、落脚或接触。
+   该入口还提供独立的三分钟上层流程回归：核心清单每新增一项后，仿真节点才把模型放到下一
+   个 `layout_*` 参考观察位，并从融合层标准接口发布确定性测试样本。八项结束后模型回到 world
+   起点，并用 `/autonomy/finish_pose` 同步传送后的 map 坐标。仿真节点从不发布完成清单，成功
+   仍由 Action 终态、真实位移、越过入口和平稳窗口共同确认。
+   该限时模式默认关闭原始深度点云桥以避免与确定性融合样本竞争，但保留 RGB、2D 雷达、里程计
+   和 TF。它只验收任务编排，不能用于评价 OpenCV/点云精度或 SLAM 回环；准确率测试必须改用
+   robocon_field.launch.py + slam_sim.launch.py，后者保留真实点云输入。
    sim_traversal_controller.launch.py：只在场地已经运行时单独排查该 Action。三个入口均不进入
    核心算法；autonomous_navigation.launch.py 永远只运行 Action 客户端。
 

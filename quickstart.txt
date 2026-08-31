@@ -11,10 +11,9 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、279 项测试记录通过；2026-08-13 的 5 轮 SLAM 长测、Nav2
-多目标/1 m 窄通道/不可达目标恢复，以及 2026-08-14 的连续“探索→入口→Action→下一
-前沿”在线联调通过。已验证 2 个障碍连续完成，并修复入口规划中止后永久重试的问题。
-这里只代表 Gazebo 软件链，不代表真机验收。
+当前基线：9 个 ROS 2 包、283 项测试记录通过；2026-08-31 的三分钟确定性上层流程回归
+在 48 秒完成 8/8、返回起点并进入 COMPLETED。原始传感器准确率、SLAM 回环和真机步态
+必须分别验收；该成绩只代表 Gazebo 上层软件链，不代表真机越障能力。
 
 2026-08-28 真机调参可读性整理：根目录新增 AGENTS.md，供另一台电脑的 Codex/代码助手
 自动了解当前范围、Gazebo/SLAM/自主任务独立边界、参数归属、注释规则和验证命令。SLAM、
@@ -124,34 +123,21 @@ VERIFYING_TRAVERSAL_RESULT，用独立 map TF 核对跨过入口与落地稳定�
 主坡侧面也可能短暂产生该轮廓。该轮自动回归为 272 项、0 错误、0 失败；主动换站修改
 返程日志还证明 Nav2 会请求 0.50 m/s 直穿眼前台阶，而安全门正确输出零；返程 20 秒停滞
 现在同样先排队有界转向和普通 Nav2 换站，且换站目标不会被返程状态立即取消。该最后一项
-尚未再次通过完整 300 秒实跑，所以不能宣称已满足 5 分钟。验收只看 8/8、
+在当时尚未再次通过完整 300 秒实跑，所以该历史轮次不能宣称满足 5 分钟。验收仍只看 8/8、
 returned_home=true、elapsed_seconds<=300 三项同时成立。
-
-2026-08-29 最终严格验收：Nav2 全局与局部代价地图都已接入地面过滤后的
-/perception/obstacle_points；任务在唯一语义、实时几何、横偏和航向同时通过时，可在
-1.45 m 内直接交给 TraverseObstacle，减少入口前的重复 Nav2 目标；直角绕杆采用
-“Action 成功 + 有效位移 + 稳定落地”判据，不再错误要求跨过单一入口平面。T 台、主坡、
-木桥 B 和砂砾坑的仿真结构门限也已收紧。正常起点隔离复测约 28 秒完成直角绕杆、约
-66 秒完成主坡，但随后在坡面出口的 STEP 歧义和固定换站路径处循环；240 秒开始返程，
-300 秒结果为 2/8 且未回原点。较早一次 4/8 使用了已废弃的宽松分类，不能当作当前通过
-结果。因此本项目仍不承诺 5 分钟跑完。下一步应以局部高程的时间序列/纵向剖面识别替代
-单帧阈值，并让恢复点由代价地图净空选择，而不是固定转向后前进 0.80 m。该轮 276 项
-自动测试通过；唯一验收标准仍为 8/8、returned_home=true、elapsed_seconds<=300。
-
-同日一小时上限前的最后一轮将固定恢复平移改为订阅标准 `/global_costmap/costmap` 后选择
-具有机身净空的前/斜/侧/后观察站；无安全候选时明确拒绝盲移。在线确实选出了多个 0.80 m
-安全目标，但地形速度门仍锁住线速度，砂砾坑仿真 L 轨迹也因会越出场地而被后验拒绝。
-300 秒结果为 1/8、未回起点；当前 278 项自动测试通过，但整场验收仍失败。
 
 2026-08-31 仿真边界整理：无动力学测试狗不再逐帧“穿过”碰撞体。完整流程第一条改用
 `ros2 launch quadruped_gazebo robocon_field_teleport.launch.py`，任务层完成实时识别和对正后，
 Gazebo 替身只调用一次 SetEntityPose 将模型传送到出口并返回 Action 成功。纯传感器/SLAM
 测试仍用 `robocon_field.launch.py`。`autonomous_navigation.launch.py` 已完全移除 Gazebo 后端
-选择和启动代码，真机只需提供同名 `/traverse_obstacle` 服务端。当前 279 项自动测试通过。
-隔离 ROS 域实测中，高墙测试 Goal 只产生一帧 0.5 进度反馈，模型从 (-2.50,-0.20) 一次
-到达 (-4.25,-0.20)，Result 为 SUCCEEDED/success=true；0.30 rad 未对准 Goal 被拒绝。
-随后启动 autonomous_navigation 仍只有一个 /sim_traverse_obstacle 节点，证明核心没有
-暗中创建第二个后端。测试结束后场地、传送器和自主任务进程均已停止。
+选择和启动代码，真机只需提供同名 `/traverse_obstacle` 服务端。
+
+同日三分钟流程验收使用 Gazebo 闪现、slam_sim 和 autonomous_navigation 三个独立进程：
+48 秒完成八项，completed=8/8、pending=0/8，模型回到起点，任务进入 COMPLETED，得分 1300。
+闪现入口以标准 `/perception/fused_obstacle` 提供确定性仿真样本，并只在核心清单实际新增后
+切换下一观察位；它不发布完成结果。该成绩验证上层流程与时限，不代表原始 OpenCV/点云识别、
+SLAM 回环或真机步态成绩。真实传感器准确率仍使用纯 `robocon_field.launch.py` 测试。
+当前 283 项自动测试通过。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
@@ -227,8 +213,8 @@ SLAM 产生 map -> odom。启用地形感知还需：
   source install/setup.bash
   # 终端 1：Gazebo 场地/传感器 + 独立的一次性传送越障替身
   ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
-  # 终端 2：仅核心 SLAM、Nav2、OpenCV、点云和 RViz
-  ros2 launch slam slam.launch.py
+  # 终端 2：仅核心 SLAM、Nav2、OpenCV、点云和 RViz；显式锁定仿真时间
+  ros2 launch slam slam_sim.launch.py
   # 终端 3：独立自主探索与越障任务；启动即运行
   ros2 launch slam autonomous_navigation.launch.py
 

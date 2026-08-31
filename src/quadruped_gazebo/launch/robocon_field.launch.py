@@ -72,6 +72,7 @@ def generate_launch_description():
     robot_name = LaunchConfiguration("robot_name")
     publish_test_sensor_tf = LaunchConfiguration("publish_test_sensor_tf")
     keyboard_teleop = LaunchConfiguration("keyboard_teleop")
+    enable_point_cloud_bridge = LaunchConfiguration("enable_point_cloud_bridge")
     use_sim_time = {"use_sim_time": True}
 
     # ros_gz_sim 自带的 launch 负责启动 Gazebo。这里默认实时运行；gui=false 时只启动
@@ -188,6 +189,7 @@ def generate_launch_description():
                 executable="parameter_bridge",
                 name="robocon_point_cloud_bridge",
                 output="screen",
+                condition=IfCondition(enable_point_cloud_bridge),
                 arguments=[
                     "/camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
                 ],
@@ -312,6 +314,14 @@ def generate_launch_description():
                 "publish_test_sensor_tf",
                 default_value="true",
                 description="Publish sensor TF for the bundled generic test quadruped",
+            ),
+            DeclareLaunchArgument(
+                "enable_point_cloud_bridge",
+                default_value="true",
+                description=(
+                    "Bridge Gazebo depth points; the timed teleport workflow may "
+                    "disable it while retaining RGB, lidar, odometry and TF"
+                ),
             ),
             DeclareLaunchArgument("robot_x", default_value="-2.5"),
             DeclareLaunchArgument("robot_y", default_value="-0.2"),

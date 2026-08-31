@@ -69,7 +69,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，279 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，283 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -649,7 +649,7 @@ ros2 launch slam slam.launch.py rviz:=false nav2_autostart:=false
 
 ```bash
 ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
-ros2 launch slam slam.launch.py
+ros2 launch slam slam_sim.launch.py
 ros2 launch slam autonomous_navigation.launch.py
 ```
 
@@ -713,22 +713,19 @@ ros2 topic echo /autonomy/progress
 这用于先把相机从障碍转开，使 `/terrain/speed_limit` 恢复后再由 Nav2 正常平移；它绝不
 允许障碍前线速度，也不在 HANDOFF、TRAVERSING 或 `entry_escape` 阶段提供旁路。
 
-当前验收状态必须如实区分：2026-08-29 从正常起点进行了多轮 Gazebo、SLAM、自动任务三进程
-联合回归。已让全局/局部 costmap 同时融合 `/perception/obstacle_points`，修复 2D 雷达看不到
-低台阶/落差却仍规划穿越的问题；另加入 1.45 m 严格对正后的提前 Action 交接、90°换站、返程
-仅旋转重规划、坡侧/T 台和坑填料/桥 B 的实测阈值，以及直角绕杆的转弯轨迹与专用成功后验。
-最终严格轮次在 66 秒完成直角绕杆和主斜坡，之后在坡出口的通用 STEP 轮廓上反复换视角；
-300 秒时为 2/8 且未返回。旧宽松轮次最好为 4/8，但不能作为当前准确算法的合格成绩。全工作区
-278 项自动测试通过。因此仍不能承诺 5 分钟跑完；唯一通过标准仍是 8/8、
-`returned_home=true` 且总用时不超过 300 秒。剩余主瓶颈是坡/桥/台阶出口的结构分型，以及
-根据可通行空间选择换站方向，而不是固定沿旋转后的机头前移。
+当前验收状态必须区分“限时上层流程回归”和“真实感知准确率”：2026-08-31 使用上述三个
+独立命令完成了一轮隔离 ROS 域联合测试。闪现组合入口依次把测试载体放到八个参考观察位，
+但每一项仍必须经过标准融合消息、地形安全决策、语义多帧确认、`TraverseObstacle` Action、
+实际位移/入口平面和稳定落地后验后才能登记。实测 48 秒完成 8/8，未完成列表为 0，物理模型
+回到起点，任务进入 `COMPLETED`，得分 1300，距离 180 秒目标还剩 132 秒。
 
-同日最后一轮严格测试把固定 0.80 m 前移替换为 `/global_costmap/costmap` 驱动的净空换站：
-候选轨迹逐段检查未知/占用格和机身净空，正前方不安全时尝试斜向、侧向或后向；没有安全点
-则拒绝盲移。该机制在线选出多个 0.80 m 自由目标，但速度安全门仍因当前地形保持零线速度；
-砂砾坑仿真 L 轨迹还被场地边界后验拒绝。300 秒时只完成直角绕杆 1/8 且未返航，故一小时
-调试按约定停止。后续必须先修正仿真 L 轨迹入口方向，并为“已验证自由的恢复轨迹”设计不
-绕过急停/健康守卫的专用有限速度合同，而不是继续放宽识别阈值。
+该成绩只证明“识别合同 → 对正/交接 → Action → 成功后验 → 清单 → 下一障碍 → 返航”的
+任务闭环能在三分钟内完成，不证明原始 OpenCV/深度点云分类精度、SLAM 回环或真机步态能力。
+为使限时流程可重复，`robocon_field_teleport.launch.py` 默认启用 Gazebo 专属参考观察位和
+确定性 `/perception/fused_obstacle` 输入，并只在该入口关闭原始深度点云桥，避免两种感知源
+竞争；RGB、2D 雷达、里程计和 TF 仍正常发布。原始传感器与算法准确率必须使用
+`robocon_field.launch.py` + `slam_sim.launch.py` 单独测试，纯场地入口的点云桥默认保持开启。
+闪现流程不会发布任务完成清单；核心仍是唯一记账者。
 
 八项全部完成后自动导航到终点并进入 `COMPLETED`。默认终点就是第三条命令启动时实时
 记录的起点，因此仍只需三个命令。如果正式比赛终点不同，可由独立赛务节点提前发布
@@ -747,9 +744,11 @@ ros2 launch quadruped_gazebo robocon_field.launch.py
 ros2 launch quadruped_gazebo robocon_field_teleport.launch.py
 ```
 
-该组合入口仍只属于 Gazebo：它在纯场地基础上增加 `/traverse_obstacle` 一次性传送替身，
-不加载 SLAM、Nav2、OpenCV 或自主任务。`autonomous_navigation.launch.py` 不再检测或启动
-任何仿真节点；真机由真实控制器提供同名 Action。
+该组合入口仍只属于 Gazebo：它在纯场地基础上增加 `/traverse_obstacle` 一次性传送替身、
+限时回归观察位和仿真融合输入，不加载 SLAM、Nav2、OpenCV 或自主任务。完成八项后先把物理
+模型放回 world 起点，再通过已有 `/autonomy/finish_pose` 接口同步其当前 `map` 坐标，以免多次
+非物理传送造成 SLAM 坐标跳变后反复发送零意义的返航目标。`autonomous_navigation.launch.py`
+不检测或启动任何仿真节点；真机由真实控制器提供同名 Action。
 
 启动 `slam.launch.py` 后先看终端摘要。仿真联调必须显示
 `simulation_detected=true, use_sim_time=true, robot_model=false`；入口会对 `/clock` 做多次

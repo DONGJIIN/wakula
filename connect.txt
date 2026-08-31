@@ -247,18 +247,24 @@ stack_regression（测试工具，不随一键启动运行）
 
 /sim_traverse_obstacle（仿真一次性传送 Action 替身）
   作用：在无动力学测试载体上实现 /traverse_obstacle；任务对准后把模型一次传送到障碍出口，
-        用于验证任务登记与继续探索，不模拟碰撞、步态或中间轨迹。
-  输入：TraverseObstacle goal、/odom、Gazebo set_pose 服务；航向误差绝对值必须不超过
-        0.22 rad。输出：一次 Action feedback、Result 和停止用零 Twist。
+        限时模式下在核心清单变化后切换下一参考观察位，用于验证任务登记与继续探索；不模拟
+        碰撞、步态或中间轨迹，也不拥有核心任务清单。
+  输入：TraverseObstacle goal、/odom、/autonomy/completed_obstacles、Gazebo set_pose 服务；
+        航向误差绝对值必须不超过 0.24 rad（普通独立后端默认 0.22 rad）。
+  输出：Action feedback/Result、停止用零 Twist；限时模式额外发布标准
+        /perception/fused_obstacle 和返场后的 /autonomy/finish_pose。
   生命周期：推荐随 quadruped_gazebo/robocon_field_teleport.launch.py 启动；也可在纯场地
         已运行时单独启动 sim_traversal_controller.launch.py。绝不随 slam.launch.py、
         autonomous_navigation.launch.py 或真机入口启动，不能代表真实越障。
+  注意：限时融合输入只验证跨节点流程，不是 OpenCV/点云识别成绩；核心仍必须通过 Action、
+        位移、入口平面和落地稳定后验才会更新 completed_obstacles。
 
 /robocon_aux_sensor_bridge（ros_gz_bridge / parameter_bridge）
   作用：桥接 /imu/data 和 /camera/camera_info；辅助数据异常不影响导航桥。
 
 /robocon_point_cloud_bridge（ros_gz_bridge / parameter_bridge）
   作用：将 /camera/points 独立桥接为 /camera/depth/points，并修正仿真点云 frame。
+  注意：纯场地入口默认开启；三分钟闪现入口默认关闭，避免与确定性融合回归输入同时竞争。
 
 /robocon_image_bridge（ros_gz_bridge / parameter_bridge）
   作用：把 Gazebo 424×240@15 Hz RGB 图像转换为标准 /camera/image_raw，供 OpenCV 直接使用；

@@ -46,6 +46,7 @@ from quadruped_planning.autonomous_mission import (
     semantic_after_approach_stall,
     semantic_task_is_complete,
     target_is_in_heading_cone,
+    terminal_pose_reached,
     timeout_reached,
     traversal_crossing_evidence,
     traversal_geometry_evidence,
@@ -95,6 +96,15 @@ def test_invalid_or_tiny_maps_have_no_frontier():
     assert extract_frontiers(OccupancyGrid(), (0.0, 0.0)) == []
     grid = map_with_unknown_border()
     assert extract_frontiers(grid, (0.0, 0.0), minimum_cells=100) == []
+
+
+def test_terminal_arrival_uses_position_even_if_yaw_differs():
+    """The finish is an XY area; Nav2 status/yaw must not create an endless retry."""
+    assert terminal_pose_reached((1.2, -0.1, 3.0), (1.0, 0.0, 0.0), 0.25)
+    assert not terminal_pose_reached((1.3, -0.1, 0.0), (1.0, 0.0, 0.0), 0.25)
+    assert not terminal_pose_reached(None, (1.0, 0.0, 0.0), 0.25)
+    assert not terminal_pose_reached((1.0, 0.0, 0.0), None, 0.25)
+    assert not terminal_pose_reached((float("nan"), 0.0, 0.0), (1.0, 0.0, 0.0), 0.25)
 
 
 def test_frontier_navigation_goal_retreats_into_known_free_space():
@@ -358,6 +368,11 @@ def test_semantic_name_is_cross_checked_against_action_geometry():
     assert semantic_id_for_action(
         "wooden_bridge_unknown", TraverseObstacle.Goal.OBSTACLE_SLOPE
     ) == "wooden_bridge_unknown"
+    # A 14-degree entry ramp is the positive A-bridge identity, not an incompatible
+    # special case.  Omitting it here made fully confirmed bridge-A data ambiguous.
+    assert semantic_id_for_action(
+        "wooden_bridge_a", TraverseObstacle.Goal.OBSTACLE_SLOPE
+    ) == "wooden_bridge_a"
     # Coarse geometry is not a unique competition identity. Pit rails and bridge
     # sides can look like WALL, while one height-bar post can look like POLE.
     assert semantic_id_for_action("", TraverseObstacle.Goal.OBSTACLE_WALL) == ""

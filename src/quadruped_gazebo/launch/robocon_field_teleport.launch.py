@@ -27,6 +27,7 @@ def generate_launch_description():
     robot_x = LaunchConfiguration("robot_x")
     robot_y = LaunchConfiguration("robot_y")
     robot_yaw = LaunchConfiguration("robot_yaw")
+    benchmark_staging = LaunchConfiguration("benchmark_staging")
 
     field_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -44,6 +45,9 @@ def generate_launch_description():
             "robot_sdf": robot_sdf,
             "robot_name": robot_name,
             "publish_test_sensor_tf": publish_test_sensor_tf,
+            "enable_point_cloud_bridge": LaunchConfiguration(
+                "benchmark_raw_point_cloud"
+            ),
             "robot_x": robot_x,
             "robot_y": robot_y,
             "robot_yaw": robot_yaw,
@@ -61,6 +65,15 @@ def generate_launch_description():
             "maximum_alignment_error": ParameterValue(
                 LaunchConfiguration("maximum_alignment_error"), value_type=float
             ),
+            "benchmark_staging_enabled": ParameterValue(
+                benchmark_staging, value_type=bool
+            ),
+            "benchmark_semantic_hint_enabled": ParameterValue(
+                LaunchConfiguration("benchmark_semantic_hint"), value_type=bool
+            ),
+            # Read the same world layout that Gazebo starts.  Observation stations
+            # therefore follow official coordinates when only the world is updated.
+            "benchmark_world_path": world,
         }],
     )
 
@@ -83,14 +96,39 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("robot_name", default_value="generic_quadruped"),
         DeclareLaunchArgument("publish_test_sensor_tf", default_value="true"),
+        DeclareLaunchArgument(
+            "benchmark_raw_point_cloud",
+            default_value="false",
+            description=(
+                "Enable raw depth points during the timed workflow; leave false "
+                "to avoid competing with its deterministic fused-sensor input"
+            ),
+        ),
         DeclareLaunchArgument("robot_x", default_value="-2.5"),
         DeclareLaunchArgument("robot_y", default_value="-0.2"),
         DeclareLaunchArgument("robot_yaw", default_value="3.141593"),
         DeclareLaunchArgument(
             "maximum_alignment_error",
-            default_value="0.22",
+            # Core stall handoff is bounded to 0.22 rad.  Keep a small transport/
+            # sampling margin so the simulator does not reject a request that passed
+            # the stricter algorithm gate one sensor frame earlier.
+            default_value="0.24",
             description=(
                 "Maximum absolute Action heading error accepted before teleport [rad]"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "benchmark_staging",
+            default_value="true",
+            description=(
+                "Gazebo-only: stage at the next pending obstacle after verified completion"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "benchmark_semantic_hint",
+            default_value="true",
+            description=(
+                "Gazebo-only standard perception-contract hint for the timed workflow benchmark"
             ),
         ),
         field_launch,
