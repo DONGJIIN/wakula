@@ -3,7 +3,7 @@
   <name>quadruped_description</name>
   <version>0.1.0</version>
   <description>Uncalibrated RViz and sensor-frame placeholder model.</description>
-  <maintainer email="developer@example.com">Quadruped Developer</maintainer>
+  <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>launch</exec_depend>

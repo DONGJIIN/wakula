@@ -24,13 +24,25 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
-def _reject_duplicate_world(_context):
+def _validated_world_name(raw_name):
+    """Return one Gazebo service-path segment or fail before creating processes."""
+    world_name = str(raw_name).strip()
+    if not world_name or any(character.isspace() for character in world_name):
+        raise RuntimeError("world_name must be a non-empty name without whitespace")
+    if "/" in world_name or world_name in {".", ".."}:
+        raise RuntimeError("world_name must be one Gazebo name, not a service path")
+    return world_name
+
+
+def _reject_duplicate_world(context):
     """在启动前拒绝同名 Gazebo world，避免 ROS 话题连接到另一份旧场景。
 
     Gazebo Transport 允许两个同名 world 同时存在，但 ROS bridge 只能看到同名服务和
     话题，最终会形成“画面里机器人在 A、里程计来自 B”的隐蔽故障。这里不擅自杀进程，
     而是让第二次启动给出明确错误，用户 Ctrl-C 旧 Gazebo 后再执行同一条命令即可。
     """
+    world_name = _validated_world_name(LaunchConfiguration("world_name").perform(context))
+    scene_service = f"/world/{world_name}/scene/info"
     try:
         result = subprocess.run(
             [
@@ -38,7 +50,7 @@ def _reject_duplicate_world(_context):
                 "service",
                 "-i",
                 "-s",
-                "/world/robocon_obstacle_field/scene/info",
+                scene_service,
             ],
             check=False,
             capture_output=True,
@@ -52,7 +64,7 @@ def _reject_duplicate_world(_context):
         return []
     if "tcp://" in result.stdout:
         raise RuntimeError(
-            "A robocon_obstacle_field Gazebo server is already running. "
+            f"A {world_name} Gazebo server is already running. "
             "Stop the old Gazebo launch with Ctrl-C before starting a new one."
         )
     return []
@@ -66,6 +78,7 @@ def generate_launch_description():
     default_robot = package_share / "models" / "generic_quadruped" / "model.sdf"
 
     world = LaunchConfiguration("world")
+    world_name = LaunchConfiguration("world_name")
     gui = LaunchConfiguration("gui")
     spawn_robot = LaunchConfiguration("spawn_test_robot")
     robot_sdf = LaunchConfiguration("robot_sdf")
@@ -105,7 +118,7 @@ def generate_launch_description():
                 executable="create",
                 output="screen",
                 arguments=[
-                    "-world", "robocon_obstacle_field",
+                    "-world", world_name,
                     "-name", robot_name,
                     "-file", robot_sdf,
                     "-x", LaunchConfiguration("robot_x"),
@@ -154,8 +167,11 @@ def generate_launch_description():
                 name="robocon_pose_service_bridge",
                 output="screen",
                 arguments=[
-                    "/world/robocon_obstacle_field/set_pose@"
-                    "ros_gz_interfaces/srv/SetEntityPose",
+                    [
+                        "/world/",
+                        world_name,
+                        "/set_pose@ros_gz_interfaces/srv/SetEntityPose",
+                    ],
                 ],
                 parameters=[use_sim_time],
             ),
@@ -277,7 +293,6 @@ def generate_launch_description():
         emulate_tty=True,
         prefix="gnome-terminal --wait --title='Wakula Simulation Keyboard' --",
         remappings=[("cmd_vel", "/cmd_vel_teleop")],
-        parameters=[{"repeat_rate": 20.0, "key_timeout": 0.6}],
         condition=IfCondition(
             PythonExpression([
                 "'", gui, "'.lower() in ('true', '1') and '",
@@ -295,6 +310,13 @@ def generate_launch_description():
             SetEnvironmentVariable("GTK_EXE_PREFIX", ""),
             SetEnvironmentVariable("GIO_MODULE_DIR", ""),
             DeclareLaunchArgument("world", default_value=str(default_world)),
+            DeclareLaunchArgument(
+                "world_name",
+                default_value="robocon_obstacle_field",
+                description=(
+                    "Name of the <world> element inside world; used for Gazebo services"
+                ),
+            ),
             DeclareLaunchArgument("gui", default_value="true"),
             DeclareLaunchArgument(
                 "keyboard_teleop",

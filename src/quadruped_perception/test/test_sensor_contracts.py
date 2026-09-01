@@ -55,6 +55,17 @@ def test_image_contract_rejects_empty_stale_and_inconsistent_buffers():
     slash_frame.header.frame_id = "/camera_link"
     assert not image_message_contract_valid(slash_frame)
 
+    # Metadata validation in the camera callback supplies bgr8's three bytes per pixel.  A row
+    # containing only one byte per pixel used to lock source ownership until CvBridge failed later.
+    short_bgr_row = deepcopy(message)
+    short_bgr_row.step = short_bgr_row.width
+    short_bgr_row.data = bytes(short_bgr_row.step * short_bgr_row.height)
+    assert not image_message_contract_valid(short_bgr_row, minimum_bytes_per_pixel=3)
+
+    trailing_bytes = deepcopy(message)
+    trailing_bytes.data = bytes(trailing_bytes.data) + b"\x00"
+    assert not image_message_contract_valid(trailing_bytes, minimum_bytes_per_pixel=3)
+
 
 def test_point_cloud_contract_requires_consistent_float_xyz_layout():
     """Reject missing fields, truncated buffers, and nonstandard integer XYZ coordinates."""
@@ -76,6 +87,26 @@ def test_point_cloud_contract_requires_consistent_float_xyz_layout():
     zero_stamp = deepcopy(message)
     zero_stamp.header.stamp.sec = 0
     assert not point_cloud_message_contract_valid(zero_stamp)
+
+    duplicate_x = deepcopy(message)
+    duplicate_x.fields.insert(0, deepcopy(duplicate_x.fields[0]))
+    assert not point_cloud_message_contract_valid(duplicate_x)
+
+    overlapping = deepcopy(message)
+    overlapping.fields[1].offset = overlapping.fields[0].offset
+    assert not point_cloud_message_contract_valid(overlapping)
+
+    mixed_precision = deepcopy(message)
+    mixed_precision.point_step = 16
+    mixed_precision.row_step = 16
+    mixed_precision.data = bytes(16)
+    mixed_precision.fields[2].offset = 8
+    mixed_precision.fields[2].datatype = PointField.FLOAT64
+    assert not point_cloud_message_contract_valid(mixed_precision)
+
+    trailing_bytes = deepcopy(message)
+    trailing_bytes.data = bytes(trailing_bytes.data) + b"\x00"
+    assert not point_cloud_message_contract_valid(trailing_bytes)
 
 
 def test_source_stamp_rejects_replay_and_unreasonable_future_data():

@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <sdf version="1.10">
   <!--
-    2026 第二十四届全国大学生机器人大赛 Robocon 仿生足式机器人挑战赛
-    “障碍赛”参考场地，依据 V1.0 规则第 3.1 节、表 1 和附录配色建立。
+    2026 第二十五届全国大学生机器人大赛 Robocon 仿生足式机器人挑战赛
+    “障碍赛”参考场地，依据官方 V2.0 规则和配套图册建立。
 
     重要边界：规则只公布 14 m × 6 m 外框、障碍结构尺寸，并明确“具体排列顺序与安装
     位置在赛前公布”。因此下面八个顶层 model 的 pose 是按图 1 绘制的参考布局，不是正式
@@ -108,10 +108,33 @@
         <visual name="visual_pole_1"><pose>0 0 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
         <visual name="visual_pole_2"><pose>1 0 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
         <visual name="visual_pole_3"><pose>1 1 0.275 0 0 0</pose><geometry><cylinder><radius>0.035</radius><length>0.55</length></cylinder></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
-        <!-- 三个直径约 350 mm 的必达区，中心与相应标志杆相距 400 mm；仅 visual。 -->
-        <visual name="zone_start"><pose>-0.40 0 0.003 0 0 0</pose><geometry><cylinder><radius>0.175</radius><length>0.006</length></cylinder></geometry><material><diffuse>0.80 0.18 0.04 1</diffuse></material></visual>
-        <visual name="zone_corner"><pose>1 -0.40 0.003 0 0 0</pose><geometry><cylinder><radius>0.175</radius><length>0.006</length></cylinder></geometry><material><diffuse>0.80 0.18 0.04 1</diffuse></material></visual>
-        <visual name="zone_finish"><pose>1 1.40 0.003 0 0 0</pose><geometry><cylinder><radius>0.175</radius><length>0.006</length></cylinder></geometry><material><diffuse>0.80 0.18 0.04 1</diffuse></material></visual>
+        <!-- V2.0：三个直径约 350 mm 的必达区是红色虚线圆，中心与相应标志杆相距
+             400 mm。下方每圆由八段红色切线短线组成，全部只有 visual、没有 collision；
+             圆内不铺红色几何，因而仍显示场地黄色。 -->
+        <visual name="zone_start_dash_01"><pose>-0.225000 0.000000 0.003 0 0 1.570796</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_02"><pose>-0.276256 0.123744 0.003 0 0 2.356194</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_03"><pose>-0.400000 0.175000 0.003 0 0 3.141593</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_04"><pose>-0.523744 0.123744 0.003 0 0 3.926991</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_05"><pose>-0.575000 0.000000 0.003 0 0 4.712389</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_06"><pose>-0.523744 -0.123744 0.003 0 0 5.497787</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_07"><pose>-0.400000 -0.175000 0.003 0 0 6.283185</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_start_dash_08"><pose>-0.276256 -0.123744 0.003 0 0 7.068583</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_01"><pose>1.175000 -0.400000 0.003 0 0 1.570796</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_02"><pose>1.123744 -0.276256 0.003 0 0 2.356194</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_03"><pose>1.000000 -0.225000 0.003 0 0 3.141593</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_04"><pose>0.876256 -0.276256 0.003 0 0 3.926991</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_05"><pose>0.825000 -0.400000 0.003 0 0 4.712389</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_06"><pose>0.876256 -0.523744 0.003 0 0 5.497787</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_07"><pose>1.000000 -0.575000 0.003 0 0 6.283185</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_corner_dash_08"><pose>1.123744 -0.523744 0.003 0 0 7.068583</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_01"><pose>1.175000 1.400000 0.003 0 0 1.570796</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_02"><pose>1.123744 1.523744 0.003 0 0 2.356194</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_03"><pose>1.000000 1.575000 0.003 0 0 3.141593</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_04"><pose>0.876256 1.523744 0.003 0 0 3.926991</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_05"><pose>0.825000 1.400000 0.003 0 0 4.712389</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_06"><pose>0.876256 1.276256 0.003 0 0 5.497787</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_07"><pose>1.000000 1.225000 0.003 0 0 6.283185</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
+        <visual name="zone_finish_dash_08"><pose>1.123744 1.276256 0.003 0 0 7.068583</pose><geometry><box><size>0.070 0.020 0.006</size></box></geometry><material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material></visual>
       </link>
     </model>
 
@@ -192,14 +215,15 @@
       </link>
     </model>
 
-    <!-- LAYOUT 4/8：大斜坡。规则尺寸为长 3.00 m、总宽 2.00 m、坡角 10°。 -->
+    <!-- LAYOUT 4/8：大斜坡。V2.0 为水平长 3.00 m、总宽 2.00 m、坡角 11.3°。 -->
     <model name="main_slope">
       <static>true</static>
       <pose relative_to="layout_main_slope">0 0 0 0 0 0</pose>
       <link name="slope">
-        <!-- 3 m 斜面高差约 0.521 m；薄板中心高度按几何计算。 -->
-        <collision name="ramp"><pose>0 0 0.265 0 -0.174533 0</pose><geometry><box><size>3.00 2.00 0.08</size></box></geometry></collision>
-        <visual name="visual_ramp"><pose>0 0 0.265 0 -0.174533 0</pose><geometry><box><size>3.00 2.00 0.08</size></box></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
+        <!-- 水平投影 3.000 m，高差 3*tan(11.3°)=0.599459 m，斜面长 3/cos(11.3°)=3.059306 m。
+             中心 z 取高差的一半；薄板与地面的微小交叠用于避免仿真接触缝隙。 -->
+        <collision name="ramp"><pose>0 0 0.299730 0 -0.197222 0</pose><geometry><box><size>3.059306 2.00 0.08</size></box></geometry></collision>
+        <visual name="visual_ramp"><pose>0 0 0.299730 0 -0.197222 0</pose><geometry><box><size>3.059306 2.00 0.08</size></box></geometry><material><ambient>0.874510 0.458824 0 1</ambient><diffuse>0.874510 0.458824 0 1</diffuse></material></visual>
       </link>
     </model>
 

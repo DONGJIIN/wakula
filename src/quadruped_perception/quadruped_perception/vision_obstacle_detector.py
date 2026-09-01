@@ -148,6 +148,7 @@ def annotate_detection_frame(
         )
 
     def draw_evidence(evidence: ObstacleEvidence, color, prefix: str, row: int) -> None:
+        """把归一化候选框裁剪到当前图像，并绘制人类可读类别/置信度。"""
         if evidence.hint == "none" or evidence.width <= 0.0 or evidence.height <= 0.0:
             return
         left = int((evidence.center_x - evidence.width / 2.0) * image_width)
@@ -948,6 +949,7 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("min_temporal_iou", 0.20)
         self.declare_parameter("history_reset_timeout", 0.75)
         self.declare_parameter("source_switch_timeout", 2.0)
+        self.declare_parameter("source_failure_cooldown", 2.0)
         self.declare_parameter("orange_hsv_lower", [5, 80, 70])
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
         self.declare_parameter("blue_hsv_lower", [90, 70, 50])
@@ -1067,6 +1069,9 @@ class VisionObstacleDetector(Node):
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
         )
+        self.source_failure_cooldown = max(
+            0.1, float(self.get_parameter("source_failure_cooldown").value)
+        )
         self.evidence_history = deque(maxlen=history_size)
         kernel_size = max(1, int(self.get_parameter("morphology_size").value))
         kernel_size += 1 if kernel_size % 2 == 0 else 0
@@ -1087,6 +1092,10 @@ class VisionObstacleDetector(Node):
         self.last_received_source_stamp = None
         self.active_topic = None
         self.last_active_image_time = None
+        # Keep the ROS epoch independent of source health.  Otherwise a future watermark or
+        # cooldown left by a rosbag seek can reject every first-frame candidate in the new epoch.
+        self.last_ros_time_ns = None
+        self.source_cooldown_until = {}
         self.geometry_label = "WAITING FOR DEPTH"
         self.last_geometry_time = None
         self.feature_pub = self.create_publisher(
@@ -1148,6 +1157,7 @@ class VisionObstacleDetector(Node):
 
     def geometry_callback(self, msg: NavigationSafety) -> None:
         """缓存点云融合后的权威类别，仅用于相机调试画面文字，不回灌视觉检测。"""
+        self._observe_ros_epoch(self.get_clock().now())
         self.geometry_label = (
             GEOMETRY_DISPLAY_NAMES.get(int(msg.obstacle_type), "UNKNOWN")
             if msg.perception_valid
@@ -1169,18 +1179,29 @@ class VisionObstacleDetector(Node):
     def image_callback(self, msg: Image, source: str) -> None:
         """只保存最新图像，避免相机帧率高于处理能力时形成积压。"""
         now = self.get_clock().now()
+        self._observe_ros_epoch(now)
         now_seconds = now.nanoseconds * 1e-9
+        cooldown_until = self.source_cooldown_until.get(source, float("-inf"))
+        if now_seconds < cooldown_until:
+            return
+        self.source_cooldown_until = {
+            topic: deadline
+            for topic, deadline in self.source_cooldown_until.items()
+            if deadline > now_seconds
+        }
         # A publisher is not a usable camera merely because DDS messages arrive.  Validate the
         # cheap structural contract before it can lock ``active_topic`` and suppress a healthy
         # fallback camera.  Encoding interpretation is also cheap and catches unsupported
         # vendor strings without decoding the full image in this high-frequency callback.
         try:
-            _, channels = self.bridge.encoding_to_dtype_with_channels(msg.encoding)
+            dtype, channels = self.bridge.encoding_to_dtype_with_channels(msg.encoding)
             encoding_valid = int(channels) in (1, 3, 4)
+            bytes_per_pixel = int(np.dtype(dtype).itemsize) * int(channels)
         except (CvBridgeError, KeyError, RuntimeError, TypeError, ValueError):
             encoding_valid = False
+            bytes_per_pixel = 1
         if (
-            not image_message_contract_valid(msg)
+            not image_message_contract_valid(msg, bytes_per_pixel)
             or not encoding_valid
             or not source_stamp_is_plausible(
                 msg.header, now_seconds, self.source_switch_timeout
@@ -1203,23 +1224,14 @@ class VisionObstacleDetector(Node):
             self.source_switch_timeout,
         ):
             return
-        clock_rewound = (
-            self.last_active_image_time is not None
-            and now.nanoseconds < self.last_active_image_time.nanoseconds
-        )
-        new_source_session = source != self.active_topic or clock_rewound
+        new_source_session = source != self.active_topic
         # 同时存在多个默认图像话题时只选一个，失联后再自动切换。
         if new_source_session:
             self.evidence_history.clear()
             self.last_processed_stamp = None
             self.last_received_source_stamp = None
             self.active_topic = source
-            if clock_rewound:
-                self.get_logger().warning(
-                    "ROS clock moved backward; reset visual history"
-                )
-            else:
-                self.get_logger().info(f"Using camera topic {source}")
+            self.get_logger().info(f"Using camera topic {source}")
         if not source_stamp_strictly_advances(
             msg.header, self.last_received_source_stamp
         ):
@@ -1248,8 +1260,68 @@ class VisionObstacleDetector(Node):
         self.last_active_image_time = now
         self.latest_frame = (msg, source)
 
+    def _observe_ros_epoch(self, now) -> bool:
+        """Clear all temporal/source state before processing data after a ROS-time rewind.
+
+        The comparison uses integer nanoseconds to avoid floating-point loss on long recordings.
+        It runs at every subscription/timer entry so neither an old pending image nor a future
+        cooldown/watermark can cross a rosbag or Gazebo reset.
+        """
+        current_ns = int(now.nanoseconds)
+        rewound = (
+            self.last_ros_time_ns is not None
+            and current_ns < self.last_ros_time_ns
+        )
+        if rewound:
+            self._reset_sensor_epoch()
+            self.get_logger().warning(
+                "ROS clock moved backward; reset camera source epoch",
+                throttle_duration_sec=2.0,
+            )
+        self.last_ros_time_ns = current_ns
+        return rewound
+
+    def _reset_sensor_epoch(self) -> None:
+        """Forget observations and deadlines that belong to a previous ROS-time epoch."""
+        self.latest_frame = None
+        self.last_processed_stamp = None
+        self.last_received_source_stamp = None
+        self.active_topic = None
+        self.last_active_image_time = None
+        self.source_cooldown_until.clear()
+        self.evidence_history.clear()
+        # The annotation must not display a depth label received before the replay seek.
+        self.geometry_label = "WAITING FOR DEPTH"
+        self.last_geometry_time = None
+
+    def _mark_source_unhealthy(self, source: str) -> None:
+        """Cooldown an image source whose pixel payload cannot produce a usable BGR frame."""
+        now = self.get_clock().now()
+        if self._observe_ros_epoch(now):
+            return
+        now_seconds = now.nanoseconds * 1e-9
+        self.source_cooldown_until[source] = (
+            now_seconds + self.source_failure_cooldown
+        )
+        if self.latest_frame is not None and self.latest_frame[1] == source:
+            self.latest_frame = None
+        if source != self.active_topic:
+            return
+        self.get_logger().warning(
+            f"Camera source {source} is unusable; allowing backup source takeover",
+            throttle_duration_sec=2.0,
+        )
+        self.active_topic = None
+        self.last_active_image_time = None
+        self.last_processed_stamp = None
+        self.last_received_source_stamp = None
+        self.evidence_history.clear()
+
     def processing_callback(self) -> None:
         """处理一帧新图像并发布颜色特征、稳定证据和可选调试掩膜。"""
+        # Discard an old pending frame if /clock rewinds between subscriber and timer callbacks.
+        if self._observe_ros_epoch(self.get_clock().now()):
+            return
         if self.latest_frame is None:
             return
         msg, source = self.latest_frame
@@ -1261,15 +1333,14 @@ class VisionObstacleDetector(Node):
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except (CvBridgeError, RuntimeError, TypeError, ValueError) as exc:
             self.get_logger().warning(f"Image conversion failed: {exc}")
-            # Do not let a stream that passed metadata checks but failed actual conversion keep
-            # ownership forever.  The next healthy candidate may take over immediately.
-            self.latest_frame = None
-            if source == self.active_topic:
-                self.active_topic = None
-                self.last_active_image_time = None
-                self.evidence_history.clear()
+            # Metadata-valid vendor encodings can still fail the real bgr8 conversion.  Quarantine
+            # that source so its next high-rate frame cannot immediately reacquire before a healthy
+            # backup is seen; a one-camera installation retries automatically after the cooldown.
+            self._mark_source_unhealthy(source)
             return
         if bgr.size == 0:
+            self.get_logger().warning("Image conversion produced an empty frame")
+            self._mark_source_unhealthy(source)
             return
         if self.resize_width and bgr.shape[1] > self.resize_width:
             scale = self.resize_width / float(bgr.shape[1])

@@ -20,6 +20,7 @@ from quadruped_perception.terrain_geometry import (
     PIT,
     POLE,
     STEP,
+    UNKNOWN,
     WALL,
     analyze_terrain_geometry,
     navigation_obstacle_points,
@@ -624,6 +625,62 @@ def _dense_floor(z=0.0):
         for y in np.arange(-0.4, 0.41, 0.05):
             rows.extend(((x, y, z - 0.001), (x, y, z + 0.001)))
     return np.asarray(rows, dtype=np.float64)
+
+
+def test_clear_requires_normal_continuous_ground_through_body_corridor():
+    """密集平地应通过中央通道可见性门，并保留高 CLEAR 置信度。"""
+    result = analyze_terrain_geometry(_dense_floor())
+    assert result.valid
+    assert result.obstacle_type == CLEAR
+    assert result.confidence > 0.95
+
+
+def test_clear_fails_closed_for_complete_no_return_band_in_central_corridor():
+    """两侧和远处虽有点，横贯落脚通道的无回波带仍必须是 UNKNOWN，而不是 CLEAR/PIT。"""
+    floor = _dense_floor()
+    missing_band = (
+        (floor[:, 0] >= 0.55)
+        & (floor[:, 0] <= 0.90)
+        & (np.abs(floor[:, 1]) <= 0.25)
+    )
+    result = analyze_terrain_geometry(floor[~missing_band])
+    assert not result.valid
+    assert result.obstacle_type == UNKNOWN
+    assert result.pit_depth == 0.0
+
+
+def test_clear_fails_closed_when_all_ground_ahead_of_near_patch_is_missing():
+    """只看到脚尖前一小片地面不能批准继续前进到尚未观测的区域。"""
+    near_only = _dense_floor()
+    near_only = near_only[near_only[:, 0] <= 0.45]
+    result = analyze_terrain_geometry(near_only)
+    assert not result.valid
+    assert result.obstacle_type == UNKNOWN
+
+
+def test_clear_confidence_includes_tolerated_ground_coverage_dropout():
+    """小于 max_gap 的单行丢点可继续 CLEAR，但置信度必须低于完整平地。"""
+    floor = _dense_floor()
+    complete = analyze_terrain_geometry(floor)
+    one_missing_row = floor[np.abs(floor[:, 0] - 0.40) > 0.015]
+    degraded = analyze_terrain_geometry(one_missing_row)
+    assert degraded.valid
+    assert degraded.obstacle_type == CLEAR
+    assert 0.0 < degraded.confidence < complete.confidence
+
+
+def test_whole_floor_height_translation_conflicts_with_recent_ground_prior():
+    """机身高度整体变化必须先 UNKNOWN，不能被旧先验钉成一整片假 PIT。"""
+    shifted_floor = _dense_floor(z=0.20)
+    result = analyze_terrain_geometry(
+        shifted_floor,
+        ground_height_prior=0.0,
+        ground_prior_max_height_shift=0.10,
+    )
+    assert not result.valid
+    assert result.obstacle_type == UNKNOWN
+    assert result.pit_depth == 0.0
+    assert result.ground_reference_conflict
 
 
 def test_front_edge_heading_recovers_oblique_crossing_normal():
@@ -1375,7 +1432,7 @@ def test_robust_ground_fit_preserves_long_slope_with_high_outliers():
 
 
 def test_competition_fourteen_degree_ramp_remains_ground_not_wall():
-    """规则中的 10°/14° 坡面应拟合为地面坡度，而不是高墙或台阶。"""
+    """规则中的 11.3°/14° 坡面应拟合为地面坡度，而不是高墙或台阶。"""
     floor = _dense_floor()
     slope = np.tan(np.deg2rad(14.0))
     floor[:, 2] += slope * floor[:, 0]

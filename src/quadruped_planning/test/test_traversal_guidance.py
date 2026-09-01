@@ -21,11 +21,12 @@ PARAMETERS = {
 }
 
 
-def safety(obstacle_type, distance=1.0, lateral=0.0):
+def safety(obstacle_type, distance=1.0, lateral=0.0, semantic_id=""):
     """构造一条最小有效的原子安全观测。"""
     msg = NavigationSafety()
     msg.perception_valid = True
     msg.obstacle_type = obstacle_type
+    msg.semantic_id = semantic_id
     msg.confidence = 0.8
     msg.distance = distance
     msg.lateral_offset = lateral
@@ -183,8 +184,38 @@ def test_geometry_type_flicker_does_not_reset_same_entry():
     assert third.phase == TraversalGuidance.PHASE_READY
 
 
+def test_semantic_id_is_forwarded_and_interleaved_obstacles_never_share_ready():
+    """同粗类型邻近障碍必须以强类型 ID 形成新的确认窗口。"""
+    filter_ = stabilizer()
+    bridge = compute_guidance(
+        safety(
+            NavigationSafety.OBSTACLE_STEP,
+            0.70,
+            0.01,
+            "wooden_bridge_a",
+        ),
+        **PARAMETERS,
+    )
+    stair = compute_guidance(
+        safety(
+            NavigationSafety.OBSTACLE_STEP,
+            0.71,
+            0.02,
+            "t_shaped_stairs",
+        ),
+        **PARAMETERS,
+    )
+    assert bridge.semantic_id == "wooden_bridge_a"
+    filter_.update(bridge)
+    filter_.update(bridge)
+    switched = filter_.update(stair)
+    assert switched.semantic_id == "t_shaped_stairs"
+    assert switched.phase == TraversalGuidance.PHASE_ALIGN
+    assert not switched.ready_for_handoff
+
+
 def test_surface_axis_aligns_diagonal_ramp_before_handoff():
-    """斜看 10° 坡时应先转到坡轴，不能沿可见轮廓中心斜穿场地。"""
+    """斜看 11.3° 主坡时应先转到坡轴，不能沿可见轮廓中心斜穿场地。"""
     heading = surface_axis_heading(math.radians(7.1), math.radians(7.1))
     assert heading is not None
     assert math.radians(40.0) <= heading <= math.radians(50.0)

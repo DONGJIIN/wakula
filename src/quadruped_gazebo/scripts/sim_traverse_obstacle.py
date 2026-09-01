@@ -7,10 +7,13 @@
 真机绝不能启动它。运动团队应以同名 Action server 替换，核心导航节点无需修改。
 """
 
-from math import atan2, cos, pi, sin
+from collections import deque
+from dataclasses import dataclass
+from math import atan2, cos, hypot, isfinite, pi, sin
 import json
 from pathlib import Path
 import signal
+from threading import Lock
 import time
 import xml.etree.ElementTree as ET
 
@@ -28,8 +31,48 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time as RosTime
 from ros_gz_interfaces.msg import Entity
 from ros_gz_interfaces.srv import SetEntityPose
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
+
+
+# Controller-envelope defaults are kept together so the simulator and the mission
+# configuration can be checked as one contract.  ENTRY_READY retains its deliberately
+# tighter 0.10 m lateral bound below; only ENTRY_PREPARING uses the 0.35 m envelope.
+DEFAULT_MAXIMUM_ENTRY_DISTANCE = 2.50
+DEFAULT_MAXIMUM_LATERAL_OFFSET = 0.35
+DEFAULT_MAXIMUM_ALIGNMENT_ERROR = 0.22
+DEFAULT_READY_ENTRY_DISTANCE = 0.45
+DEFAULT_READY_LATERAL_OFFSET = 0.10
+DEFAULT_READY_ALIGNMENT_ERROR = 0.08
+DEFAULT_PREPARATION_STANDOFF = 0.20
+DEFAULT_PREPARATION_LINEAR_SPEED = 0.16
+DEFAULT_PREPARATION_ANGULAR_SPEED = 0.35
+
+# At the broad server envelope, a 2.5 m snapshot leaves up to 2.3 m of planar
+# approach after the 0.20 m standoff.  2.33 m / 0.16 m/s is already about 14.6 s;
+# a worst-direction quarter turn plus 0.22 rad final alignment adds about 5.1 s.
+# Twenty-five seconds leaves bounded margin for the proportional final approach and
+# odometry scheduling while remaining below the mission's 45 s traversal timeout.
+DEFAULT_PREPARATION_TIMEOUT = 25.0
+DEFAULT_ODOMETRY_HISTORY_DURATION = 2.0
+DEFAULT_ODOMETRY_HISTORY_MAX_SAMPLES = 256
+DEFAULT_ODOMETRY_SNAPSHOT_MAX_GAP = 0.15
+
+# This is the simulation controller's explicit capability table, not a perception
+# compatibility table.  The mission may preserve a semantic name while its near-field
+# classifier briefly reports a coarser type, but ``action_type_for_semantic`` must
+# canonicalize the final Action Goal before this server accepts it.  The unresolved
+# ``wooden_bridge_unknown`` label is intentionally absent because it is not actionable.
+SIM_TRAVERSAL_CAPABILITIES = {
+    "right_angle_poles": TraverseObstacle.Goal.OBSTACLE_POLE,
+    "gravel_wood_pit": TraverseObstacle.Goal.OBSTACLE_PIT,
+    "height_bar": TraverseObstacle.Goal.OBSTACLE_BAR,
+    "main_slope": TraverseObstacle.Goal.OBSTACLE_SLOPE,
+    "wooden_bridge_a": TraverseObstacle.Goal.OBSTACLE_STEP,
+    "wooden_bridge_b": TraverseObstacle.Goal.OBSTACLE_STEP,
+    "t_shaped_stairs": TraverseObstacle.Goal.OBSTACLE_STEP,
+    "high_wall": TraverseObstacle.Goal.OBSTACLE_WALL,
+}
 
 
 # 三分钟仿真回归的观察位均以各障碍 ``layout_*`` frame 为原点，不是全局坐标。
@@ -79,12 +122,17 @@ BENCHMARK_CONTRACTS = {
     "height_bar": {
         "obstacle_type": NavigationSafety.OBSTACLE_BAR,
         "height": 0.32,
-        "clearance_height": 0.20,
+        # V2.0 retains the published 300 mm ground-to-crossbar-bottom clearance.
+        # This synthetic simulator observation must match both the SDF and the rule;
+        # changing it to satisfy a classifier would invalidate the benchmark.
+        "clearance_height": 0.30,
         "width": 1.00,
     },
     "main_slope": {
         "obstacle_type": NavigationSafety.OBSTACLE_CLEAR,
-        "slope_pitch": 10.0 * pi / 180.0,
+        # Official 2026 V2.0 main-ramp pitch.  Keep this simulator truth aligned
+        # with the world geometry; production perception must still measure it.
+        "slope_pitch": 11.3 * pi / 180.0,
         "roughness": 0.01,
         "width": 2.00,
     },
@@ -336,14 +384,429 @@ def choose_safe_traversal_heading(
     return None
 
 
+def gazebo_pose_service(world_name, override=""):
+    """Resolve the simulator pose service without hiding a world-name constant."""
+    explicit = str(override).strip()
+    if explicit:
+        if not explicit.startswith("/") or any(
+            character.isspace() for character in explicit
+        ):
+            raise ValueError("pose_service must be an absolute ROS service name")
+        return explicit
+    name = str(world_name).strip()
+    if (
+        not name
+        or "/" in name
+        or name in {".", ".."}
+        or any(character.isspace() for character in name)
+    ):
+        raise ValueError("world_name must be one non-empty Gazebo name")
+    return f"/world/{name}/set_pose"
+
+
+def normalize_angle(angle):
+    """Wrap one planar angle to [-pi, pi] without hiding its unit (radians)."""
+    return atan2(sin(float(angle)), cos(float(angle)))
+
+
+@dataclass(frozen=True)
+class PlanarPoseSample:
+    """One validated odometry pose in the same clock domain as an Action Header."""
+
+    stamp: float
+    x: float
+    y: float
+    yaw: float
+
+
+@dataclass(frozen=True)
+class FrozenEntryTarget:
+    """Obstacle-entry geometry resolved once at the Goal measurement timestamp."""
+
+    stamp: float
+    snapshot_x: float
+    snapshot_y: float
+    snapshot_yaw: float
+    target_x: float
+    target_y: float
+    target_yaw: float
+    remaining_distance: float
+
+
+def header_stamp_error(header):
+    """Validate ROS ``Time`` fields before converting them to floating seconds."""
+    try:
+        seconds = int(header.stamp.sec)
+        nanoseconds = int(header.stamp.nanosec)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return "header.stamp fields must be integers"
+    if seconds < 0:
+        return "header.stamp.sec must be non-negative"
+    if nanoseconds < 0 or nanoseconds >= 1_000_000_000:
+        return "header.stamp.nanosec must be in [0, 1000000000)"
+    if seconds == 0 and nanoseconds == 0:
+        return "header.stamp must be non-zero"
+    return ""
+
+
+def _header_stamp_seconds(header):
+    """Convert a ROS Header stamp to seconds; callers still decide its clock domain."""
+    return float(header.stamp.sec) + float(header.stamp.nanosec) * 1.0e-9
+
+
+def planar_pose_sample_from_odometry(msg):
+    """Return a finite stamped planar pose, or ``None`` for unusable odometry."""
+    if header_stamp_error(msg.header):
+        return None
+    position = msg.pose.pose.position
+    orientation = msg.pose.pose.orientation
+    values = (
+        position.x,
+        position.y,
+        orientation.x,
+        orientation.y,
+        orientation.z,
+        orientation.w,
+    )
+    if not all(isfinite(float(value)) for value in values):
+        return None
+    quaternion_norm = sum(
+        float(value) ** 2
+        for value in (
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
+        )
+    )
+    if quaternion_norm < 1.0e-12:
+        return None
+    return PlanarPoseSample(
+        stamp=_header_stamp_seconds(msg.header),
+        x=float(position.x),
+        y=float(position.y),
+        yaw=yaw_from_odometry(msg),
+    )
+
+
+def odometry_pose_at_stamp(history, stamp, maximum_gap):
+    """Resolve a Goal-time pose by exact match, interpolation, or bounded nearest.
+
+    Interpolation uses the shortest yaw arc.  A single nearest sample is acceptable
+    only inside ``maximum_gap``; this supports normal sensor scheduling jitter without
+    letting an old pose silently reinterpret a newer obstacle distance.
+    """
+    query = float(stamp)
+    gap = max(0.0, float(maximum_gap))
+    samples = tuple(history)
+    if not isfinite(query) or not samples:
+        return None
+    samples = tuple(
+        sample
+        for sample in sorted(samples, key=lambda item: float(item.stamp))
+        if all(
+            isfinite(float(value))
+            for value in (sample.stamp, sample.x, sample.y, sample.yaw)
+        )
+    )
+    if not samples:
+        return None
+
+    before = None
+    after = None
+    for sample in samples:
+        delta = float(sample.stamp) - query
+        if abs(delta) <= 1.0e-9:
+            return sample
+        if delta < 0.0:
+            before = sample
+            continue
+        after = sample
+        break
+
+    if before is not None and after is not None:
+        before_gap = query - float(before.stamp)
+        after_gap = float(after.stamp) - query
+        if before_gap <= gap and after_gap <= gap:
+            span = float(after.stamp) - float(before.stamp)
+            if span <= 1.0e-12:
+                return before
+            ratio = before_gap / span
+            return PlanarPoseSample(
+                stamp=query,
+                x=float(before.x) + ratio * (float(after.x) - float(before.x)),
+                y=float(before.y) + ratio * (float(after.y) - float(before.y)),
+                yaw=normalize_angle(
+                    float(before.yaw)
+                    + ratio * normalize_angle(float(after.yaw) - float(before.yaw))
+                ),
+            )
+
+    nearest = min(samples, key=lambda item: abs(float(item.stamp) - query))
+    if abs(float(nearest.stamp) - query) <= gap:
+        return nearest
+    return None
+
+
+def frozen_entry_from_history(goal, history, maximum_gap, standoff):
+    """Freeze the body-frame entry geometry against Goal-time odometry history."""
+    stamp = _header_stamp_seconds(goal.header)
+    pose = odometry_pose_at_stamp(history, stamp, maximum_gap)
+    if pose is None:
+        return None, "odometry history unavailable near Goal header.stamp"
+
+    distance = max(0.0, float(goal.distance))
+    remaining_distance = min(distance, max(0.0, float(standoff)))
+    target_forward = distance - remaining_distance
+    target_lateral = float(goal.lateral_offset)
+    return (
+        FrozenEntryTarget(
+            stamp=stamp,
+            snapshot_x=float(pose.x),
+            snapshot_y=float(pose.y),
+            snapshot_yaw=float(pose.yaw),
+            target_x=(
+                float(pose.x)
+                + cos(float(pose.yaw)) * target_forward
+                - sin(float(pose.yaw)) * target_lateral
+            ),
+            target_y=(
+                float(pose.y)
+                + sin(float(pose.yaw)) * target_forward
+                + cos(float(pose.yaw)) * target_lateral
+            ),
+            target_yaw=normalize_angle(
+                float(pose.yaw) + float(goal.heading_error)
+            ),
+            remaining_distance=remaining_distance,
+        ),
+        "",
+    )
+
+
+def validate_traversal_goal(
+    goal,
+    *,
+    now_seconds,
+    required_frame,
+    maximum_snapshot_age,
+    maximum_future_skew,
+    maximum_entry_distance,
+    maximum_lateral_offset,
+    maximum_alignment_error,
+    ready_entry_distance,
+    ready_lateral_offset,
+    ready_alignment_error,
+):
+    """Return an empty string for a safe atomic Goal, otherwise a rejection reason.
+
+    Validation deliberately happens before Action acceptance: a real controller must
+    never start a final approach and only later discover that one metric was NaN, stale,
+    expressed in another frame, or copied from an unrelated sensor frame.  The broad
+    100 m geometry ceiling catches corrupted units while remaining independent of the
+    competition layout; tighter entry/alignment bounds are explicit server parameters.
+    """
+    stamp_reason = header_stamp_error(goal.header)
+    if stamp_reason:
+        return stamp_reason
+
+    frame_id = str(goal.header.frame_id).strip()
+    if not frame_id or frame_id != str(required_frame).strip():
+        return f"header.frame_id must be {required_frame!r}"
+    if any(character.isspace() for character in frame_id):
+        return "header.frame_id contains whitespace"
+
+    stamp_seconds = _header_stamp_seconds(goal.header)
+    now_seconds = float(now_seconds)
+    if not isfinite(stamp_seconds) or not isfinite(now_seconds):
+        return "header.stamp and server time must be finite"
+    age = now_seconds - stamp_seconds
+    if age < -max(0.0, float(maximum_future_skew)):
+        return f"measurement is {-age:.3f} s in the future"
+    if age > max(0.0, float(maximum_snapshot_age)):
+        return f"measurement is stale by {age:.3f} s"
+
+    if int(goal.obstacle_type) not in (
+        TraverseObstacle.Goal.OBSTACLE_STEP,
+        TraverseObstacle.Goal.OBSTACLE_PIT,
+        TraverseObstacle.Goal.OBSTACLE_WALL,
+        TraverseObstacle.Goal.OBSTACLE_BAR,
+        TraverseObstacle.Goal.OBSTACLE_POLE,
+        TraverseObstacle.Goal.OBSTACLE_SLOPE,
+    ):
+        return "obstacle_type is not traversable"
+    semantic_id = str(goal.obstacle_id).strip()
+    canonical_type = SIM_TRAVERSAL_CAPABILITIES.get(semantic_id)
+    if canonical_type is None:
+        return "obstacle_id is unknown or not actionable by this controller"
+    if int(goal.obstacle_type) != int(canonical_type):
+        return (
+            f"obstacle_id {semantic_id!r} requires canonical obstacle_type "
+            f"{int(canonical_type)}"
+        )
+    if int(goal.entry_stage) not in (
+        TraverseObstacle.Goal.ENTRY_READY,
+        TraverseObstacle.Goal.ENTRY_PREPARING,
+    ):
+        return "entry_stage must be ENTRY_READY or ENTRY_PREPARING"
+
+    finite_fields = (
+        "confidence",
+        "distance",
+        "lateral_offset",
+        "heading_error",
+        "obstacle_height",
+        "pit_depth",
+        "slope_pitch",
+        "slope_roll",
+        "roughness",
+        "width",
+        "structure_heading",
+        "structure_heading_confidence",
+        "clearance_height",
+    )
+    for field in finite_fields:
+        if not isfinite(float(getattr(goal, field))):
+            return f"{field} is not finite"
+
+    if not 0.0 < float(goal.confidence) <= 1.0:
+        return "confidence must be in (0, 1]"
+    if not 0.0 <= float(goal.structure_heading_confidence) <= 1.0:
+        return "structure_heading_confidence must be in [0, 1]"
+    if not 0.0 <= float(goal.distance) <= max(0.0, float(maximum_entry_distance)):
+        return "distance is outside the controller entry envelope"
+    if abs(float(goal.lateral_offset)) > max(0.0, float(maximum_lateral_offset)):
+        return "lateral_offset is outside the controller entry envelope"
+    if abs(float(goal.heading_error)) > max(0.0, float(maximum_alignment_error)):
+        return "heading_error is outside the controller entry envelope"
+    if abs(float(goal.slope_pitch)) > pi / 2.0:
+        return "slope_pitch is outside [-pi/2, pi/2]"
+    if abs(float(goal.slope_roll)) > pi / 2.0:
+        return "slope_roll is outside [-pi/2, pi/2]"
+    if abs(float(goal.structure_heading)) > pi:
+        return "structure_heading is outside [-pi, pi]"
+    for field in (
+        "obstacle_height",
+        "pit_depth",
+        "roughness",
+        "width",
+        "clearance_height",
+    ):
+        value = float(getattr(goal, field))
+        if value < 0.0 or value > 100.0:
+            return f"{field} must be in [0, 100] m"
+    if int(goal.valid_points) <= 0:
+        return "valid_points must be greater than zero"
+
+    if int(goal.entry_stage) == TraverseObstacle.Goal.ENTRY_READY:
+        if float(goal.distance) > max(0.0, float(ready_entry_distance)):
+            return "ENTRY_READY distance exceeds the lift-ready envelope"
+        if abs(float(goal.lateral_offset)) > max(
+            0.0, float(ready_lateral_offset)
+        ):
+            return "ENTRY_READY lateral offset exceeds the lift-ready envelope"
+        if abs(float(goal.heading_error)) > max(
+            0.0, float(ready_alignment_error)
+        ):
+            return "ENTRY_READY heading error exceeds the lift-ready envelope"
+    return ""
+
+
+class MonotonicFeedback:
+    """Publish the canonical PREPARING -> TRAVERSING -> STABILIZING sequence.
+
+    Progress is global Action progress in [0, 1], not progress local to each state.
+    Rejecting regressions here makes simulator tests exercise the same feedback
+    contract expected from the future whole-body controller.
+    """
+
+    _ORDER = {
+        TraverseObstacle.Feedback.STATE_PREPARING: 1,
+        TraverseObstacle.Feedback.STATE_TRAVERSING: 2,
+        TraverseObstacle.Feedback.STATE_STABILIZING: 3,
+    }
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.last_order = 0
+        self.last_progress = 0.0
+
+    def publish(self, state, progress, message):
+        """Publish one protocol-valid sample or reject a state/progress regression."""
+        state = int(state)
+        progress = float(progress)
+        order = self._ORDER.get(state, 0)
+        if (
+            order <= 0
+            or order < self.last_order
+            or not isfinite(progress)
+            or progress < self.last_progress
+            or progress < 0.0
+            or progress > 1.0
+        ):
+            raise RuntimeError("TraverseObstacle feedback must be monotonic")
+        feedback = TraverseObstacle.Feedback()
+        feedback.state = state
+        feedback.progress = progress
+        feedback.message = str(message)
+        self.handle.publish_feedback(feedback)
+        self.last_order = order
+        self.last_progress = progress
+
+
 class SimTraverseObstacle(Node):
     def __init__(self):
+        """Create the simulation-only Action boundary and optional benchmark helpers.
+
+        The server accepts one atomic traversal snapshot at a time.  It owns only
+        planar final preparation plus one irreversible Gazebo pose update; it never
+        claims leg dynamics.  The transient-local software-stop input can reject a
+        new Goal or poison an active Goal, but it is not a physical emergency stop.
+        """
         super().__init__("sim_traverse_obstacle")
         self.declare_parameter("command_topic", "/cmd_vel_teleop")
-        # 任务层通常要求约 7° 对正；停滞交接最多允许约 12.6°，由真实控制器在
-        # PREPARING 中闭环修正。仿真传送替身没有控制闭环，因此超过该范围直接拒绝，
-        # 防止“看见障碍但没对准”也被伪造为成功。
-        self.declare_parameter("maximum_alignment_error", 0.22)
+        # 任务层通常要求约 7° 对正；停滞交接最多允许约 12.6°，由控制器在
+        # PREPARING 中闭环修正。仿真替身只实现低速平面对正、没有腿部闭环，因此超过
+        # 该范围直接拒绝，防止“看见障碍但没对准”也被伪造为成功。
+        self.declare_parameter(
+            "maximum_alignment_error", DEFAULT_MAXIMUM_ALIGNMENT_ERROR
+        )
+        # Action Goal 必须是同一时刻、同一车体坐标系下的原子快照。
+        # 对真机，时效窗口应根据 rosbag 中感知端到 Action server 的 P99 延迟
+        # 设置；窗口过小会频繁拒绝，过大则可能用移动前的障碍位姿执行。
+        self.declare_parameter("goal_frame_id", "base_link")
+        self.declare_parameter("maximum_snapshot_age", 0.75)
+        self.declare_parameter("maximum_future_skew", 0.05)
+        # PREPARING 是运动控制器可自行消除的最终入口包络；READY 是更小的
+        # 起身/落足窗口。这些是仿真控制器验证值，核心感知阈值不得从此反向调整。
+        self.declare_parameter(
+            "maximum_entry_distance", DEFAULT_MAXIMUM_ENTRY_DISTANCE
+        )
+        self.declare_parameter(
+            "maximum_lateral_offset", DEFAULT_MAXIMUM_LATERAL_OFFSET
+        )
+        self.declare_parameter("ready_entry_distance", DEFAULT_READY_ENTRY_DISTANCE)
+        self.declare_parameter(
+            "ready_lateral_offset", DEFAULT_READY_LATERAL_OFFSET
+        )
+        self.declare_parameter(
+            "ready_alignment_error", DEFAULT_READY_ALIGNMENT_ERROR
+        )
+        # ENTRY_PREPARING 使用通用测试狗的平面速度做最后低速接近/对正。
+        # 若超时或里程计长时不变，Action 失败，不允许继续传送到出口。
+        self.declare_parameter(
+            "preparation_standoff", DEFAULT_PREPARATION_STANDOFF
+        )
+        self.declare_parameter(
+            "preparation_linear_speed", DEFAULT_PREPARATION_LINEAR_SPEED
+        )
+        self.declare_parameter(
+            "preparation_angular_speed", DEFAULT_PREPARATION_ANGULAR_SPEED
+        )
+        self.declare_parameter("preparation_position_tolerance", 0.05)
+        self.declare_parameter("preparation_heading_tolerance", 0.04)
+        self.declare_parameter("preparation_timeout", DEFAULT_PREPARATION_TIMEOUT)
+        self.declare_parameter("preparation_stall_timeout", 2.0)
         # SetEntityPose 成功后短暂等待里程计发布新位姿，让任务层的越过/稳定后验读取
         # 到出口位置。它是墙钟等待，不代表真实越障耗时。
         self.declare_parameter("teleport_settle_duration", 0.25)
@@ -352,10 +815,23 @@ class SimTraverseObstacle(Node):
         # 后验；这不代表真实机器人可以跳过结构中段。
         self.declare_parameter("minimum_exit_clearance", 0.60)
         self.declare_parameter("model_name", "generic_quadruped")
-        self.declare_parameter(
-            "pose_service", "/world/robocon_obstacle_field/set_pose"
-        )
+        self.declare_parameter("world_name", "robocon_obstacle_field")
+        # 非空 pose_service 只用于特殊桥接命名；正常情况由 world_name 唯一推导。
+        self.declare_parameter("pose_service", "")
         self.declare_parameter("odometry_topic", "/odom")
+        # Goal geometry is measured in base_link at header.stamp.  Keep enough odom
+        # history to resolve that timestamp exactly/interpolated; current odometry is
+        # reserved for closing the loop toward the resulting frozen world target.
+        self.declare_parameter(
+            "odometry_history_duration", DEFAULT_ODOMETRY_HISTORY_DURATION
+        )
+        self.declare_parameter(
+            "odometry_history_max_samples", DEFAULT_ODOMETRY_HISTORY_MAX_SAMPLES
+        )
+        self.declare_parameter(
+            "odometry_snapshot_max_gap", DEFAULT_ODOMETRY_SNAPSHOT_MAX_GAP
+        )
+        self.declare_parameter("emergency_stop_topic", "/teleop/emergency_stop")
         # 仅供 robocon_field_teleport.launch.py 的限时全场回归。一次障碍仍必须由核心
         # 感知确认、Nav2 对正、Action 成功和位移后验共同完成；本开关只在清单已经变化
         # 后把模型放到下一障碍的观察位，避免随机前沿探索占用三分钟验收预算。
@@ -403,9 +879,6 @@ class SimTraverseObstacle(Node):
         # B 桥从西侧入口平台前缘到东侧出口坡末端约 5.20 m；规则中的 5.70 m 是模型
         # 总体参考包络，不能在 request.distance 后再次完整相加，否则重复计算入口平台。
         self.declare_parameter("wooden_bridge_b_span", 5.20)
-        # 未分型木桥也要一次离开整座结构，避免落在桥中段并把同一座桥计成第二座；
-        # choose_safe_traversal_heading 会在侧向接近时自动选择不越界的通过方向。
-        self.declare_parameter("wooden_bridge_unknown_span", 5.00)
         self.declare_parameter("t_shaped_stairs_span", 2.80)
         # 仅为 SetEntityPose 仿真替身提供最后一道越界保护；核心任务管理器仍完全不读取
         # 这些尺寸。正式坐标或真机 Action server 都不会使用这里的边界参数。
@@ -418,6 +891,23 @@ class SimTraverseObstacle(Node):
         self.publisher = self.create_publisher(
             Twist, str(self.get_parameter("command_topic").value), 10
         )
+        # A true stop sample permanently poisons the currently accepted Action even
+        # if Start clears the topic before the execute loop observes it.  Therefore
+        # clearing the software stop can only enable a newly submitted Goal.
+        self.stop_state_lock = Lock()
+        self.emergency_stop = False
+        self.active_action_stop_latched = False
+        self.busy = False
+        self.active_entry_snapshot = None
+        self.odom_history_lock = Lock()
+        history_capacity = max(
+            16,
+            min(
+                4096,
+                int(self.get_parameter("odometry_history_max_samples").value),
+            ),
+        )
+        self.odom_history = deque(maxlen=history_capacity)
         self.latest_odom = None
         self.create_subscription(
             Odometry,
@@ -429,9 +919,25 @@ class SimTraverseObstacle(Node):
         # mutually-exclusive group the timer blocks its own service response until
         # the 0.30 s wall-clock deadline, so benchmark staging silently retries forever.
         self.sim_callback_group = ReentrantCallbackGroup()
+        pose_service = gazebo_pose_service(
+            self.get_parameter("world_name").value,
+            self.get_parameter("pose_service").value,
+        )
         self.pose_client = self.create_client(
             SetEntityPose,
-            str(self.get_parameter("pose_service").value),
+            pose_service,
+            callback_group=self.sim_callback_group,
+        )
+        stop_qos = QoSProfile(depth=1)
+        stop_qos.reliability = ReliabilityPolicy.RELIABLE
+        stop_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("emergency_stop_topic").value),
+            self._emergency_stop_callback,
+            stop_qos,
+            # The Action execute callback sleeps while approaching and stabilizing.
+            # A re-entrant group is required so the stop sample is still processed.
             callback_group=self.sim_callback_group,
         )
         self.layout_poses = load_layout_poses(
@@ -498,7 +1004,6 @@ class SimTraverseObstacle(Node):
             self._benchmark_semantic_hint_tick,
             callback_group=self.sim_callback_group,
         )
-        self.busy = False
         self.shutdown_requested = False
         self.server = ActionServer(
             self,
@@ -522,7 +1027,31 @@ class SimTraverseObstacle(Node):
                 )
 
     def _odom_callback(self, msg):
-        self.latest_odom = msg
+        """Store only finite stamped odometry in a bounded, single-clock history."""
+        sample = planar_pose_sample_from_odometry(msg)
+        if sample is None:
+            return
+        history_duration = max(
+            0.25,
+            float(self.get_parameter("odometry_history_duration").value),
+        )
+        with self.odom_history_lock:
+            if self.odom_history and sample.stamp < self.odom_history[-1].stamp:
+                # A simulation reset changes the clock epoch.  Never interpolate a
+                # Goal across poses from before and after that reset.
+                self.odom_history.clear()
+            if self.odom_history and abs(
+                sample.stamp - self.odom_history[-1].stamp
+            ) <= 1.0e-9:
+                self.odom_history[-1] = sample
+            else:
+                self.odom_history.append(sample)
+            while (
+                len(self.odom_history) > 1
+                and sample.stamp - self.odom_history[0].stamp > history_duration
+            ):
+                self.odom_history.popleft()
+            self.latest_odom = msg
 
     def _completed_obstacles_callback(self, msg):
         """Queue a new observation station only after the core ledger changes.
@@ -655,26 +1184,86 @@ class SimTraverseObstacle(Node):
         fused.header.stamp = self.get_clock().now().to_msg()
         self.benchmark_fused_pub.publish(fused)
 
+    def _emergency_stop_callback(self, msg):
+        """Latch a global simulation stop and poison any already accepted Action.
+
+        ``false`` clears only the global admission gate.  It intentionally does not
+        clear ``active_action_stop_latched``: once B interrupted an active Goal, that
+        Goal must terminate without success and the client must submit a new snapshot.
+        """
+        requested = bool(msg.data)
+        with self.stop_state_lock:
+            self.emergency_stop = requested
+            if requested and self.busy:
+                self.active_action_stop_latched = True
+        if requested:
+            self._stop()
+
+    def _software_stop_blocks_motion(self):
+        """Return true when no velocity command or new pose update may be issued."""
+        with self.stop_state_lock:
+            return bool(self.emergency_stop or self.active_action_stop_latched)
+
+    def _reserve_action_if_safe(self, entry_snapshot=None):
+        """Atomically reserve one Action slot and its immutable entry snapshot."""
+        with self.stop_state_lock:
+            if self.emergency_stop:
+                return "simulation software emergency stop is latched"
+            if self.busy:
+                return "another traversal is active"
+            self.busy = True
+            self.active_action_stop_latched = False
+            self.active_entry_snapshot = entry_snapshot
+        return ""
+
+    def _release_action_reservation(self):
+        """Release an Action slot without accidentally clearing the global stop."""
+        with self.stop_state_lock:
+            self.busy = False
+            self.active_action_stop_latched = False
+            self.active_entry_snapshot = None
+
     def goal_callback(self, goal):
-        valid = (
-            not self.busy
-            # CLEAR=1 不应交接；坡面由任务层显式映射为 SLOPE=7。
-            and goal.obstacle_type in (2, 3, 4, 5, 6, 7)
-            and 0.0 <= goal.confidence <= 1.0
-            and abs(float(goal.heading_error)) <= float(
-                self.get_parameter("maximum_alignment_error").value
-            )
+        """Validate one immutable Goal, then reserve execution unless stopped/busy.
+
+        Admission requires a supported semantic/canonical Action type and odometry close
+        enough to ``header.stamp`` to freeze the entry in world coordinates.  Validation
+        alone does not authorize movement: reservation and the software-stop check are
+        atomic.  A later stop sample poisons this reservation and every execute phase
+        rechecks it before issuing a command or SetEntityPose request.
+        """
+        reason = validate_traversal_goal(
+            goal,
+            now_seconds=self.get_clock().now().nanoseconds * 1.0e-9,
+            required_frame=self.get_parameter("goal_frame_id").value,
+            maximum_snapshot_age=self.get_parameter("maximum_snapshot_age").value,
+            maximum_future_skew=self.get_parameter("maximum_future_skew").value,
+            maximum_entry_distance=self.get_parameter("maximum_entry_distance").value,
+            maximum_lateral_offset=self.get_parameter("maximum_lateral_offset").value,
+            maximum_alignment_error=self.get_parameter("maximum_alignment_error").value,
+            ready_entry_distance=self.get_parameter("ready_entry_distance").value,
+            ready_lateral_offset=self.get_parameter("ready_lateral_offset").value,
+            ready_alignment_error=self.get_parameter("ready_alignment_error").value,
         )
-        if not valid:
+        entry_snapshot = None
+        if not reason:
+            with self.odom_history_lock:
+                history = tuple(self.odom_history)
+            entry_snapshot, reason = frozen_entry_from_history(
+                goal,
+                history,
+                self.get_parameter("odometry_snapshot_max_gap").value,
+                self.get_parameter("preparation_standoff").value,
+            )
+        if not reason:
+            reason = self._reserve_action_if_safe(entry_snapshot)
+        if reason:
             self.get_logger().warning(
                 "rejecting TraverseObstacle goal: "
-                f"busy={self.busy}, type={int(goal.obstacle_type)}, "
-                f"confidence={float(goal.confidence):.3f}, "
-                f"heading_error={float(goal.heading_error):.4f} rad, "
-                "limit="
-                f"{float(self.get_parameter('maximum_alignment_error').value):.4f} rad"
+                f"{reason}; type={int(goal.obstacle_type)}, "
+                f"entry_stage={int(goal.entry_stage)}, id={str(goal.obstacle_id)!r}"
             )
-        return GoalResponse.ACCEPT if valid else GoalResponse.REJECT
+        return GoalResponse.REJECT if reason else GoalResponse.ACCEPT
 
     def _stop(self):
         # SIGINT 可能先使 rcl context 失效，再进入 finally；此时最后一帧零速度已经无法
@@ -687,8 +1276,169 @@ class SimTraverseObstacle(Node):
                 # 这是正常退出竞争，不应把仿真适配器报告成崩溃。
                 pass
 
+    def _publish_preparation_command(self, linear_x, angular_z):
+        """Publish one bounded planar command used only by ENTRY_PREPARING."""
+        command = Twist()
+        command.linear.x = float(linear_x)
+        command.angular.z = float(angular_z)
+        self.publisher.publish(command)
+
+    def _prepare_entry(self, handle, feedback, entry_snapshot):
+        """Complete the final low-speed approach/alignment before simulated traversal.
+
+        ``entry_snapshot`` was already transformed with odometry at ``header.stamp``
+        before Goal acceptance.  This routine uses live odometry only as feedback toward
+        that frozen world target; execution latency can never translate ``distance`` a
+        second time from a newer body pose.
+
+        Returns ``(status, message, remaining_distance, remaining_heading_error)``.
+        ``status`` is ``ok``, ``cancel``, or ``abort``.  A timeout/stall is fail-closed:
+        no Gazebo pose service is called, so PREPARING can never silently become a lift.
+        """
+        start_odom = self.latest_odom
+        if start_odom is None:
+            return "abort", "simulation odometry unavailable", 0.0, 0.0
+        position = start_odom.pose.pose.position
+        start_x, start_y = float(position.x), float(position.y)
+        start_yaw = yaw_from_odometry(start_odom)
+        target_x = float(entry_snapshot.target_x)
+        target_y = float(entry_snapshot.target_y)
+        final_yaw = float(entry_snapshot.target_yaw)
+
+        linear_limit = max(
+            0.01, float(self.get_parameter("preparation_linear_speed").value)
+        )
+        angular_limit = max(
+            0.01, float(self.get_parameter("preparation_angular_speed").value)
+        )
+        position_tolerance = max(
+            0.01,
+            float(self.get_parameter("preparation_position_tolerance").value),
+        )
+        heading_tolerance = max(
+            0.005,
+            float(self.get_parameter("preparation_heading_tolerance").value),
+        )
+        deadline = time.monotonic() + max(
+            0.1, float(self.get_parameter("preparation_timeout").value)
+        )
+        stall_timeout = max(
+            0.1, float(self.get_parameter("preparation_stall_timeout").value)
+        )
+
+        initial_position_error = hypot(target_x - start_x, target_y - start_y)
+        initial_heading_error = abs(normalize_angle(final_yaw - start_yaw))
+        initial_error = max(
+            1.0e-6, initial_position_error + 0.25 * initial_heading_error
+        )
+        # Stall means the body pose does not change, not that Euclidean target error
+        # decreases every cycle.  During a legitimate turn-in-place the final-yaw
+        # error may temporarily grow while the robot first faces a lateral target.
+        last_motion_x = start_x
+        last_motion_y = start_y
+        last_motion_yaw = start_yaw
+        last_motion_time = time.monotonic()
+
+        while rclpy.ok() and time.monotonic() < deadline:
+            if self._software_stop_blocks_motion():
+                self._stop()
+                return (
+                    "abort",
+                    "simulation software emergency stop interrupted entry preparation",
+                    0.0,
+                    0.0,
+                )
+            if self.shutdown_requested:
+                self._stop()
+                return "abort", "simulation shutting down during entry preparation", 0.0, 0.0
+            if handle.is_cancel_requested:
+                self._stop()
+                return "cancel", "entry preparation cancelled", 0.0, 0.0
+            current_odom = self.latest_odom
+            if current_odom is None:
+                self._stop()
+                return "abort", "simulation odometry lost during entry preparation", 0.0, 0.0
+
+            current_position = current_odom.pose.pose.position
+            current_x = float(current_position.x)
+            current_y = float(current_position.y)
+            current_yaw = yaw_from_odometry(current_odom)
+            delta_x = target_x - current_x
+            delta_y = target_y - current_y
+            position_error = hypot(delta_x, delta_y)
+            final_heading_error = normalize_angle(final_yaw - current_yaw)
+            total_error = position_error + 0.25 * abs(final_heading_error)
+
+            if (
+                hypot(current_x - last_motion_x, current_y - last_motion_y) >= 0.005
+                or abs(normalize_angle(current_yaw - last_motion_yaw)) >= 0.01
+            ):
+                last_motion_x = current_x
+                last_motion_y = current_y
+                last_motion_yaw = current_yaw
+                last_motion_time = time.monotonic()
+            if time.monotonic() - last_motion_time > stall_timeout:
+                self._stop()
+                return (
+                    "abort",
+                    "entry preparation stalled; request another observation angle",
+                    0.0,
+                    0.0,
+                )
+
+            completion = max(0.0, min(1.0, 1.0 - total_error / initial_error))
+            feedback.publish(
+                TraverseObstacle.Feedback.STATE_PREPARING,
+                max(feedback.last_progress, 0.02 + 0.28 * completion),
+                "simulation final low-speed entry approach/alignment",
+            )
+
+            if position_error > position_tolerance:
+                path_heading = atan2(delta_y, delta_x)
+                path_error = normalize_angle(path_heading - current_yaw)
+                angular = max(
+                    -angular_limit, min(angular_limit, 1.5 * path_error)
+                )
+                # Rotate first when the target lies outside the forward corridor.
+                # This prevents a differential/planar test model from cutting the
+                # obstacle corner while claiming that lateral alignment completed.
+                linear = 0.0
+                if abs(path_error) <= 0.25:
+                    linear = min(linear_limit, max(0.03, 0.7 * position_error))
+                    linear *= max(0.20, cos(path_error))
+                self._publish_preparation_command(linear, angular)
+            elif abs(final_heading_error) > heading_tolerance:
+                angular = max(
+                    -angular_limit,
+                    min(angular_limit, 1.5 * final_heading_error),
+                )
+                self._publish_preparation_command(0.0, angular)
+            else:
+                self._stop()
+                feedback.publish(
+                    TraverseObstacle.Feedback.STATE_PREPARING,
+                    max(feedback.last_progress, 0.30),
+                    "simulation entry preparation complete",
+                )
+                return (
+                    "ok",
+                    "",
+                    float(entry_snapshot.remaining_distance),
+                    normalize_angle(final_yaw - current_yaw),
+                )
+            time.sleep(0.05)
+
+        self._stop()
+        return "abort", "entry preparation timed out", 0.0, 0.0
+
     def _set_model_pose(self, x, y, yaw) -> bool:
-        """调用 Gazebo 位姿服务并等待有界墙钟时间，失败时绝不假报越障成功。"""
+        """Dispatch one irreversible pose commit unless the software stop blocks it.
+
+        The stop lock makes “latched before dispatch” and “arrived after dispatch” an
+        explicit boundary.  Gazebo offers no transaction that can recall an already
+        accepted SetEntityPose request, so a later stop terminates the Action without
+        success but cannot pretend that the committed pose was rolled back.
+        """
         request = SetEntityPose.Request()
         request.entity.name = str(self.get_parameter("model_name").value)
         request.entity.type = Entity.MODEL
@@ -697,7 +1447,10 @@ class SimTraverseObstacle(Node):
         request.pose.position.z = 0.0
         request.pose.orientation.z = sin(float(yaw) * 0.5)
         request.pose.orientation.w = cos(float(yaw) * 0.5)
-        future = self.pose_client.call_async(request)
+        with self.stop_state_lock:
+            if self.emergency_stop or self.active_action_stop_latched:
+                return False
+            future = self.pose_client.call_async(request)
         deadline = time.monotonic() + 0.30
         while rclpy.ok() and not future.done() and time.monotonic() < deadline:
             time.sleep(0.005)
@@ -710,22 +1463,82 @@ class SimTraverseObstacle(Node):
         return bool(response and response.success)
 
     def execute(self, handle):
-        self.busy = True
+        """Run PREPARING, one pose commit, and STABILIZING for an accepted Goal.
+
+        Goal distance/lateral/heading have already been frozen using Goal-time odometry;
+        live odometry is feedback only and cannot move that target.  Every reversible
+        phase observes cancellation, shutdown and the latched software stop.
+        SetEntityPose is the single irreversible boundary; if a stop arrives after
+        Gazebo accepted it, the Action still fails and documents that the pose cannot
+        be rolled back.
+        """
         result = TraverseObstacle.Result()
+        feedback = MonotonicFeedback(handle)
         try:
+            with self.stop_state_lock:
+                entry_snapshot = self.active_entry_snapshot
+            if entry_snapshot is None:
+                self._stop()
+                result.success = False
+                result.message = "Goal-time odometry snapshot reservation is unavailable"
+                handle.abort()
+                return result
+            if self._software_stop_blocks_motion():
+                self._stop()
+                result.success = False
+                result.message = (
+                    "simulation software emergency stop blocked traversal execution"
+                )
+                handle.abort()
+                return result
             if self.latest_odom is None:
                 result.success = False
                 result.message = "simulation odometry unavailable"
                 handle.abort()
                 return result
+            feedback.publish(
+                TraverseObstacle.Feedback.STATE_PREPARING,
+                0.0,
+                "simulation validating atomic traversal snapshot",
+            )
             if not self.pose_client.wait_for_service(timeout_sec=2.0):
                 result.success = False
                 result.message = "Gazebo set_pose service unavailable"
                 handle.abort()
                 return result
-            start_pose = self.latest_odom.pose.pose.position
-            start_x, start_y = float(start_pose.x), float(start_pose.y)
-            start_yaw = yaw_from_odometry(self.latest_odom)
+
+            entry_distance = float(entry_snapshot.remaining_distance)
+            if int(handle.request.entry_stage) == TraverseObstacle.Goal.ENTRY_PREPARING:
+                (
+                    preparation_status,
+                    preparation_message,
+                    entry_distance,
+                    _remaining_heading_error,
+                ) = self._prepare_entry(handle, feedback, entry_snapshot)
+                if preparation_status != "ok":
+                    result.success = False
+                    result.message = preparation_message
+                    if preparation_status == "cancel":
+                        handle.canceled()
+                    else:
+                        handle.abort()
+                    return result
+            else:
+                # READY still performs preflight and publishes the canonical first
+                # state; it merely skips planar approach because the snapshot already
+                # proves that the body lies inside the lift-ready entry envelope.
+                feedback.publish(
+                    TraverseObstacle.Feedback.STATE_PREPARING,
+                    0.30,
+                    "simulation entry already READY; preflight complete",
+                )
+
+            # The teleport starts from the exact frozen standoff target, not from the
+            # odometry pose at execute time.  Adding ``remaining_distance`` therefore
+            # reaches the same obstacle entrance even if Action scheduling was delayed.
+            start_x = float(entry_snapshot.target_x)
+            start_y = float(entry_snapshot.target_y)
+            start_yaw = float(entry_snapshot.target_yaw)
             semantic_span_parameter = {
                 "right_angle_poles": "right_angle_poles_span",
                 "gravel_wood_pit": "gravel_wood_pit_span",
@@ -734,7 +1547,6 @@ class SimTraverseObstacle(Node):
                 "main_slope": "main_slope_span",
                 "wooden_bridge_a": "wooden_bridge_a_span",
                 "wooden_bridge_b": "wooden_bridge_b_span",
-                "wooden_bridge_unknown": "wooden_bridge_unknown_span",
                 "t_shaped_stairs": "t_shaped_stairs_span",
             }.get(str(handle.request.obstacle_id))
             semantic_span = (
@@ -751,7 +1563,6 @@ class SimTraverseObstacle(Node):
                 "main_slope",
                 "wooden_bridge_a",
                 "wooden_bridge_b",
-                "wooden_bridge_unknown",
                 "t_shaped_stairs",
             }:
                 exit_clearance = max(
@@ -761,7 +1572,7 @@ class SimTraverseObstacle(Node):
                     ),
                 )
             if str(handle.request.obstacle_id) in {
-                "wooden_bridge_a", "wooden_bridge_b", "wooden_bridge_unknown"
+                "wooden_bridge_a", "wooden_bridge_b"
             }:
                 exit_clearance = max(
                     0.20,
@@ -770,24 +1581,22 @@ class SimTraverseObstacle(Node):
                     ),
                 )
             travel_distance = (
-                max(0.0, float(handle.request.distance))
+                entry_distance
                 + semantic_span
                 + exit_clearance
             )
             desired_travel_distance = travel_distance
             minimum_travel_distance = (
-                max(0.0, float(handle.request.distance))
+                entry_distance
                 + max(
                     0.20,
                     float(self.get_parameter("minimum_exit_clearance").value),
                 )
             )
-            # Action 交接携带当前机身到障碍中心线的剩余航向误差。真实控制器会在
-            # PREPARING 阶段闭环消除它；仿真替身过去忽略该字段，导致任务已算出对正
-            # 方向后模型仍沿旧朝向横穿场地。这里只接受交接门限内的小角度修正。
-            requested_yaw = start_yaw + max(
-                -0.40, min(0.40, float(handle.request.heading_error))
-            )
+            # ``target_yaw`` already includes the frozen Goal-time heading error.
+            # Re-applying the same field against current odometry here would rotate the
+            # entrance twice and violate the atomic-snapshot contract.
+            requested_yaw = start_yaw
             l_turn = 0
             if str(handle.request.obstacle_id) in {
                 "right_angle_poles", "gravel_wood_pit"
@@ -833,10 +1642,12 @@ class SimTraverseObstacle(Node):
                 # remains representative of the real controller contract.
                 projected_x = start_x + cos(requested_yaw) * travel_distance
                 projected_y = start_y + sin(requested_yaw) * travel_distance
+                obstacle_label = str(handle.request.obstacle_id) or "unclassified"
                 self.get_logger().warning(
-                    f"rejecting sim traversal {str(handle.request.obstacle_id) or 'unclassified'}: "
+                    f"rejecting sim traversal {obstacle_label}: "
                     f"start=({start_x:.2f}, {start_y:.2f}, {start_yaw:.2f}), "
-                    f"entry={float(handle.request.distance):.2f} m, "
+                    f"entry={entry_distance:.2f} m "
+                    f"(snapshot={float(handle.request.distance):.2f} m), "
                     f"travel={travel_distance:.2f} m, requested_yaw={requested_yaw:.2f}, "
                     f"projected_end=({projected_x:.2f}, {projected_y:.2f})"
                 )
@@ -850,12 +1661,21 @@ class SimTraverseObstacle(Node):
             self.get_logger().info(
                 f"sim traversal {str(handle.request.obstacle_id) or 'unclassified'}: "
                 f"start=({start_x:.2f}, {start_y:.2f}, {start_yaw:.2f}), "
-                f"entry={float(handle.request.distance):.2f} m, "
+                f"entry={entry_distance:.2f} m "
+                f"(snapshot={float(handle.request.distance):.2f} m), "
                 f"span={semantic_span:.2f} m, travel={travel_distance:.2f}/"
                 f"{desired_travel_distance:.2f} m, "
                 f"heading_adjust={traversal_yaw - start_yaw:.2f} rad, "
                 f"l_turn={l_turn}"
             )
+            if self._software_stop_blocks_motion():
+                self._stop()
+                handle.abort()
+                result.success = False
+                result.message = (
+                    "simulation software emergency stop prevented pose commit"
+                )
+                return result
             if self.shutdown_requested:
                 self._stop()
                 handle.abort()
@@ -868,11 +1688,11 @@ class SimTraverseObstacle(Node):
                 result.success = False
                 result.message = "simulation teleport cancelled before pose change"
                 return result
-            feedback = TraverseObstacle.Feedback()
-            feedback.state = TraverseObstacle.Feedback.STATE_TRAVERSING
-            feedback.progress = 0.5
-            feedback.message = "simulation teleporting to obstacle exit"
-            handle.publish_feedback(feedback)
+            feedback.publish(
+                TraverseObstacle.Feedback.STATE_TRAVERSING,
+                0.50,
+                "simulation teleporting to obstacle exit",
+            )
             # Only the landing pose matters: the bundled model has no leg dynamics and
             # is intentionally allowed to pass through collision geometry. This single
             # service call is the complete simulation traversal; there is no hidden
@@ -898,9 +1718,18 @@ class SimTraverseObstacle(Node):
             if not self._set_model_pose(final_x, final_y, final_yaw):
                 handle.abort()
                 result.success = False
-                result.message = "final Gazebo pose update failed"
+                result.message = (
+                    "simulation software emergency stop prevented pose commit"
+                    if self._software_stop_blocks_motion()
+                    else "final Gazebo pose update failed"
+                )
                 return result
             self._stop()
+            feedback.publish(
+                TraverseObstacle.Feedback.STATE_STABILIZING,
+                0.75,
+                "simulation waiting for landing odometry to settle",
+            )
             if not rclpy.ok():
                 result.success = False
                 result.message = "simulation shutting down"
@@ -912,22 +1741,75 @@ class SimTraverseObstacle(Node):
             deadline = time.monotonic() + settle
             while rclpy.ok() and time.monotonic() < deadline:
                 self._stop()
+                if self._software_stop_blocks_motion():
+                    handle.abort()
+                    result.success = False
+                    result.message = (
+                        "simulation software emergency stop interrupted stabilization; "
+                        "an already committed Gazebo pose cannot be rolled back"
+                    )
+                    return result
+                if handle.is_cancel_requested:
+                    handle.canceled()
+                    result.success = False
+                    result.message = "simulation traversal cancelled while stabilizing"
+                    return result
+                elapsed_fraction = (
+                    1.0
+                    if settle <= 0.0
+                    else max(0.0, min(1.0, 1.0 - (deadline - time.monotonic()) / settle))
+                )
+                feedback.publish(
+                    TraverseObstacle.Feedback.STATE_STABILIZING,
+                    max(feedback.last_progress, 0.75 + 0.24 * elapsed_fraction),
+                    "simulation landing stabilization in progress",
+                )
                 time.sleep(0.05)
             if self.shutdown_requested:
                 handle.abort()
                 result.success = False
                 result.message = "simulation traversal stopped during shutdown"
                 return result
-            handle.succeed()
+            if self._software_stop_blocks_motion():
+                handle.abort()
+                result.success = False
+                result.message = (
+                    "simulation software emergency stop interrupted stabilization; "
+                    "an already committed Gazebo pose cannot be rolled back"
+                )
+                return result
+            feedback.publish(
+                TraverseObstacle.Feedback.STATE_STABILIZING,
+                1.0,
+                "simulation landing stabilization complete",
+            )
+            # Serialize the terminal transition with the stop callback.  Whichever
+            # acquires this lock first defines the boundary: a prior stop aborts this
+            # Goal; a later stop applies to subsequent motion after success.
+            with self.stop_state_lock:
+                terminal_stop = bool(
+                    self.emergency_stop or self.active_action_stop_latched
+                )
+                if not terminal_stop:
+                    handle.succeed()
+            if terminal_stop:
+                handle.abort()
+                result.success = False
+                result.message = (
+                    "simulation software emergency stop arrived at completion; "
+                    "an already committed Gazebo pose cannot be rolled back"
+                )
+                return result
             result.success = True
             result.message = "simulation teleport reached obstacle exit"
             return result
         finally:
             self._stop()
-            self.busy = False
+            self._release_action_reservation()
 
 
 def main(args=None):
+    """Run the simulation Action server with bounded, stop-aware SIGINT teardown."""
     # launch 向整组进程发送 SIGINT 时，默认 rclpy handler 会先销毁 Action publisher，
     # execute callback 随后调用 abort/canceled 就产生 Ubuntu 崩溃弹窗。保持 context 存活，
     # 先让活动 goal 在 executor 内完成取消状态，再统一销毁节点。

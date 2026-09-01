@@ -109,6 +109,33 @@ def test_navigation_nodes_reject_invalid_overrides(
         node_factory(parameter_overrides=overrides)
 
 
+def test_readiness_wires_yaw_covariance_and_jump_into_activation_gate(ros_context):
+    """A finite odom stream with a sudden 180-degree yaw reset must remain unready."""
+    monitor = Nav2ReadinessMonitor()
+    try:
+        first = _valid_odom(monitor.get_clock().now().to_msg())
+        first.pose.covariance[35] = 0.01
+        monitor._odom_callback(first)
+        assert monitor.odom_valid
+        assert not monitor.odom_jump
+
+        jumped = _valid_odom(monitor.get_clock().now().to_msg())
+        jumped.pose.covariance[35] = 0.01
+        jumped.pose.pose.orientation.w = 0.0
+        jumped.pose.pose.orientation.z = 1.0
+        monitor._odom_callback(jumped)
+        assert monitor.odom_valid
+        assert monitor.odom_jump
+
+        uncertain = _valid_odom(monitor.get_clock().now().to_msg())
+        uncertain.pose.covariance[35] = 5.0
+        monitor._odom_callback(uncertain)
+        assert not monitor.odom_valid
+        assert monitor.odom_jump
+    finally:
+        monitor.destroy_node()
+
+
 def test_navigation_health_transitions_true_then_false_on_real_dds(ros_context):
     """动态 TF 冻结时，即使 scan/odom 继续更新也必须关闭健康门。"""
     monitor = NavigationHealthMonitor(

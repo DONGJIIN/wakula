@@ -19,5 +19,5 @@ jobs:
           package-name: >-
             quadruped_interfaces quadruped_description quadruped_perception
             quadruped_planning quadruped_bringup quadruped_tools
-            quadruped_teleop slam
+            quadruped_teleop quadruped_gazebo slam
           coverage-result: false

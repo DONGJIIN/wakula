@@ -23,6 +23,12 @@ from quadruped_tools.stack_regression import (
 )
 
 
+def test_tools_manifest_declares_generated_message_dependency():
+    """stack_regression directly imports quadruped_interfaces on a fresh install."""
+    manifest = (Path(__file__).parents[1] / "package.xml").read_text(encoding="utf-8")
+    assert "<exec_depend>quadruped_interfaces</exec_depend>" in manifest
+
+
 def test_angle_error_wraps_at_pi_boundary():
     """回环偏航误差不能把 +179°/-179° 错报为 358°。"""
     assert _angle_error(math.radians(179), math.radians(-179)) < math.radians(3)
@@ -260,13 +266,15 @@ def _write_fake_process(
 def test_resource_sampler_counts_full_whitelist_and_pid_churn(tmp_path):
     """资源汇总必须计入完整 Nav2 链，并把重启与累计 CPU 分开处理。"""
     required = {
-        "smoother_server",
         "behavior_server",
         "velocity_smoother",
         "navigation_health_monitor",
         "nav2_readiness_monitor",
     }
     assert required <= CORE_PROCESS_EXECUTABLES
+    # Path smoother is not used by Wakula's behavior tree.  Keep only the velocity
+    # smoother, which limits acceleration on the actual cmd_vel chain.
+    assert "smoother_server" not in CORE_PROCESS_EXECUTABLES
 
     moments = iter((10.0, 11.0, 12.0))
     stats = ResourceStats(

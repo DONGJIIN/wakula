@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 from math import atan2, ceil, cos, degrees, floor, hypot, isfinite, pi, sin
@@ -26,6 +27,8 @@ from nav2_msgs.action import NavigateToPose
 from quadruped_interfaces.action import TraverseObstacle
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
 from quadruped_planning.parameter_validation import validate_mission_parameters
+from quadruped_planning.terrain_safety_assessor import classify_front_obstacle
+from quadruped_planning.time_utils import ros_clock_moved_backward
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -38,8 +41,8 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
-# 规则 V1.0 的八项障碍。这里保存的是硬件无关语义 ID，不包含 Gazebo 模型名、world
-# 坐标或固定顺序；正式赛场改变布局后任务状态机仍只依赖在线感知结果。
+# 第二十五届规则 V2.0 的八项障碍。这里保存的是硬件无关语义 ID，不包含 Gazebo
+# 模型名、world 坐标或固定顺序；正式赛场改变布局后任务状态机仍只依赖在线感知结果。
 COMPETITION_OBSTACLE_IDS = (
     "right_angle_poles",
     "gravel_wood_pit",
@@ -49,6 +52,9 @@ COMPETITION_OBSTACLE_IDS = (
     "wooden_bridge_b",
     "t_shaped_stairs",
     "high_wall",
+)
+KNOWN_SEMANTIC_IDS = frozenset(
+    (*COMPETITION_OBSTACLE_IDS, "arena_boundary", "wooden_bridge_unknown")
 )
 
 # If a long structure is rejected, changing yaw at exactly the same station cannot
@@ -85,6 +91,7 @@ def navigation_purpose_allows_yaw_only_recovery(purpose: str) -> bool:
         "entry_recovery",
         "search_turn",
     }
+
 
 # 机器接口始终使用上面的稳定英文 ID；中文仅用于终端和任务清单，不能参与控制判断。
 # 这样其他队员或上位机可以可靠解析 ID，同时现场人员无需对照枚举表。
@@ -172,6 +179,55 @@ def timeout_reached(started: float, now: float, timeout: float) -> bool:
     )
 
 
+def traversal_feedback_transition_is_valid(
+    entry_stage: int,
+    previous_state: int,
+    previous_progress: float,
+    state: int,
+    progress: float,
+) -> bool:
+    """Validate one controller feedback sample without mutating mission state.
+
+    Progress describes the whole Action and must never decrease.  State may repeat while
+    the controller works inside one phase, but it may neither move backwards nor skip an
+    intermediate phase.  Both entry stages must first report PREPARING: ENTRY_READY only
+    says the task-level pose is inside the lift-ready envelope; it does not waive the
+    controller's own preflight/contact checks.  The single required sequence is therefore
+    PREPARING -> TRAVERSING -> STABILIZING.
+    """
+    try:
+        stage = int(entry_stage)
+        old_state = int(previous_state)
+        new_state = int(state)
+        old_progress = float(previous_progress)
+        new_progress = float(progress)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    state_order = {
+        TraverseObstacle.Feedback.STATE_PREPARING: 1,
+        TraverseObstacle.Feedback.STATE_TRAVERSING: 2,
+        TraverseObstacle.Feedback.STATE_STABILIZING: 3,
+    }
+    if (
+        stage not in {
+            TraverseObstacle.Goal.ENTRY_READY,
+            TraverseObstacle.Goal.ENTRY_PREPARING,
+        }
+        or new_state not in state_order
+        or old_state not in ({0} | set(state_order))
+        or not all(isfinite(value) for value in (old_progress, new_progress))
+        or not 0.0 <= old_progress <= 1.0
+        or not 0.0 <= new_progress <= 1.0
+        or new_progress < old_progress
+    ):
+        return False
+    if old_state == 0:
+        return new_state == TraverseObstacle.Feedback.STATE_PREPARING
+    old_order = state_order[old_state]
+    new_order = state_order[new_state]
+    return old_order <= new_order <= old_order + 1
+
+
 def bounded_shutdown_wait(
     response_timeout: float,
     cancel_timeout: float,
@@ -236,6 +292,8 @@ def guidance_is_well_formed(guidance: Optional[TraversalGuidance]) -> bool:
     """
     if guidance is None:
         return False
+    if str(guidance.semantic_id) and not normalize_semantic_id(guidance.semantic_id):
+        return False
     numeric = (
         guidance.confidence,
         guidance.distance,
@@ -280,6 +338,119 @@ def guidance_is_well_formed(guidance: Optional[TraversalGuidance]) -> bool:
     return int(guidance.phase) == TraversalGuidance.PHASE_CLEAR
 
 
+def navigation_safety_is_well_formed(safety: Optional[NavigationSafety]) -> bool:
+    """Validate all fields in one typed safety snapshot before caching it."""
+    if safety is None:
+        return False
+    semantic_id = str(safety.semantic_id)
+    if semantic_id and not normalize_semantic_id(semantic_id):
+        return False
+    numeric = (
+        safety.speed_limit,
+        safety.confidence,
+        safety.obstacle_height,
+        safety.pit_depth,
+        safety.slope_pitch,
+        safety.slope_roll,
+        safety.roughness,
+        safety.distance,
+        safety.lateral_offset,
+        safety.width,
+        safety.structure_heading,
+        safety.structure_heading_confidence,
+        safety.clearance_height,
+    )
+    if not all(isfinite(float(value)) for value in numeric):
+        return False
+    if not (
+        NavigationSafety.MODE_UNKNOWN <= int(safety.mode) <= NavigationSafety.MODE_STOP
+        and NavigationSafety.OBSTACLE_UNKNOWN
+        <= int(safety.obstacle_type)
+        <= NavigationSafety.OBSTACLE_POLE
+        and 0.0 <= float(safety.speed_limit) <= 1.0
+        and 0.0 <= float(safety.confidence) <= 1.0
+        and min(
+            float(safety.obstacle_height),
+            float(safety.pit_depth),
+            float(safety.roughness),
+            float(safety.distance),
+            float(safety.width),
+            float(safety.clearance_height),
+        ) >= 0.0
+        and abs(float(safety.structure_heading)) <= pi
+        and 0.0 <= float(safety.structure_heading_confidence) <= 1.0
+    ):
+        return False
+    if not bool(safety.perception_valid):
+        return not semantic_id and int(safety.mode) == NavigationSafety.MODE_STOP
+    return int(safety.mode) != NavigationSafety.MODE_UNKNOWN
+
+
+def header_stamp_seconds(header) -> Optional[float]:
+    """Return a finite positive ROS sample stamp, or ``None`` for an invalid Header."""
+    if header is None:
+        return None
+    stamp = header.stamp
+    value = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+    if (
+        not isfinite(value)
+        or value <= 0.0
+        or int(stamp.nanosec) < 0
+        or int(stamp.nanosec) >= 1_000_000_000
+    ):
+        return None
+    return value
+
+
+def observation_header_is_well_formed(header, expected_frame: str) -> bool:
+    """Validate one canonical frame ID and positive sampling instant.
+
+    TF2 may accept a legacy leading slash after normalization, but copying
+    ``/base_link`` unchanged into the Action snapshot would violate the repository's
+    typed frame contract.  Do not repair or normalize safety-critical identifiers.
+    """
+    frame = "" if header is None else str(header.frame_id)
+    expected = str(expected_frame)
+    return bool(
+        header is not None
+        and frame
+        and expected
+        and frame == frame.strip()
+        and expected == expected.strip()
+        and not frame.startswith("/")
+        and not frame.endswith("/")
+        and not expected.startswith("/")
+        and not expected.endswith("/")
+        and not any(character.isspace() for character in frame)
+        and not any(character.isspace() for character in expected)
+        and frame == expected
+        and header_stamp_seconds(header) is not None
+    )
+
+
+def observation_headers_are_synchronized(
+    first,
+    second,
+) -> bool:
+    """Require byte-equivalent frame/time identity for one atomic sensor sample.
+
+    The in-repository Guidance producer forwards the NavigationSafety Header unchanged.
+    Even a 49 ms tolerance could combine a previous obstacle's semantic with the next
+    geometry frame, so the final Action boundary has no configurable timestamp bypass.
+    """
+    first_frame = "" if first is None else str(first.frame_id)
+    second_frame = "" if second is None else str(second.frame_id)
+    return bool(
+        first is not None
+        and second is not None
+        and observation_header_is_well_formed(first, first_frame)
+        and observation_header_is_well_formed(second, second_frame)
+        and first_frame == second_frame
+        and int(first.stamp.sec) == int(second.stamp.sec)
+        and int(first.stamp.nanosec) == int(second.stamp.nanosec)
+    )
+
+
 def planar_pose_from_transform(transform) -> Optional[Tuple[float, float, float]]:
     """Return a finite planar pose from TF, or ``None`` for a corrupt transform.
 
@@ -320,40 +491,15 @@ def navigation_pose_is_well_formed(pose: PoseStamped) -> bool:
     return sum(float(value) ** 2 for value in (q.x, q.y, q.z, q.w)) >= 1e-12
 
 
-def canonical_obstacle_id(name: str) -> str:
-    """把终端显示名称转换为稳定比赛语义 ID；未知名称返回空字符串。
+def normalize_semantic_id(value: str) -> str:
+    """Accept only stable English IDs produced by the typed perception contract.
 
-    名称来自通用点云/视觉分类，不读取场地坐标。桥 A/B 的单侧 14° 引坡无法仅凭一帧
-    局部点云可靠区分，先记为 ``wooden_bridge_unknown``，任务层在看到第二座不同位置的
-    木桥后再补齐 A/B，避免为了凑任务数而编造类别。
+    Chinese text is an operator-only UI.  Rejecting every unregistered string here makes
+    localization, scheduling and Action handoff independent of wording or language changes
+    on the optional operator display topic.
     """
-    text = str(name).strip()
-    if "直角绕杆" in text:
-        return "right_angle_poles"
-    if "砂砾" in text or "坑区护栏" in text:
-        return "gravel_wood_pit"
-    if "限高杆" in text:
-        return "height_bar"
-    if "主斜坡" in text:
-        return "main_slope"
-    if "木桥 B" in text:
-        return "wooden_bridge_b"
-    if "木桥 A" in text:
-        return "wooden_bridge_a"
-    # 该显示文案明确表示点云尚不能在“普通台阶/木桥踏板”之间判定；把它直接折算成
-    # wooden_bridge_unknown 会让任意低边缘都能得分并触发仿真直行，必须继续换视角。
-    if "台阶或木桥" in text:
-        return ""
-    if "木桥" in text:
-        return "wooden_bridge_unknown"
-    if "T 字形台阶" in text:
-        return "t_shaped_stairs"
-    if "高墙" in text:
-        return "high_wall"
-    # 场地边缘可能具有与坑洞相同的负高度，但不是八项比赛障碍，明确保持无语义 ID。
-    if "场地边界" in text:
-        return ""
-    return ""
+    semantic_id = str(value).strip()
+    return semantic_id if semantic_id in KNOWN_SEMANTIC_IDS else ""
 
 
 def semantic_id_for_action(candidate: str, obstacle_type: int) -> str:
@@ -369,7 +515,15 @@ def semantic_id_for_action(candidate: str, obstacle_type: int) -> str:
     # produce the same coarse WALL/POLE label, so filling an absent name from type alone
     # created false high-wall/pole completions during the 2026-08-28 full-field run.
     if obstacle_type == TraverseObstacle.Goal.OBSTACLE_WALL:
-        return candidate if candidate in {"height_bar", "high_wall"} else ""
+        # A narrow, rough view of the 0.15 m pit rail is intentionally classified as
+        # ``gravel_wood_pit`` by the authoritative assessor.  Accept that typed result
+        # here; the Action goal is subsequently converted to the semantic's canonical
+        # PIT type by ``action_type_for_semantic``.
+        return (
+            candidate
+            if candidate in {"gravel_wood_pit", "height_bar", "high_wall"}
+            else ""
+        )
     if obstacle_type == TraverseObstacle.Goal.OBSTACLE_POLE:
         return candidate if candidate in {"right_angle_poles", "height_bar"} else ""
     compatible_by_type = {
@@ -398,7 +552,7 @@ def semantic_id_for_action(candidate: str, obstacle_type: int) -> str:
             "t_shaped_stairs",
             "gravel_wood_pit",
         },
-        # 10° 主坡和 14° 木桥引坡都由 CLEAR+traversal_required 映射为 SLOPE。
+        # 11.3° 主坡和 14° 木桥引坡都由 CLEAR+traversal_required 映射为 SLOPE。
         TraverseObstacle.Goal.OBSTACLE_SLOPE: {
             "main_slope", "wooden_bridge_a", "wooden_bridge_unknown",
         },
@@ -508,12 +662,12 @@ def traversal_segment_matches(
     candidate = (
         str(candidate_id)
         if str(candidate_id) in COMPETITION_OBSTACLE_IDS
-        else canonical_obstacle_id(candidate_id)
+        else normalize_semantic_id(candidate_id)
     )
     completed = (
         str(completed_id)
         if str(completed_id) in COMPETITION_OBSTACLE_IDS
-        else canonical_obstacle_id(completed_id)
+        else normalize_semantic_id(completed_id)
     )
     if not candidate or not completed or candidate != completed:
         return False
@@ -624,7 +778,7 @@ def target_is_in_heading_cone(
 
 
 def mission_score(completed_ids: Sequence[str], returned_home: bool) -> int:
-    """按规则 V1.0 计算完全自主模式的基础得分，不包含裁判罚分。"""
+    """按第二十五届规则 V2.0 计算完全自主模式的基础得分，不包含裁判罚分。"""
     unique = set(completed_ids).intersection(COMPETITION_OBSTACLE_IDS)
     return 150 * len(unique) + (100 if returned_home else 0)
 
@@ -749,7 +903,7 @@ def replacement_semantic_vote(
 def dominant_planar_vote(votes: Sequence[str], minimum_votes: int = 3) -> str:
     """Preserve repeated ramp evidence while a close side crop is ambiguous.
 
-    A continuous measured 10/14-degree plane is stronger structural evidence
+    A continuous measured 11.3/14-degree plane is stronger structural evidence
     than a later flat STEP crop.  The latter can be the long side of that same
     ramp and previously caused a false T-stair / bridge-B traversal.  Return a
     planar semantic only while it still strictly outnumbers every competing
@@ -790,6 +944,26 @@ class Frontier:
     cells: int
     distance: float
     score: float
+
+
+@dataclass(frozen=True)
+class TraversalActionSnapshot:
+    """Immutable, time-aligned perception evidence used to construct one Action goal.
+
+    ``pending_traverse`` is only scheduler state and may be several callbacks old by the
+    time Nav2 cancellation finishes.  Every field below is instead rebuilt from the latest
+    synchronized Guidance/Safety pair and the historical map transform at that pair's
+    sampling time.  Keeping this intermediate object immutable makes it impossible for a
+    later DDS callback to replace only half of the goal while it is being assembled.
+    """
+
+    guidance: TraversalGuidance
+    safety: NavigationSafety
+    semantic_id: str
+    action_type: int
+    entry_stage: int
+    robot_pose: Tuple[float, float, float]
+    obstacle_position: Tuple[float, float]
 
 
 @dataclass
@@ -1111,6 +1285,51 @@ def matching_pending_semantic_from_viewpoint(
     return min(candidates)[2] if candidates else ""
 
 
+def occupancy_grid_is_well_formed(
+    grid: Optional[OccupancyGrid], expected_frame: str = "map"
+) -> bool:
+    """Atomically validate an OccupancyGrid before any index or transform math.
+
+    Malformed map metadata is a transport/input fault, not an empty arena.  Callbacks clear
+    the cached grid on failure so exploration stops instead of continuing on an older map;
+    pure helpers repeat this inexpensive guard because tests and external users may call
+    them directly.
+    """
+    if grid is None or str(grid.header.frame_id).lstrip("/") != str(expected_frame).lstrip("/"):
+        return False
+    try:
+        resolution = float(grid.info.resolution)
+        width, height = int(grid.info.width), int(grid.info.height)
+        origin = grid.info.origin
+        q = origin.orientation
+        values = (
+            resolution,
+            origin.position.x,
+            origin.position.y,
+            origin.position.z,
+            q.x,
+            q.y,
+            q.z,
+            q.w,
+        )
+        if not all(isfinite(float(value)) for value in values):
+            return False
+        quaternion_norm = sum(
+            float(value) ** 2 for value in (q.x, q.y, q.z, q.w)
+        )
+        if (
+            resolution <= 0.0
+            or width <= 0
+            or height <= 0
+            or abs(quaternion_norm - 1.0) > 1e-3
+            or len(grid.data) != width * height
+        ):
+            return False
+        return all(-1 <= int(value) <= 100 for value in grid.data)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def _origin_yaw(grid: OccupancyGrid) -> float:
     q = grid.info.origin.orientation
     return atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -1136,6 +1355,10 @@ def world_to_cell(grid: OccupancyGrid, x: float, y: float) -> Optional[Tuple[int
     Nav2 的静态层尚未扩张，任何目标都会以“start outside bounds”立即失败。任务层先用
     本函数等待下一张地图覆盖当前位置，避免以 4 Hz 对 Action server 做无意义重试。
     """
+    if not occupancy_grid_is_well_formed(grid):
+        return None
+    if not all(isfinite(float(value)) for value in (x, y)):
+        return None
     resolution = float(grid.info.resolution)
     width, height = int(grid.info.width), int(grid.info.height)
     if resolution <= 0.0 or width <= 0 or height <= 0:
@@ -1157,6 +1380,10 @@ def distance_outside_grid(grid: OccupancyGrid, x: float, y: float) -> float:
     ``base_link`` 可能短暂比最后一个端点多走几厘米。该连续量让任务层只容忍很小的
     发布滞后，而不是把任意地图外位置误当成可导航区域。
     """
+    if not occupancy_grid_is_well_formed(grid):
+        return float("inf")
+    if not all(isfinite(float(value)) for value in (x, y)):
+        return float("inf")
     resolution = float(grid.info.resolution)
     width, height = int(grid.info.width), int(grid.info.height)
     if resolution <= 0.0 or width <= 0 or height <= 0:
@@ -1175,10 +1402,14 @@ def distance_outside_grid(grid: OccupancyGrid, x: float, y: float) -> float:
 def distance_inside_grid_edge(grid: OccupancyGrid, x: float, y: float) -> float:
     """返回地图内一点到 OccupancyGrid 外框的最短距离，地图外返回 0。
 
-    比赛场地边缘在斜视深度云中可能暂时拟合成 10°/14° 坡面。真实内部障碍会随着
+    比赛场地边缘在斜视深度云中可能暂时拟合成 11.3°/14° 坡面。真实内部障碍会随着
     探索逐渐位于地图内部，而场地外框始终贴近 SLAM 栅格外缘。任务层用这个在线地图
     关系延迟边缘目标的 Action 交接，不依赖 14 m × 6 m 尺寸或 Gazebo 坐标。
     """
+    if not occupancy_grid_is_well_formed(grid):
+        return 0.0
+    if not all(isfinite(float(value)) for value in (x, y)):
+        return 0.0
     resolution = float(grid.info.resolution)
     width, height = int(grid.info.width), int(grid.info.height)
     if resolution <= 0.0 or width <= 0 or height <= 0:
@@ -1210,7 +1441,7 @@ def map_edge_allows_obstacle_handoff(
     例外不会把普通未知边界直接放行。
 
     真机调参提示：不要为了高墙把 ``obstacle_map_edge_margin`` 全局调成负数。若真机
-    仍误拦高墙，应先检查墙面高度/宽度标定和 ``front_obstacle_name`` 是否稳定；若其他
+    仍误拦高墙，应先检查墙面高度/宽度标定和 ``NavigationSafety.semantic_id`` 是否稳定；若其他
     障碍误靠近地图外框，则应增大 ``minimum_margin``，本例外只影响确认后的高墙。
     """
     distance = float(edge_distance)
@@ -1239,6 +1470,11 @@ def extract_frontiers(
     只在已确认自由格上放目标，未知格只是探索方向，避免 Nav2 目标本身落入未观测区域。
     ``cells / (1 + distance)`` 优先较大的边界，同时抑制在机器人脚边来回选择碎前沿。
     """
+    if (
+        not occupancy_grid_is_well_formed(grid)
+        or not all(isfinite(float(value)) for value in robot_xy)
+    ):
+        return []
     width, height = int(grid.info.width), int(grid.info.height)
     if width <= 2 or height <= 2 or len(grid.data) != width * height:
         return []
@@ -1332,6 +1568,14 @@ def frontier_goal_in_known_free_space(
     这样能显著减少目标本身落在静态层膨胀区而反复超时，同时仍让 2.5 m 传感器 ROI
     覆盖前沿后的障碍。
     """
+    if (
+        not occupancy_grid_is_well_formed(grid)
+        or not all(
+            isfinite(float(value))
+            for value in (*frontier_xy, *robot_xy, standoff, clearance)
+        )
+    ):
+        return None
     resolution = float(grid.info.resolution)
     if resolution <= 0.0:
         return None
@@ -1394,6 +1638,8 @@ def recovery_station_in_known_free_space(
     lateral and reverse alternatives.  Unknown cells are rejected; no venue size,
     obstacle name or fixed world coordinate is used.
     """
+    if not occupancy_grid_is_well_formed(grid):
+        return None
     resolution = float(grid.info.resolution)
     width, height = int(grid.info.width), int(grid.info.height)
     if (
@@ -1427,7 +1673,11 @@ def recovery_station_in_known_free_space(
     start_x, start_y, start_yaw = map(float, robot_pose)
     # Preserve the requested 0.8 m when possible. Shorter candidates allow recovery
     # in narrow passages without silently increasing the configured maximum motion.
-    lengths = tuple(dict.fromkeys((float(distance), 0.75 * float(distance), 0.50 * float(distance))))
+    lengths = tuple(dict.fromkeys((
+        float(distance),
+        0.75 * float(distance),
+        0.50 * float(distance),
+    )))
     angle_offsets = (0.0, pi / 4.0, -pi / 4.0, pi / 2.0, -pi / 2.0, pi)
     sample_step = max(0.05, resolution * 0.5)
     for length in lengths:
@@ -1468,6 +1718,15 @@ def extract_coverage_goals(
     局部净空、尚未被机器人实际走近的位置，并优先选择离历史轨迹最远的目标。函数只
     使用在线 OccupancyGrid 和走过的轨迹，不知道比赛地图尺寸、障碍坐标或固定顺序。
     """
+    if (
+        not occupancy_grid_is_well_formed(grid)
+        or not all(isfinite(float(value)) for value in robot_xy)
+        or any(
+            not all(isfinite(float(value)) for value in item)
+            for item in visited
+        )
+    ):
+        return []
     resolution = float(grid.info.resolution)
     width, height = int(grid.info.width), int(grid.info.height)
     if resolution <= 0.0 or width <= 0 or height <= 0:
@@ -1547,167 +1806,34 @@ def obstacle_geometry_fits_candidate(
     obstacle_id: str,
     safety: Optional[NavigationSafety],
 ) -> bool:
-    """判断新鲜的点云几何是否与稳定障碍名称一致。
+    """Require the authoritative classifier to reproduce one requested semantic.
 
-    这是进入 ``TraverseObstacle`` 前最后一道、故意偏保守的米制几何闸门。字段缺失、
-    感知无效或几何超出比赛物体轮廓时一律返回 ``False``，让任务继续留在观察/验证
-    阶段；这样可以避免斜坡—木桥、木桥—台阶交界处的瞬态轮廓被误当成越障入口。
+    NavigationSafety.semantic_id is temporally stabilised by TerrainSafetyAssessor,
+    while this final Action boundary deliberately re-runs its same pure classifier on
+    the immutable metric fields in this safety sample. The two values can differ
+    briefly while a new class is accumulating confirmation votes; that interval must
+    remain a non-actionable observation state.
+
+    Keeping the numeric competition envelopes in one classifier avoids a second set of
+    subtly different limits here. The surrounding handoff path still independently
+    checks the typed semantic, Header/frame/sample time, coarse type, map-space identity,
+    confidence and entry pose. This helper repeats the generic message and point-count
+    guards so a direct caller cannot use an invalid or empty metric snapshot.
+
+    Raw OpenCV hints are intentionally not supplied: they are operator/UI evidence and
+    cannot create or change an executable competition semantic.
     """
-    if safety is None or not safety.perception_valid:
+    requested_id = normalize_semantic_id(obstacle_id)
+    if (
+        not is_actionable_semantic_id(requested_id)
+        or not navigation_safety_is_well_formed(safety)
+        or not bool(safety.perception_valid)
+        or int(safety.valid_points) <= 0
+        or normalize_semantic_id(safety.semantic_id) != requested_id
+    ):
         return False
-    obstacle_id = str(obstacle_id)
-    if not is_actionable_semantic_id(obstacle_id):
-        return False
-
-    obstacle_type = int(safety.obstacle_type)
-    pitch = abs(degrees(float(safety.slope_pitch)))
-    roll = abs(degrees(float(safety.slope_roll)))
-    height = float(safety.obstacle_height)
-    depth = float(safety.pit_depth)
-    roughness = float(safety.roughness)
-    width = float(safety.width)
-    clearance = float(safety.clearance_height)
-    # NavigationSafety 正常由 assessor 先做有限值校验，但 Action 边界仍需独立防御。
-    # 尤其 Python 的布尔短路可能让完整 T 台的 height/width 分支跳过 NaN pitch，若不在
-    # 这里原子检查，损坏消息就可能绕过最终闸门。任一米制量测无穷或非数都拒绝整帧。
-    if not all(isfinite(value) for value in (
-        pitch,
-        roll,
-        height,
-        depth,
-        roughness,
-        width,
-        clearance,
-    )):
-        return False
-    if any(value < 0.0 for value in (
-        height,
-        depth,
-        roughness,
-        width,
-        clearance,
-    )):
-        return False
-
-    if obstacle_id == "right_angle_poles":
-        # 规则绕杆立柱应当窄、高，并明显突出局部地面。单独的视觉框也可能产生相似
-        # 语义，因此只有点云同时满足这些尺寸，才允许进入比赛绕杆 Action 流程。
-        return (
-            obstacle_type == NavigationSafety.OBSTACLE_POLE
-            and height >= 0.45
-            and width <= 0.35
-            and depth < 0.08
-        )
-    if obstacle_id == "height_bar":
-        # 限高杆与坑洞/墙面分开校验，防止斜坡侧视轮廓误进入限高杆交接流程。
-        return (
-            obstacle_type in {
-                NavigationSafety.OBSTACLE_BAR,
-                NavigationSafety.OBSTACLE_WALL,
-            }
-            and 0.18 <= height <= 0.45
-            and width <= 1.20
-            and clearance >= 0.12
-        )
-    if obstacle_id == "main_slope":
-        return (
-            obstacle_type == NavigationSafety.OBSTACLE_CLEAR
-            and 7.0 <= pitch <= 12.5
-            and roll <= 8.0
-            and roughness <= 0.050
-        )
-    if obstacle_id == "wooden_bridge_a":
-        return (
-            obstacle_type == NavigationSafety.OBSTACLE_CLEAR
-            and 12.0 <= pitch <= 17.5
-            and roll <= 8.0
-            and roughness <= 0.045
-            and width >= 0.80
-        )
-    if obstacle_id == "wooden_bridge_b":
-        return (
-            obstacle_type == NavigationSafety.OBSTACLE_STEP
-            and 0.19 <= height <= 0.28
-            and 0.55 <= width <= 1.40
-            and roughness >= 0.078
-            and pitch <= 6.0
-            and roll <= 12.0
-        )
-    if obstacle_id == "t_shaped_stairs":
-        # 正对 T 台存在三种合法深度轮廓：完整 0.40 m 顶部、只见前几级的局部踏面，
-        # 以及参考平面跨越多级踏面后形成的阶梯总体趋势。无闪现样本属于第三种：残余
-        # 高度仅 0.081 m，但仍保留 16.23°、0.029 m 残差和 0.998 m 宽度。名称层已经
-        # 接受该证据，最终 Action 闸门不能重新引入旧的“高度至少 0.28 m、坡角不超过
-        # 15°”矛盾。三种轮廓仍共同受 0.43 m 高度上限、6° 横滚和 0.08 m 残差上限
-        # 约束，因此实测 0.44～0.46 m 的主斜坡侧面继续被拒绝。
-        stepped_profile = (
-            7.0 <= pitch <= 18.0
-            and roughness >= 0.020
-        )
-        partial_tread = (
-            height >= 0.28 and width >= 0.45 and roughness >= 0.040
-        )
-        step_profile = (
-            obstacle_type == NavigationSafety.OBSTACLE_STEP
-            and height <= 0.43
-            and roughness <= 0.080
-            and roll <= 6.0
-            and (
-                (width >= 0.60 and (height >= 0.32 or stepped_profile))
-                or partial_tread
-            )
-        )
-        # 近场参考平面可能落在较高踏面，使较低一级暂时成为 PIT。名称层只在这组
-        # 严格坡角、坑深、低残余高度、残差和规则宽度同时成立时恢复 T 台语义；最终
-        # Action 闸门复用同一轮廓，否则会出现“名称正确但永远不能交接”。横滚门排除
-        # 从侧面观察到的坡/台边缘。
-        pit_profile = (
-            obstacle_type == NavigationSafety.OBSTACLE_PIT
-            and 16.0 <= pitch <= 24.0
-            and 0.20 <= depth <= 0.36
-            and height < 0.12
-            and 0.025 <= roughness <= 0.065
-            and 0.75 <= width <= 1.25
-            and roll <= 6.0
-        )
-        return step_profile or pit_profile
-    if obstacle_id == "gravel_wood_pit":
-        if obstacle_type == NavigationSafety.OBSTACLE_PIT:
-            return 0.06 <= depth <= 0.30 and 0.05 <= height <= 0.34
-        regular_pit = (
-            obstacle_type == NavigationSafety.OBSTACLE_STEP
-            and 0.10 <= height <= 0.22
-            and 0.07 <= depth <= 0.30
-            and roughness >= 0.020
-            and 0.30 <= width <= 1.20
-        )
-        close_fill = (
-            obstacle_type == NavigationSafety.OBSTACLE_STEP
-            and 0.19 <= height <= 0.23
-            and 0.02 <= depth <= 0.08
-            and 0.045 <= roughness < 0.078
-            and 0.40 <= width <= 1.40
-        )
-        return regular_pit or close_fill
-    if obstacle_id == "high_wall":
-        # 规则高墙约 0.30 m 高、1.00 m 宽；碎石坑边沿实测只有 0.10～0.25 m 高，
-        # 因此完整墙面门限可排除这类裁切误报。若遮挡使点云粗分类表现为 PIT，则只在
-        # 名称层使用的那组严格坡角、深度、粗糙度与宽度条件同时成立时放行。
-        if obstacle_type == NavigationSafety.OBSTACLE_PIT:
-            return (
-                12.0 <= pitch <= 22.0
-                and depth > 0.36
-                and height < 0.10
-                and 0.035 <= roughness <= 0.070
-                and 0.80 <= width <= 1.20
-            )
-        return (
-            obstacle_type == NavigationSafety.OBSTACLE_WALL
-            and 0.27 <= height <= 0.42
-            and 0.75 <= width <= 1.25
-            and pitch <= 15.0
-        )
-    return False
+    classification = classify_front_obstacle(safety)
+    return str(classification.semantic_id) == requested_id
 
 
 def nav_status_allows_guarded_handoff(status: int) -> bool:
@@ -1752,15 +1878,36 @@ def close_handoff_is_safe(
 def obstacle_was_completed(
     obstacle_type: int,
     position: Tuple[float, float],
-    completed: Sequence[Tuple[int, float, float]],
+    completed: Sequence[Tuple],
     radius: float,
+    semantic_id: str = "",
 ) -> bool:
-    """仅去重同类别、同位置的已完成障碍，保留密集场地中的相邻异类目标。"""
-    return any(
-        int(completed_type) == int(obstacle_type)
-        and hypot(position[0] - x, position[1] - y) <= max(0.0, float(radius))
-        for completed_type, x, y in completed
-    )
+    """De-duplicate by identity; use coarse type only when both sides lack an ID.
+
+    Records created by the current mission contain ``(semantic, type, x, y)``.  Legacy
+    three-field records remain readable for an in-process upgrade, but they can only match
+    a completely unclassified candidate.  This prevents two nearby STEP structures (for
+    example a bridge and T stair) from suppressing one another or changing the task ledger.
+    """
+    candidate = normalize_semantic_id(semantic_id)
+    maximum_distance = max(0.0, float(radius))
+    for item in completed:
+        if len(item) == 4:
+            completed_id, completed_type, x, y = item
+            completed_id = normalize_semantic_id(completed_id)
+        elif len(item) == 3:
+            completed_type, x, y = item
+            completed_id = ""
+        else:
+            continue
+        if hypot(position[0] - x, position[1] - y) > maximum_distance:
+            continue
+        if candidate:
+            if candidate == completed_id:
+                return True
+        elif not completed_id and int(completed_type) == int(obstacle_type):
+            return True
+    return False
 
 
 class AutonomousMission(Node):
@@ -1810,8 +1957,15 @@ class AutonomousMission(Node):
             "failed_entry_heading_tolerance": 0.70,
             "failed_entry_escape_distance": 0.80,
             "handoff_fallback_max_distance": 1.45,
-            "handoff_fallback_max_lateral": 0.50,
+            "handoff_fallback_max_lateral": 0.35,
             "direct_handoff_max_distance": 1.45,
+            # Guidance READY is the task-to-Action handoff window (nominally 1.20 m),
+            # not permission to lift a foot immediately.  Only this smaller, explicitly
+            # calibrated controller envelope produces ENTRY_READY; every other safe
+            # handoff is ENTRY_PREPARING and must close the remaining pose error first.
+            "traversal_ready_max_distance": 0.45,
+            "traversal_ready_max_lateral": 0.10,
+            "traversal_ready_max_heading_error": 0.08,
             "handoff_fallback_spatial_tolerance": 0.90,
             # 障碍前缘漂移过大时，只在机器人真正回到已确认观察位、朝向也接近原方向时
             # 才允许用待办账本恢复 ID；仍必须通过实时粗类型和全部 Action 入口守卫。
@@ -1831,7 +1985,7 @@ class AutonomousMission(Node):
             # 越障控制器从 2.35 m 内接管最后一段低速接近。否则 Nav2 的膨胀边界可能
             # 恰好停在 1.9~2.0 m，使任务虽看清障碍却永远够不到名义入口。
             "approach_stall_handoff_max_distance": 2.35,
-            "approach_stall_handoff_max_lateral": 0.75,
+            "approach_stall_handoff_max_lateral": 0.35,
             "approach_stall_handoff_max_heading_error": 0.22,
             # 入口连续停滞却不满足越障交接门限时，短暂忽略同一 map 位置，先探索其他
             # 方向。否则误分类的场地边缘或远距离轮廓会被无限取消、立即重发。
@@ -1844,7 +1998,12 @@ class AutonomousMission(Node):
             # The simulator and future hardware adapter may need tens of
             # seconds for a long bridge.  This is a safety ceiling, not the
             # nominal duration, and therefore must exceed every valid action.
-            "goal_timeout": 45.0, "traversal_timeout": 45.0,
+            "goal_timeout": 45.0,
+            "traversal_timeout": 45.0,
+            # A live controller must advance either its feedback state or global
+            # progress inside this window. Repeated identical heartbeats do not hide a
+            # stalled gait; cancellation still waits for the normal ownership result.
+            "traversal_progress_timeout": 5.0,
             # DDS 断连可能让 send/cancel Future 永远不完成。响应看门狗只覆盖通信握手；
             # 已接受目标的正常执行仍分别由 goal_timeout/traversal_timeout 限制。
             # 超时代表运动控制权未知，任务只会锁住自主 Twist。Nav2 故障可停/重启
@@ -1859,6 +2018,18 @@ class AutonomousMission(Node):
             # data is older than this window, we hold in verification instead
             # of triggering action handoff.
             "safety_geometry_stale_seconds": 0.35,
+            # Safety and Guidance must be the exact same base-frame sample.  The
+            # repository guidance node forwards Header byte-for-byte; external producers
+            # must do the same because the final Action boundary never joins nearby frames.
+            "observation_frame": "base_link",
+            # Even synchronized Headers must project the obstacle to the same map
+            # neighborhood.  This is sensor/TF noise tolerance, not the much wider
+            # pending-obstacle identity radius used while waiting for Nav2 ownership.
+            "safety_guidance_spatial_tolerance": 0.12,
+            # A true health sample must remain continuous before autonomous Nav2 resumes.
+            # Stale/false health cancels (but does not penalize) the current Nav2 target.
+            "navigation_health_timeout": 0.80,
+            "navigation_health_recovery_duration": 1.00,
             "minimum_obstacle_confidence": 0.55, "obstacle_confirmation_frames": 3,
             # Only close, repeated semantic observations may arm traversal.
             # Far-field labels remain visible for diagnostics but cannot move
@@ -1917,12 +2088,12 @@ class AutonomousMission(Node):
             "nav_progress_translation": 0.04,
             "nav_progress_rotation": 0.06,
             "inventory_log_period": 5.0,
-            # 整场软件任务预算为 5 分钟。最后 60 秒只允许完成正在执行的越障或返回
-            # 起点，不再发起新的探索；若返程受阻仍继续安全重试，而不是到点原地停车。
+            # 整场软件任务预算为 5 分钟：240 秒 work deadline 取消未完成工作并返航；
+            # 300 秒 hard deadline 取消所有 Action、锁住 Nav2 并进入 INCOMPLETE_STOP。
+            # 远端所有权仍按通信看门狗有界等待，迟到 success 不能改写完成/返程状态。
             "mission_timeout": 300.0,
             "return_time_reserve": 60.0,
             "return_home_tolerance": 0.40,
-            "front_name_timeout": 1.2,
             "expected_obstacle_ids": list(COMPETITION_OBSTACLE_IDS),
         }
         for name, value in defaults.items():
@@ -1949,18 +2120,16 @@ class AutonomousMission(Node):
             self._guidance_callback,
             10,
         )
-        # 中文话题供人读，任务内部立即转换为上方稳定 ID。它仍来自实时几何/视觉，绝不
-        # 读取 Gazebo 实体名；换成真机传感器后通信合同不变。
-        self.create_subscription(
-            String,
-            "/perception/front_obstacle_name",
-            self._front_name_callback,
-            10,
-        )
         self.create_subscription(
             NavigationSafety,
             "/terrain/navigation_safety",
             self._navigation_safety_callback,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            "/navigation/healthy",
+            self._navigation_health_callback,
             10,
         )
         self.state_pub = self.create_publisher(String, "/autonomy/state", 10)
@@ -1986,16 +2155,22 @@ class AutonomousMission(Node):
             self._finish_pose_callback,
             inventory_qos,
         )
-        # 独立任务进程拥有自己的运动许可。TRANSIENT_LOCAL 让核心速度门记住最后状态：
-        # 启动时解除自主 Twist 锁，Ctrl-C 时先锁止 Nav2 速度，再取消异步 Action。核心 SLAM 不需要启动
-        # 或管理本节点；它只把这一标准布尔量作为额外的失效安全输入。
+        # 独立任务进程拥有自己的停车锁。它只约束 Nav2 自主速度候选；人工话题仍由最终
+        # 仲裁器单独处理。启动先保持 true，只有新 Nav2 goal 提交边界才显式解锁。
         stop_qos = QoSProfile(depth=1)
         stop_qos.reliability = ReliabilityPolicy.RELIABLE
         stop_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.autonomy_stop_pub = self.create_publisher(
             Bool, "/navigation/autonomy_stop", stop_qos
         )
-        self.autonomy_stop_pub.publish(Bool(data=False))
+        self.autonomy_stop_pub.publish(Bool(data=True))
+        # Volatile lease distinguishes an absent autonomy process (ordinary RViz/Nav2 is
+        # allowed) from a process that acquired ownership and then died (fail-closed).
+        self.autonomy_lease_pub = self.create_publisher(
+            Bool,
+            "/navigation/autonomy_lease",
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
+        )
         # 非接近型 Nav2 目标需要先转离正前方障碍时，地形限速可能仍为零。任务节点只发布
         # 带心跳的“允许提取纯 yaw”布尔量；速度门会删除全部线速度并执行健康/雷达急停。
         # 这不是速度指令，Gazebo 和真机均继续使用同一标准 Nav2 -> /cmd_vel 链路。
@@ -2008,6 +2183,10 @@ class AutonomousMission(Node):
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.enabled = bool(self.params["autostart"])
+        if self.enabled:
+            self.autonomy_lease_pub.publish(Bool(data=True))
+        else:
+            self.autonomy_stop_pub.publish(Bool(data=False))
         self.state = "WAITING_FOR_INPUTS" if self.enabled else "IDLE"
         self.map_msg = None
         self.costmap_msg = None
@@ -2017,8 +2196,21 @@ class AutonomousMission(Node):
         self.odom_received = 0.0
         self.guidance = None
         self.guidance_received = 0.0
+        self.last_guidance_stamp = None
         self.last_safety = None
         self.safety_received = 0.0
+        self.last_safety_stamp = None
+        # Header monotonicity is scoped to one ROS-clock epoch.  Simulation reset or a
+        # looped rosbag may move /clock backward; the timer clears all old observation
+        # authority before a low timestamp from the new epoch can be accepted.
+        self.last_ros_clock_time = self.get_clock().now()
+        self.navigation_healthy = False
+        self.navigation_health_received = 0.0
+        self.navigation_health_true_since = 0.0
+        self.navigation_health_fault_active = False
+        # When health interrupts Nav2, retain the exact map pose/purpose.  Recovery resumes
+        # that target instead of consuming a frontier, revisit or search-turn attempt.
+        self.health_interrupted_nav = None
         self.nav_handle = None
         self.nav_send_pending = False
         self.nav_cancel_pending = False
@@ -2036,6 +2228,7 @@ class AutonomousMission(Node):
         self.nav_revisit_id = ""
         self.nav_started = 0.0
         self.nav_target = None
+        self.nav_goal_pose = None
         self.nav_progress_pose = None
         self.nav_progress_time = 0.0
         # approach goal 与其来源障碍绑定；Nav2 成功后用于交叉验证，防止前缘/类别抖动
@@ -2064,6 +2257,16 @@ class AutonomousMission(Node):
         self.traverse_cancel_started = 0.0
         self.traverse_handle = None
         self.traverse_started = 0.0
+        # Feedback is scoped to one traverse_generation.  ``progress_time`` advances
+        # only when state or numeric progress advances; repeated keepalive messages do
+        # not defeat the five-second no-progress watchdog.
+        self.traverse_entry_stage = 0
+        self.traverse_feedback_state = 0
+        self.traverse_feedback_progress = 0.0
+        self.traverse_feedback_received = 0.0
+        self.traverse_progress_time = 0.0
+        self.traverse_feedback_invalid = False
+        self.traverse_cancel_reason = ""
         # Action 通信超时后不能证明远端是否已经接管。该锁存状态持续发布自主 Twist 锁，
         # 但不能停止失联外部控制器的关节动作；它绝不自动清空，只重启自主 launch 也无法
         # 证明远端旧目标已经消失。
@@ -2125,12 +2328,15 @@ class AutonomousMission(Node):
         # 模糊结构耗尽换视角次数后，左右交替选择新观察站，避免每次都向
         # 同一侧绕行而最终靠近场地边界。这是调度状态，不包含障碍坐标。
         self.ambiguous_recovery_sign = 1.0
-        self.front_obstacle_name = ""
-        self.front_name_received = 0.0
         self.home_pose = None
         self.finish_pose = None
         self.returned_home = False
         self.return_attempts = 0
+        # ``return_phase_requested`` latches at the work deadline.  ``hard_deadline``
+        # is a terminal safety state: it never resets inside this process and therefore
+        # cannot be bypassed by a late Action response or result.
+        self.return_phase_requested = False
+        self.hard_deadline_active = False
         self.search_turn_index = 0
         self.exploration_exhausted = False
         self.mission_started = time.monotonic()
@@ -2166,13 +2372,17 @@ class AutonomousMission(Node):
             return
         self.completed_pub.publish(String(data=inventory_message(completed)))
         self.pending_pub.publish(String(data=inventory_message(pending)))
+        budget_remaining = max(
+            0.0,
+            float(self.params["mission_timeout"]) - (now - self.mission_started),
+        )
         progress = (
             f"state={self.state}; completed={len(completed)}/"
             f"{len(completed) + len(pending)}; "
             f"score={mission_score(self.completed_semantics, self.returned_home)}; "
             f"elapsed_seconds={max(0.0, now - self.mission_started):.1f}; "
             "budget_remaining_seconds="
-            f"{max(0.0, float(self.params['mission_timeout']) - (now - self.mission_started)):.1f}; "
+            f"{budget_remaining:.1f}; "
             f"completed_ids={','.join(completed) or 'none'}; "
             f"pending_ids={','.join(pending) or 'none'}"
         )
@@ -2192,31 +2402,56 @@ class AutonomousMission(Node):
         self.rotation_recovery_pub.publish(Bool(data=False))
         self.autonomy_stop_pub.publish(Bool(data=True))
 
-    def _release_autonomy_stop_after_cancel(self) -> None:
-        """Re-open autonomous velocity only after every known Action owner released.
+    def _publish_autonomy_lease(self, active: bool) -> None:
+        """Refresh or explicitly release this process's Nav2 ownership lease."""
+        self.autonomy_lease_pub.publish(Bool(data=bool(active)))
 
-        A cancel *response* is insufficient; callers invoke this only from a matching
-        goal-result callback.  Manual keyboard/joystick ownership is outside this node
-        and remains governed by the final command arbiter.
-        """
-        if (
+    def _autonomy_owner_active(self) -> bool:
+        """Keep the lease while a live/unknown Action may still own robot motion."""
+        return bool(
             self.enabled
-            and not self.action_ownership_fault
-            and self.nav_handle is None
-            and not self.nav_send_pending
-            and not self.nav_cancel_pending
-            and self.traverse_handle is None
-            and not self.traverse_send_pending
-            and not self.traverse_cancel_pending
-        ):
-            self.autonomy_stop_pub.publish(Bool(data=False))
+            or self.action_ownership_fault
+            or self.nav_handle is not None
+            or self.nav_send_pending
+            or self.nav_cancel_pending
+            or self.traverse_handle is not None
+            or self.traverse_send_pending
+            or self.traverse_cancel_pending
+        )
+
+    def _release_autonomy_owner(self) -> None:
+        """Cleanly return the Nav2 branch to ordinary RViz/other non-mission clients.
+
+        Publish a stop first, then an explicit lease release and stop-latch release.  Both
+        boundaries clear the gate's cached Twist, so a later ordinary Nav2 goal must produce
+        a new command and cannot replay the mission's final velocity.
+        """
+        self._publish_immediate_stop()
+        self._publish_autonomy_lease(False)
+        self.autonomy_stop_pub.publish(Bool(data=False))
 
     def _map_callback(self, msg):
+        if not occupancy_grid_is_well_formed(msg, "map"):
+            self.map_msg = None
+            self.map_received = 0.0
+            self._publish_immediate_stop()
+            self.get_logger().warning(
+                "Rejected malformed /map OccupancyGrid; autonomy remains fail-closed"
+            )
+            return
         self.map_msg = msg
         self.map_received = time.monotonic()
 
     def _costmap_callback(self, msg: OccupancyGrid) -> None:
         """Cache the standard Nav2 costmap used only for bounded recovery goals."""
+        if not occupancy_grid_is_well_formed(msg, "map"):
+            self.costmap_msg = None
+            self.costmap_received = float("-inf")
+            self._publish_immediate_stop()
+            self.get_logger().warning(
+                "Rejected malformed global costmap; recovery translation is disabled"
+            )
+            return
         self.costmap_msg = msg
         self.costmap_received = time.monotonic()
 
@@ -2318,11 +2553,6 @@ class AutonomousMission(Node):
             f"finish pose updated to ({position.x:.2f}, {position.y:.2f})"
         )
 
-    def _front_name_callback(self, msg: String) -> None:
-        """缓存与最新感知同源的比赛名称；超时后绝不沿用上一处障碍。"""
-        self.front_obstacle_name = str(msg.data)
-        self.front_name_received = time.monotonic()
-
     def _navigation_safety_callback(self, msg: NavigationSafety) -> None:
         """缓存最新几何，包括明确的无效帧。
 
@@ -2330,34 +2560,230 @@ class AutonomousMission(Node):
         ``safety_geometry_stale_seconds`` 内继续存活，传感器刚断流时仍可能授权交接。
         因此无效帧也覆盖缓存，让最终几何闸门立即 fail-closed。
         """
+        expected_frame = str(self.params["observation_frame"])
+        stamp = header_stamp_seconds(msg.header)
+        if (
+            not navigation_safety_is_well_formed(msg)
+            or not observation_header_is_well_formed(msg.header, expected_frame)
+        ):
+            self.last_safety = None
+            self.safety_received = 0.0
+            return
+        if self.last_safety_stamp is not None and stamp <= self.last_safety_stamp:
+            # A delayed DDS sample cannot overwrite newer geometry.  Keeping the newer
+            # valid sample is safer than converting harmless reordering into a false pulse.
+            return
+        self.last_safety_stamp = stamp
         self.last_safety = msg
         self.safety_received = time.monotonic()
 
-    def _latest_navigation_safety(self, now: float) -> Optional[NavigationSafety]:
-        """返回仍可用于闸门判断的最新安全观测。"""
+    def _reset_observation_epoch(self, ros_now) -> None:
+        """Atomically revoke old sensor/map authority after ROS time moves backward.
+
+        Header ordering is meaningful only inside one ROS-clock epoch.  Keeping stamp
+        100 after a simulator/rosbag reset to stamp 1 would reject every new observation
+        as delayed forever.  Conversely, simply lowering the remembered stamp while
+        retaining old semantic votes could combine two epochs at an Action boundary.
+
+        Active Action handles and their cancel/send bookkeeping are deliberately not
+        cleared: a local clock reset does not prove that a remote controller released
+        motion.  The Nav2 stop latch remains asserted, and navigation must publish a new
+        continuously healthy interval before any new goal can be sent.
+        """
+        self._publish_immediate_stop()
+        self.guidance = None
+        self.guidance_received = 0.0
+        self.last_guidance_stamp = None
+        self.last_safety = None
+        self.safety_received = 0.0
+        self.last_safety_stamp = None
+        self.obstacle_signature = None
+        self.obstacle_frames = 0
+        self._reset_obstacle_lock()
+        self.observed_obstacles.clear()
+        self.blocked_obstacles.clear()
+        self.blocked_frontiers.clear()
+        self.failed_entries.clear()
+        self.coverage_visited.clear()
+        self.traversal_verification = None
+        self.map_msg = None
+        self.map_received = 0.0
+        self.costmap_msg = None
+        self.costmap_received = float("-inf")
+        self.latest_odom = None
+        self.odom_received = 0.0
+
+        # A queued but unsent handoff is merely old observation state.  Once a traversal
+        # send/handle/cancel exists, preserve its snapshot until the remote result proves
+        # ownership release.
+        if not (
+            self.traverse_send_pending
+            or self.traverse_handle is not None
+            or self.traverse_cancel_pending
+        ):
+            self.pending_traverse = None
+            self.pending_traverse_id = ""
+            self.pending_traverse_position = None
+            self.pending_traverse_robot_start = None
+            self.pending_traverse_started = 0.0
+            self.controller_wait_reported = False
+
+        self.health_interrupted_nav = None
+        self.navigation_healthy = False
+        self.navigation_health_received = 0.0
+        self.navigation_health_true_since = 0.0
+        self.navigation_health_fault_active = False
+        self.mission_ready_after = time.monotonic() + float(
+            self.params["startup_sensor_settle_time"]
+        )
+        # Prevent the health handler from freezing an old-epoch target for replay.  The
+        # handle/pending-send remains tracked and is cancelled through the normal result
+        # ownership path.
+        self.nav_goal_pose = None
+        if self.nav_handle is not None and not self.nav_cancel_pending:
+            self._cancel_nav("navigation_health_fault")
+        self.last_ros_clock_time = ros_now
+        self.get_logger().warning(
+            "ROS clock moved backward; cleared map/perception epoch and require fresh "
+            "stable navigation health"
+        )
+
+    def _latest_navigation_safety(
+        self,
+        now: float,
+        guidance: Optional[TraversalGuidance] = None,
+    ) -> Optional[NavigationSafety]:
+        """Return fresh Safety only when it is the same atomic sample as Guidance."""
+        paired_guidance = self.guidance if guidance is None else guidance
         if (
             self.last_safety is None
             or not self.last_safety.perception_valid
             or now - self.safety_received
             > float(self.params["safety_geometry_stale_seconds"])
+            or paired_guidance is None
+            or not observation_headers_are_synchronized(
+                self.last_safety.header,
+                paired_guidance.header,
+            )
+            or int(self.last_safety.obstacle_type)
+            != int(paired_guidance.obstacle_type)
+            or str(self.last_safety.semantic_id)
+            != str(paired_guidance.semantic_id)
         ):
             return None
         return self.last_safety
 
     def _arena_boundary_ahead(self, now: float) -> bool:
-        """判断当前新鲜名称是否明确禁止越过场地边界。"""
+        """Reject a fresh typed non-task boundary semantic without parsing UI text."""
         return bool(
-            now - self.front_name_received
-            <= float(self.params["front_name_timeout"])
-            and "场地边界" in self.front_obstacle_name
+            self.guidance is not None
+            and now - self.guidance_received <= float(self.params["guidance_timeout"])
+            and str(self.guidance.semantic_id) == "arena_boundary"
         )
 
     def _current_obstacle_id(self, now: Optional[float] = None) -> str:
-        """返回新鲜的比赛语义 ID，防止旧名称被带入下一次 Action。"""
+        """Return the fresh typed semantic ID; operator language never enters control."""
         stamp = time.monotonic() if now is None else float(now)
-        if stamp - self.front_name_received > float(self.params["front_name_timeout"]):
+        if (
+            self.guidance is None
+            or stamp - self.guidance_received > float(self.params["guidance_timeout"])
+            or not guidance_is_well_formed(self.guidance)
+        ):
             return ""
-        return canonical_obstacle_id(self.front_obstacle_name)
+        return normalize_semantic_id(self.guidance.semantic_id)
+
+    def _navigation_health_callback(self, msg: Bool) -> None:
+        """Cache the monitored stack health heartbeat using monotonic receive time."""
+        now = time.monotonic()
+        healthy = bool(msg.data)
+        heartbeat_gap = (
+            float("inf")
+            if self.navigation_health_received <= 0.0
+            else now - self.navigation_health_received
+        )
+        # A stale gap terminates the previous true interval even when the first returning
+        # payload is also true.  Otherwise an old ``true_since`` would bypass the required
+        # recovery dwell on the very first heartbeat after a DDS/sensor outage.
+        if healthy and (
+            not self.navigation_healthy
+            or heartbeat_gap > float(self.params["navigation_health_timeout"])
+        ):
+            self.navigation_health_true_since = now
+        elif not healthy:
+            self.navigation_health_true_since = 0.0
+        self.navigation_healthy = healthy
+        self.navigation_health_received = now
+
+    def _navigation_health_is_stable(self, now: float) -> bool:
+        """Require a fresh continuously-true health interval before allowing Nav2."""
+        return bool(
+            self.navigation_healthy
+            and self.navigation_health_true_since > 0.0
+            and now - self.navigation_health_received
+            <= float(self.params["navigation_health_timeout"])
+            and now - self.navigation_health_true_since
+            >= float(self.params["navigation_health_recovery_duration"])
+        )
+
+    def _capture_health_interrupted_nav(self) -> None:
+        """Freeze one Nav2 request so a transient health fault consumes no attempt."""
+        if self.health_interrupted_nav is not None or self.nav_goal_pose is None:
+            return
+        self.health_interrupted_nav = (
+            deepcopy(self.nav_goal_pose),
+            str(self.nav_purpose),
+            str(self.nav_revisit_id),
+        )
+
+    def _handle_navigation_health(self, now: float) -> bool:
+        """Pause/resume Nav2 around a timed health lease without penalizing its target.
+
+        Returns true while the navigation state machine must remain paused.  A running
+        TraverseObstacle Action is deliberately not cancelled by a SLAM/Nav2 health topic;
+        the independent motion controller owns its own hardware safety contract.
+        """
+        if self._navigation_health_is_stable(now):
+            if self.navigation_health_fault_active:
+                self.navigation_health_fault_active = False
+                self._publish_state("navigation health recovered and remained stable")
+            if (
+                self.health_interrupted_nav is not None
+                and self.nav_handle is None
+                and not self.nav_send_pending
+                and not self.nav_cancel_pending
+                and self.traverse_handle is None
+                and not self.traverse_send_pending
+                and self.traversal_verification is None
+            ):
+                pose, purpose, revisit_id = self.health_interrupted_nav
+                # Approach observations are intentionally not replayed: their relative
+                # geometry may have aged during the outage.  Fresh Guidance will select
+                # the same unfinished target without any blacklist/backoff penalty.
+                if purpose == "approach":
+                    self.health_interrupted_nav = None
+                elif self._send_nav_goal(pose, purpose, revisit_id=revisit_id):
+                    self.health_interrupted_nav = None
+                    self.state = "NAVIGATING"
+                    self._publish_state(
+                        f"resumed Nav2 {purpose} after navigation health recovery"
+                    )
+                return True
+            return False
+
+        self._publish_immediate_stop()
+        if not self.navigation_health_fault_active:
+            self.navigation_health_fault_active = True
+            self._publish_state(
+                "navigation health false/stale; locking autonomy without penalizing target"
+            )
+        if self.nav_handle is not None or self.nav_send_pending:
+            self._capture_health_interrupted_nav()
+        if self.nav_handle is not None and not self.nav_cancel_pending:
+            self._cancel_nav("navigation_health_fault")
+        if self.traverse_handle is not None or self.traverse_send_pending:
+            return False
+        self.state = "WAITING_FOR_NAVIGATION_HEALTH"
+        return True
 
     def _remember_obstacle(
         self,
@@ -2365,6 +2791,7 @@ class AutonomousMission(Node):
         position: Tuple[float, float],
         confidence: float,
         now: float,
+        observation_header=None,
     ) -> None:
         """Update the active-search record for one repeatedly confirmed obstacle.
 
@@ -2379,7 +2806,7 @@ class AutonomousMission(Node):
             or not isfinite(float(confidence))
         ):
             return
-        robot = self._robot_pose()
+        robot = self._robot_pose(observation_header)
         if robot is None:
             return
         previous = self.observed_obstacles.get(semantic_id)
@@ -2459,7 +2886,7 @@ class AutonomousMission(Node):
         )
         if matched:
             return matched
-        robot = self._robot_pose()
+        robot = self._robot_pose(msg.header)
         if robot is None:
             return ""
         return matching_pending_semantic_from_viewpoint(
@@ -2507,8 +2934,8 @@ class AutonomousMission(Node):
     ) -> bool:
         """只让与语义候选一致的新鲜米制几何通过。
 
-        ``front_obstacle_name`` 和 ``TraversalGuidance`` 可用于任务调度，但都不含最终
-        Action 所需的完整高度、宽度和深度。NavigationSafety 缺失、过期或明确无效时
+        ``TraversalGuidance.semantic_id`` 可用于任务调度，但 Guidance 不含最终 Action
+        所需的完整高度、宽度和深度。NavigationSafety 缺失、过期或明确无效时
         必须拒绝交接，不能把“没有证据”解释成“几何匹配”；后续新鲜有效帧可自然恢复，
         不设置永久故障锁。
         """
@@ -2537,7 +2964,7 @@ class AutonomousMission(Node):
         # 同一 map 入口中至少两帧已经确认的锁定语义优先于最后一帧粗几何。相机进入
         # 近裁剪区、坡顶或墙后时局部类别会自然退化；空间锁仍由 _matches_obstacle_lock
         # 约束，不会把上一障碍带到下一处。
-        stable_lock = canonical_obstacle_id(self.locked_obstacle_id)
+        stable_lock = normalize_semantic_id(self.locked_obstacle_id)
         # 一旦同一 map 入口在接近阶段以不少于三帧锁定为唯一比赛语义，近裁剪、坡顶
         # 或侧面视角产生的 STEP/WALL 粗分类不得改写它。空间一致性仍由入口锁约束；
         # Action 前还会再次检查实时距离、横偏和航向，因此这不是盲信旧名称。
@@ -2647,6 +3074,11 @@ class AutonomousMission(Node):
         the last pose is occupied or outside its rolling window while the physical
         robot is already inside the allowed finish radius.
         """
+        deadline_now = time.monotonic()
+        if self.hard_deadline_active or self._hard_deadline_reached(deadline_now):
+            if not self.hard_deadline_active:
+                self._enforce_hard_deadline(deadline_now)
+            return False
         terminal_pose = self.finish_pose or self.home_pose
         if not terminal_pose_reached(
             robot_pose,
@@ -2657,27 +3089,191 @@ class AutonomousMission(Node):
         self.returned_home = True
         self.enabled = False
         self.state = "COMPLETED"
+        self._release_autonomy_owner()
         self._publish_state(
             "reached mission finish; mission complete; "
             f"score={mission_score(self.completed_semantics, True)}"
         )
         return True
 
-    def _robot_pose(self):
+    def _return_phase_nav_purpose(self, purpose: str) -> bool:
+        """Return whether one Nav2 goal is required to reach the finish.
+
+        ``entry_recovery`` is included only for the bounded yaw recovery scheduled by a
+        stalled return-home goal.  Obstacle-entry recovery uses the same purpose string
+        but has ``failed_entry_escape_after_turn=True`` and must be cancelled when the
+        work window ends.
+        """
+        return bool(
+            str(purpose) == "return_home"
+            or (
+                str(purpose) == "entry_recovery"
+                and not self.failed_entry_escape_after_turn
+            )
+        )
+
+    def _work_deadline_reached(self, now: float) -> bool:
+        """Return whether exploration time is exhausted but return reserve remains."""
+        if self.home_pose is None or not self.enabled:
+            return False
+        work_budget = (
+            float(self.params["mission_timeout"])
+            - float(self.params["return_time_reserve"])
+        )
+        return float(now) - float(self.mission_started) >= max(0.0, work_budget)
+
+    def _hard_deadline_reached(self, now: float) -> bool:
+        """Return whether the absolute mission budget has expired."""
+        return bool(
+            self.home_pose is not None
+            and not self.returned_home
+            and float(now) - float(self.mission_started)
+            >= float(self.params["mission_timeout"])
+        )
+
+    def _begin_return_phase(self, now: float) -> bool:
+        """Latch the work deadline and drain non-return motion ownership.
+
+        Returns true while the caller must wait for an Action response/result.  A goal
+        request without a handle cannot be cancelled yet, so its response callback is
+        responsible for cancelling a late acceptance.  No failure/retry budget is
+        consumed: the task simply preserves its incomplete ledger and heads home.
+        """
+        first_request = not self.return_phase_requested
+        self.return_phase_requested = True
+        self.health_interrupted_nav = None
+        return_nav_already_active = bool(
+            (self.nav_handle is not None or self.nav_send_pending)
+            and self._return_phase_nav_purpose(self.nav_purpose)
+            and self.traverse_handle is None
+            and not self.traverse_send_pending
+        )
+        # Do not freeze a return-home goal that started early because all obstacles were
+        # already complete.  Every non-return or idle transition is still closed first;
+        # the subsequent _send_nav_goal creates the only allowed true->false unlock edge.
+        if not return_nav_already_active:
+            self._publish_immediate_stop()
+        waiting_for_owner = False
+        if self.traverse_handle is not None:
+            waiting_for_owner = True
+            if not self.traverse_cancel_pending:
+                self._cancel_traverse("work deadline return")
+        elif self.traverse_send_pending:
+            waiting_for_owner = True
+        elif self.pending_traverse is not None:
+            self.pending_traverse = None
+            self.pending_traverse_id = ""
+            self.pending_traverse_position = None
+            self.pending_traverse_robot_start = None
+            self.pending_traverse_started = 0.0
+            self.controller_wait_reported = False
+        if (
+            self.nav_handle is not None
+            and not self._return_phase_nav_purpose(self.nav_purpose)
+        ):
+            waiting_for_owner = True
+            if not self.nav_cancel_pending:
+                self._cancel_nav("work_deadline")
+        elif (
+            self.nav_send_pending
+            and not self._return_phase_nav_purpose(self.nav_purpose)
+        ):
+            waiting_for_owner = True
+        if first_request:
+            self.state = "RETURNING_TO_FINISH"
+            self._publish_state(
+                "work deadline reached; cancelling unfinished work and returning"
+            )
+        return waiting_for_owner
+
+    def _remain_incomplete_stop(self, event: str = "") -> None:
+        """Hold the terminal hard-deadline state without claiming mission success."""
+        self.enabled = False
+        self.returned_home = False
+        self.return_phase_requested = True
+        self._publish_immediate_stop()
+        self.state = "INCOMPLETE_STOP"
+        if self._autonomy_owner_active():
+            self._publish_autonomy_lease(True)
+        if event:
+            self._publish_state(event)
+
+    def _enforce_hard_deadline(self, now: float) -> None:
+        """Stop new work and cancel every known Action at the absolute time limit.
+
+        Local handles and pending sends remain tracked until their normal callbacks prove
+        release.  If cancellation/result communication stalls, the existing bounded
+        ownership watchdog transitions to an explicit fault while the Nav2 speed latch
+        remains closed.  The manual keyboard/gamepad branch is intentionally unaffected.
+        """
+        first_stop = not self.hard_deadline_active
+        self.hard_deadline_active = True
+        self.enabled = False
+        self.returned_home = False
+        self.return_phase_requested = True
+        self.health_interrupted_nav = None
+        self.traversal_verification = None
+        self.pending_traverse = None
+        self.pending_traverse_id = ""
+        self.pending_traverse_position = None
+        self.pending_traverse_robot_start = None
+        self.pending_traverse_started = 0.0
+        self._remain_incomplete_stop()
+        if self.nav_handle is not None and not self.nav_cancel_pending:
+            self._cancel_nav("hard mission deadline")
+        if self.traverse_handle is not None and not self.traverse_cancel_pending:
+            self._cancel_traverse("hard mission deadline")
+        if first_stop:
+            elapsed = max(0.0, float(now) - float(self.mission_started))
+            self._remain_incomplete_stop(
+                f"hard mission deadline reached at {elapsed:.1f}s; "
+                "actions cancelling and incomplete tasks retained"
+            )
+
+    def _robot_pose(self, observation_header=None):
+        """Return map pose now, or at an observation's exact sampling timestamp."""
+        source_frame = "base_link"
+        query_time = Time()
+        if observation_header is not None:
+            expected_frame = str(self.params["observation_frame"])
+            if not observation_header_is_well_formed(
+                observation_header, expected_frame
+            ):
+                return None
+            source_frame = str(observation_header.frame_id).lstrip("/")
+            query_time = Time.from_msg(observation_header.stamp)
         try:
-            transform = self.tf_buffer.lookup_transform("map", "base_link", Time())
+            transform = self.tf_buffer.lookup_transform(
+                "map", source_frame, query_time
+            )
         except TransformException:
             return None
         return planar_pose_from_transform(transform)
 
     def _guidance_callback(self, msg):
-        self.guidance = msg
-        self.guidance_received = time.monotonic()
-        if not guidance_is_well_formed(msg):
+        stamp = header_stamp_seconds(msg.header)
+        if (
+            self.last_guidance_stamp is not None
+            and stamp is not None
+            and stamp <= self.last_guidance_stamp
+        ):
+            # Ignore delayed frames so alternating DDS delivery cannot roll identity back.
+            return
+        if (
+            not guidance_is_well_formed(msg)
+            or not observation_header_is_well_formed(
+                msg.header, str(self.params["observation_frame"])
+            )
+        ):
             # 明确的坏帧必须立即撤销旧确认；不能仅等待 guidance_timeout，否则上一帧
             # 合法 READY 仍可能在传感器刚损坏时继续参与入口交接。
+            self.guidance = None
+            self.guidance_received = 0.0
             self.obstacle_signature, self.obstacle_frames = None, 0
             return
+        self.last_guidance_stamp = stamp
+        self.guidance = msg
+        self.guidance_received = time.monotonic()
         position = self._obstacle_position(msg)
         if position is None or not msg.perception_valid or not msg.traversal_required:
             self.obstacle_signature, self.obstacle_frames = None, 0
@@ -2696,10 +3292,10 @@ class AutonomousMission(Node):
         ):
             self.obstacle_signature, self.obstacle_frames = None, 0
             return
-        # 名称和点云 Guidance 来自不同节点，DDS 调度可能相差一帧。先用当前 Guidance
-        # 的几何类型校验名称，再参与同一入口投票，避免把“上一障碍名称”锁到新目标。
+        # Semantic identity is carried inside this exact Header/geometry snapshot.  The
+        # optional Chinese UI String may arrive in any order without affecting this vote.
         current_id = semantic_id_for_action(
-            self._current_obstacle_id(), action_obstacle_type(msg)
+            normalize_semantic_id(msg.semantic_id), action_obstacle_type(msg)
         )
         if current_id and not self._geometry_supports_obstacle_id(
             current_id,
@@ -2803,12 +3399,16 @@ class AutonomousMission(Node):
                     position,
                     float(msg.confidence),
                     now,
+                    msg.header,
                 )
 
     def _obstacle_position(self, msg):
         if not guidance_is_well_formed(msg):
             return None
-        pose = self._robot_pose()
+        # Project using map->observation_frame at the sensor sample, not the latest TF.
+        # During a turn, a 100--200 ms scheduling delay is enough to move the inferred
+        # obstacle sideways and accidentally merge two adjacent structures.
+        pose = self._robot_pose(msg.header)
         if pose is None:
             return None
         position = (
@@ -2825,9 +3425,7 @@ class AutonomousMission(Node):
             return True
         radius = float(self.params["completed_obstacle_radius"])
         obstacle_type = int(msg.obstacle_type)
-        candidate_id = semantic_id_for_action(
-            self._current_obstacle_id(), obstacle_type
-        )
+        candidate_id = normalize_semantic_id(msg.semantic_id)
         # 比赛障碍可能紧邻布置。长坡/桥的入口到出口使用线段去重，但必须同时匹配
         # 比赛语义；不能因 T 台刚好位于主坡出口附近，就被另一条已完成线段吞掉。
         if any(
@@ -2847,6 +3445,7 @@ class AutonomousMission(Node):
             position,
             self.completed_obstacles,
             radius,
+            candidate_id,
         )
 
     def _matches_obstacle_lock(self, msg):
@@ -2929,7 +3528,7 @@ class AutonomousMission(Node):
     def _relative_approach_pose(self, guidance):
         if not guidance_is_well_formed(guidance):
             return None
-        robot = self._robot_pose()
+        robot = self._robot_pose(guidance.header)
         if robot is None:
             return None
         x = robot[0] + cos(robot[2]) * guidance.approach_x - sin(robot[2]) * guidance.approach_y
@@ -3031,7 +3630,17 @@ class AutonomousMission(Node):
         # here would let its late accepted response continue toward the old Nav2 target,
         # then execute TraverseObstacle from stale geometry.  Wait for the response;
         # the next tick can cancel the now-observable handle using fresh perception.
-        if self.nav_send_pending:
+        if self._hard_deadline_reached(float(now)):
+            self._enforce_hard_deadline(float(now))
+            return False
+        if self._work_deadline_reached(float(now)):
+            self._begin_return_phase(float(now))
+            return False
+        if (
+            self.nav_send_pending
+            or self.return_phase_requested
+            or self.hard_deadline_active
+        ):
             return False
         if not is_actionable_semantic_id(semantic_id) or position is None:
             return False
@@ -3117,6 +3726,10 @@ class AutonomousMission(Node):
                 f"suppressing completed obstacle exit={semantic_id}; selecting another target"
             )
             return False
+        # HANDOFF begins before Nav2 cancellation completes.  Close the Nav2 gate now and
+        # keep it closed throughout HANDOFF/TRAVERSING/verification; only a later, fully
+        # validated call to _send_nav_goal may reopen it for a new navigation goal.
+        self._publish_immediate_stop()
         if not self.traverse_client.server_is_ready():
             self._hold_for_traversal_controller(target, position, now)
             return True
@@ -3185,6 +3798,13 @@ class AutonomousMission(Node):
         self.traverse_cancel_pending = False
         self.traverse_send_started = 0.0
         self.traverse_cancel_started = 0.0
+        self.traverse_cancel_reason = ""
+        self.traverse_entry_stage = 0
+        self.traverse_feedback_state = 0
+        self.traverse_feedback_progress = 0.0
+        self.traverse_feedback_received = 0.0
+        self.traverse_progress_time = 0.0
+        self.traverse_feedback_invalid = False
         self.pending_traverse = None
         self.pending_traverse_id = ""
         self.pending_traverse_position = None
@@ -3197,7 +3817,11 @@ class AutonomousMission(Node):
         self._cancel_late_action_handle(
             known_traverse_handle, "TraverseObstacle faulted"
         )
-        self.state = "ACTION_COMMUNICATION_FAULT"
+        self.state = (
+            "INCOMPLETE_STOP_OWNERSHIP_FAULT"
+            if self.hard_deadline_active
+            else "ACTION_COMMUNICATION_FAULT"
+        )
         self._publish_state(
             f"{self.action_fault_reason}; autonomous speed locked; stop/restart the "
             "owning Nav2 or traversal controller before restarting autonomy"
@@ -3207,7 +3831,11 @@ class AutonomousMission(Node):
         """Bound every Action handshake that otherwise has no ROS-side deadline."""
         if self.action_ownership_fault:
             self._publish_immediate_stop()
-            self.state = "ACTION_COMMUNICATION_FAULT"
+            self.state = (
+                "INCOMPLETE_STOP_OWNERSHIP_FAULT"
+                if self.hard_deadline_active
+                else "ACTION_COMMUNICATION_FAULT"
+            )
             return True
         response_timeout = float(self.params["action_response_timeout"])
         cancel_timeout = float(self.params["action_cancel_timeout"])
@@ -3327,10 +3955,32 @@ class AutonomousMission(Node):
         standard map-frame PoseStamped, so neither the planner nor a future base driver
         needs to understand competition obstacle names.
         """
+        deadline_now = time.monotonic()
+        if self.hard_deadline_active or self._hard_deadline_reached(deadline_now):
+            self._enforce_hard_deadline(deadline_now)
+            return False
+        if self._work_deadline_reached(deadline_now):
+            self._begin_return_phase(deadline_now)
+        if (
+            self.return_phase_requested
+            and not self._return_phase_nav_purpose(str(purpose))
+        ):
+            return False
         if (
             self.nav_handle is not None
             or self.nav_send_pending
             or self.action_ownership_fault
+            or self.traverse_handle is not None
+            or self.traverse_send_pending
+            or self.traverse_cancel_pending
+            or self.traversal_verification is not None
+            or self.state in (
+                "HANDOFF",
+                "TRAVERSING",
+                "VERIFYING_TRAVERSAL_RESULT",
+                "WAITING_FOR_TRAVERSAL_CONTROLLER",
+            )
+            or not self._navigation_health_is_stable(deadline_now)
             or not self.nav_client.server_is_ready()
         ):
             return False
@@ -3346,7 +3996,7 @@ class AutonomousMission(Node):
             # 冻结“创建接近目标时”已经通过多帧和几何校验的语义。接近碰撞膨胀边界后，
             # 局部点云常在 BAR/WALL/STEP 间变化；result 回调只能在空间和粗类型仍一致时
             # 使用该 ID，不能把它无条件套给相邻结构。
-            locked_id = canonical_obstacle_id(self.locked_obstacle_id)
+            locked_id = normalize_semantic_id(self.locked_obstacle_id)
             resolved_id = (
                 locked_id
                 if is_actionable_semantic_id(locked_id)
@@ -3361,6 +4011,11 @@ class AutonomousMission(Node):
             obstacle_id = resolved_id
         # 只有 ActionClient 真正返回 Future 后才提交本地状态。server 未 ready 或同步
         # 发送失败时，调用方据 False 保留补扫次数、恢复动作和回访冷却，不虚构已执行。
+        # This is the sole transition that reopens the mission's Nav2 velocity branch.
+        # cmd_vel_gate clears its cached Twist on the true->false stop edge, therefore only
+        # commands generated after this new goal request can reach the robot.
+        self._publish_autonomy_lease(True)
+        self.autonomy_stop_pub.publish(Bool(data=False))
         try:
             future = self.nav_client.send_goal_async(goal)
         except Exception as exc:
@@ -3377,6 +4032,7 @@ class AutonomousMission(Node):
         self.nav_revisit_id = str(revisit_id) if purpose == "revisit_obstacle" else ""
         self.nav_cancel_reason = ""
         self.nav_target = (pose.pose.position.x, pose.pose.position.y)
+        self.nav_goal_pose = deepcopy(pose)
         self.nav_progress_pose = self._motion_pose(now)
         self.nav_progress_time = now
         self.nav_obstacle_position = obstacle_position
@@ -3406,6 +4062,11 @@ class AutonomousMission(Node):
             return
         self.nav_send_pending = False
         self.nav_send_started = 0.0
+        deadline_now = time.monotonic()
+        if self.hard_deadline_active or self._hard_deadline_reached(deadline_now):
+            self._enforce_hard_deadline(deadline_now)
+        elif self._work_deadline_reached(deadline_now):
+            self._begin_return_phase(deadline_now)
         try:
             handle = future.result()
             response_error = ""
@@ -3416,14 +4077,59 @@ class AutonomousMission(Node):
             )
             return
         if handle is None or not handle.accepted:
+            response_purpose = str(self.nav_purpose)
+            if self.hard_deadline_active:
+                self.nav_target = None
+                self.nav_goal_pose = None
+                self.nav_obstacle_position = None
+                self.nav_obstacle_id = ""
+                self.nav_revisit_id = ""
+                self.nav_purpose = ""
+                self._remain_incomplete_stop(
+                    "Nav2 response released after hard deadline"
+                )
+                return
+            if (
+                self.return_phase_requested
+                and not self._return_phase_nav_purpose(response_purpose)
+            ):
+                self.nav_target = None
+                self.nav_goal_pose = None
+                self.nav_obstacle_position = None
+                self.nav_obstacle_id = ""
+                self.nav_revisit_id = ""
+                self.nav_purpose = ""
+                self._publish_immediate_stop()
+                self.state = "RETURNING_TO_FINISH"
+                self._publish_state(
+                    "non-return Nav2 response ended after work deadline"
+                )
+                return
             # Action server 在 Nav2 lifecycle 激活之前已经可被发现，但会拒绝目标。这不是
             # 路径规划失败，不能污染 blocked_frontiers；短暂退避后原目标可重新选择。
+            health_interrupted = not self._navigation_health_is_stable(
+                time.monotonic()
+            )
+            if health_interrupted:
+                self._capture_health_interrupted_nav()
+                self.navigation_health_fault_active = True
             self.nav_target = None
+            self.nav_goal_pose = None
             self.nav_obstacle_position = None
             self.nav_obstacle_id = ""
+            if health_interrupted:
+                self.nav_revisit_id = ""
+                self.nav_purpose = ""
+                self._publish_immediate_stop()
+                self.state = "WAITING_FOR_NAVIGATION_HEALTH"
+                self._publish_state(
+                    "Nav2 response ended during navigation health pause; target retained"
+                )
+                return
             self._defer_obstacle_revisit(self.nav_revisit_id, time.monotonic())
             self.nav_revisit_id = ""
             self.nav_purpose = ""
+            self._publish_immediate_stop()
             self.nav_retry_until = time.monotonic() + float(
                 self.params["nav_rejection_retry_delay"]
             )
@@ -3434,8 +4140,18 @@ class AutonomousMission(Node):
         self.nav_handle, self.nav_started = handle, time.monotonic()
         self.nav_progress_pose = self._motion_pose()
         self.nav_progress_time = self.nav_started
-        if not self.enabled:
+        if self.hard_deadline_active:
+            self._cancel_nav("hard mission deadline")
+        elif (
+            self.return_phase_requested
+            and not self._return_phase_nav_purpose(self.nav_purpose)
+        ):
+            self._cancel_nav("work_deadline")
+        elif not self.enabled:
             self._cancel_nav("stopped_before_accept")
+        elif not self._navigation_health_is_stable(time.monotonic()):
+            self._capture_health_interrupted_nav()
+            self._cancel_nav("navigation_health_fault")
         try:
             result_future = handle.get_result_async()
             result_future.add_done_callback(
@@ -3456,23 +4172,33 @@ class AutonomousMission(Node):
         # Nav2 重启、DDS 断连或 Action server 销毁时，结果 Future 可以异常结束。
         # 此时无法证明旧控制器已经停止，必须锁住自主速度；不能清句柄后直接重试，
         # 更不能把先前的 stall 解释成安全越障入口。
+        deadline_now = time.monotonic()
+        hard_deadline_due = bool(
+            getattr(self, "hard_deadline_active", False)
+            or (
+                getattr(self, "home_pose", None) is not None
+                and self._hard_deadline_reached(deadline_now)
+            )
+        )
         try:
             result = future.result()
             status = int(result.status) if result is not None else 0
             result_error = ""
         except Exception as exc:
+            if hard_deadline_due:
+                self._enforce_hard_deadline(deadline_now)
             self.get_logger().error(f"Nav2 result failed: {exc}")
             self._enter_action_ownership_fault(
                 "Nav2 result failed before motion ownership was released"
             )
             return
         purpose, target = self.nav_purpose, self.nav_target
-        was_cancel_pending = bool(self.nav_cancel_pending)
         revisit_id = self.nav_revisit_id
         cancel_reason = self.nav_cancel_reason
         obstacle_position = self.nav_obstacle_position
         approach_initial_id = self.nav_obstacle_id
         self.nav_handle, self.nav_target, self.nav_cancel_pending = None, None, False
+        self.nav_goal_pose = None
         self.nav_cancel_started = 0.0
         self.nav_purpose = ""
         self.nav_progress_pose = None
@@ -3480,9 +4206,36 @@ class AutonomousMission(Node):
         self.nav_obstacle_id = ""
         self.nav_revisit_id = ""
         self.nav_cancel_reason = ""
-        if was_cancel_pending:
-            self._release_autonomy_stop_after_cancel()
+        # A terminal result ends this Nav2 ownership interval.  Clear the last Twist and
+        # stay locked while the state machine decides between HANDOFF, recovery and return.
+        self._publish_immediate_stop()
         succeeded = status == GoalStatus.STATUS_SUCCEEDED
+        if hard_deadline_due:
+            self._enforce_hard_deadline(deadline_now)
+        elif self._work_deadline_reached(deadline_now):
+            self._begin_return_phase(deadline_now)
+        if self.hard_deadline_active:
+            self._remain_incomplete_stop(
+                f"Nav2 {purpose or 'goal'} ownership released after hard deadline"
+            )
+            return
+        if (
+            self.return_phase_requested
+            and not self._return_phase_nav_purpose(purpose)
+        ):
+            self.state = "RETURNING_TO_FINISH"
+            self._publish_state(
+                f"unfinished Nav2 {purpose} ended at work deadline; returning"
+            )
+            return
+        if cancel_reason == "navigation_health_fault":
+            # Preserve the frozen request for stable recovery.  No blocked frontier,
+            # revisit backoff, search-turn increment or approach-stall count is changed.
+            self.state = "WAITING_FOR_NAVIGATION_HEALTH"
+            self._publish_state(
+                f"Nav2 {purpose} paused by navigation health; target retained"
+            )
+            return
         if purpose == "verify_obstacle":
             self.semantic_settle_until = time.monotonic() + float(
                 self.params["semantic_post_turn_settle_time"]
@@ -3702,7 +4455,8 @@ class AutonomousMission(Node):
                     "limits=("
                     f"d<={float(self.params['approach_stall_handoff_max_distance']):.2f}, "
                     f"|y|<={float(self.params['approach_stall_handoff_max_lateral']):.2f}, "
-                    f"|yaw|<={float(self.params['approach_stall_handoff_max_heading_error']):.2f}); "
+                    "|yaw|<="
+                    f"{float(self.params['approach_stall_handoff_max_heading_error']):.2f}); "
                     "changing heading and observation station before replanning"
                 )
             # 到达旧入口后若最新证据已经属于另一个障碍，释放目标锁再探索，不能把新障碍
@@ -3769,7 +4523,7 @@ class AutonomousMission(Node):
 
     def _validated_traverse_snapshot(
         self, now: float
-    ) -> Tuple[Optional[TraversalGuidance], str]:
+    ) -> Tuple[Optional[TraversalActionSnapshot], str]:
         """Atomically revalidate live geometry immediately before Action submission.
 
         A pending handoff may wait for a Nav2 cancellation result or for a controller
@@ -3779,11 +4533,9 @@ class AutonomousMission(Node):
         a fresh NavigationSafety sample before copying any fields into the Action goal.
         """
         live = self.guidance
-        semantic_id = str(self.pending_traverse_id)
+        queued_semantic_id = str(self.pending_traverse_id)
         pending_position = self.pending_traverse_position
-        safety = self.last_safety
         guidance_received = float(self.guidance_received)
-        safety_received = float(self.safety_received)
 
         if not guidance_is_well_formed(live):
             return None, "latest guidance is invalid"
@@ -3796,13 +4548,22 @@ class AutonomousMission(Node):
             < float(self.params["minimum_obstacle_confidence"])
         ):
             return None, "latest guidance no longer authorizes traversal"
+        live_semantic_id = normalize_semantic_id(live.semantic_id)
+        if (
+            not is_actionable_semantic_id(live_semantic_id)
+            or live_semantic_id != queued_semantic_id
+        ):
+            return None, "live semantic identity differs from the queued obstacle"
         if pending_position is None or not all(
             isfinite(float(value)) for value in pending_position
         ):
             return None, "pending obstacle position is invalid"
-        robot = self._robot_pose()
+        # Both map projections use historical TF at their own sensor Header.  Using the
+        # latest transform here would move an old relative observation with the current
+        # robot pose and could make two different obstacles appear spatially identical.
+        robot = self._robot_pose(live.header)
         if robot is None:
-            return None, "map pose is unavailable"
+            return None, "historical map pose for Guidance is unavailable"
         live_position = (
             float(robot[0])
             + cos(float(robot[2])) * float(live.distance)
@@ -3820,18 +4581,37 @@ class AutonomousMission(Node):
         ):
             return None, "live guidance belongs to a different map-space obstacle"
         if semantic_id_for_action(
-            semantic_id, action_obstacle_type(live)
-        ) != semantic_id:
+            live_semantic_id, action_obstacle_type(live)
+        ) != live_semantic_id:
             return None, "live coarse type conflicts with the pending obstacle"
         if self._arena_boundary_ahead(float(now)):
             return None, "arena boundary evidence forbids traversal"
-        if (
-            safety is None
-            or float(now) - safety_received
-            > float(self.params["safety_geometry_stale_seconds"])
-            or not obstacle_geometry_fits_candidate(semantic_id, safety)
-        ):
+        safety = self._latest_navigation_safety(float(now), live)
+        if safety is None:
+            return None, "fresh synchronized NavigationSafety snapshot is unavailable"
+        if int(safety.valid_points) <= 0:
+            return None, "NavigationSafety has no valid metric points"
+        if not obstacle_geometry_fits_candidate(live_semantic_id, safety):
             return None, "fresh NavigationSafety geometry does not match"
+        safety_robot = self._robot_pose(safety.header)
+        if safety_robot is None:
+            return None, "historical map pose for NavigationSafety is unavailable"
+        safety_position = (
+            float(safety_robot[0])
+            + cos(float(safety_robot[2])) * float(safety.distance)
+            - sin(float(safety_robot[2])) * float(safety.lateral_offset),
+            float(safety_robot[1])
+            + sin(float(safety_robot[2])) * float(safety.distance)
+            + cos(float(safety_robot[2])) * float(safety.lateral_offset),
+        )
+        if (
+            not all(isfinite(value) for value in safety_position)
+            or hypot(
+                safety_position[0] - live_position[0],
+                safety_position[1] - live_position[1],
+            ) > float(self.params["safety_guidance_spatial_tolerance"])
+        ):
+            return None, "Guidance and NavigationSafety disagree in map space"
         # This is the widest deliberately configured handoff envelope.  Strict READY
         # and direct handoffs enter with tighter limits; a measured five-second Nav2
         # inflation-layer stall may use these values so the real controller can perform
@@ -3845,17 +4625,69 @@ class AutonomousMission(Node):
             > float(self.params["approach_stall_handoff_max_heading_error"])
         ):
             return None, "live entry pose moved outside the handoff envelope"
-        # Use the last pre-Action measurement as the crossing plane.  It is still tied
-        # to the queued target by the spatial gate above, but is more accurate than an
-        # edge measured before a potentially multi-second cancellation/controller wait.
-        self.pending_traverse_position = live_position
-        return live, ""
+        guidance_ready = bool(
+            bool(live.ready_for_handoff)
+            and int(live.phase) == TraversalGuidance.PHASE_READY
+        )
+        preparing_handoff = bool(
+            not bool(live.ready_for_handoff)
+            and int(live.phase) in {
+                TraversalGuidance.PHASE_APPROACH,
+                TraversalGuidance.PHASE_ALIGN,
+            }
+        )
+        if not (guidance_ready or preparing_handoff):
+            return None, "Guidance phase cannot define a traversal entry stage"
+
+        # PHASE_READY is deliberately broader than the controller's lift/foot-placement
+        # window: it means Nav2 may release ownership at the obstacle boundary.  Preserve
+        # that distinction in the Action contract.  A 1.20 m Guidance READY sample, for
+        # example, becomes ENTRY_PREPARING until the external controller reaches its
+        # independently calibrated 0.45 m lift-ready envelope.
+        controller_lift_ready = bool(
+            guidance_ready
+            and float(live.distance)
+            <= float(self.params["traversal_ready_max_distance"])
+            and abs(float(live.lateral_offset))
+            <= float(self.params["traversal_ready_max_lateral"])
+            and abs(float(live.heading_error))
+            <= float(self.params["traversal_ready_max_heading_error"])
+        )
+        if controller_lift_ready:
+            entry_stage = TraverseObstacle.Goal.ENTRY_READY
+        else:
+            entry_stage = TraverseObstacle.Goal.ENTRY_PREPARING
+        return TraversalActionSnapshot(
+            guidance=deepcopy(live),
+            safety=deepcopy(safety),
+            semantic_id=live_semantic_id,
+            action_type=action_type_for_semantic(
+                live_semantic_id,
+                action_obstacle_type(live),
+            ),
+            entry_stage=entry_stage,
+            robot_pose=(float(robot[0]), float(robot[1]), float(robot[2])),
+            obstacle_position=(float(live_position[0]), float(live_position[1])),
+        ), ""
 
     def _start_traverse(self, guidance) -> bool:
+        # Defensive ownership boundary: every production caller should already be in
+        # HANDOFF, but a direct/test/integration call must never start Traverse while
+        # cached Nav2 velocity remains unlocked.
+        self._publish_immediate_stop()
+        deadline_now = time.monotonic()
+        if self.hard_deadline_active or self._hard_deadline_reached(deadline_now):
+            self._enforce_hard_deadline(deadline_now)
+            return False
+        if self._work_deadline_reached(deadline_now):
+            self._begin_return_phase(deadline_now)
+            return False
         if (
             self.traverse_handle is not None
             or self.traverse_send_pending
             or self.action_ownership_fault
+            or self.hard_deadline_active
+            or self.return_phase_requested
             or not self.traverse_client.server_is_ready()
         ):
             return False
@@ -3869,48 +4701,76 @@ class AutonomousMission(Node):
                 "obstacle identity is not stable", time.monotonic()
             )
             return False
-        now = time.monotonic()
-        live_guidance, rejection_reason = self._validated_traverse_snapshot(now)
-        if live_guidance is None:
+        now = deadline_now
+        snapshot, rejection_reason = self._validated_traverse_snapshot(now)
+        if snapshot is None:
             self._discard_pending_traverse(rejection_reason, now)
             return False
-        # Copy only the snapshot that passed the final atomic gate.  The older object
-        # retained in ``pending_traverse`` may have initiated scheduling, but cannot
-        # supply distance/alignment fields after an asynchronous wait.
-        guidance = live_guidance
-        self.pending_traverse = live_guidance
-        goal = TraverseObstacle.Goal()
-        # 冻结 Action 开始时的真实机体位置；成功回调再取出口位置，形成长障碍去重线段。
-        # 不能用障碍前缘位置代替，因为它会随点云视角漂移。
-        if self.pending_traverse_robot_start is None:
-            robot = self._robot_pose()
-            if robot is not None:
-                self.pending_traverse_robot_start = (robot[0], robot[1])
-        goal.obstacle_type = action_type_for_semantic(
-            self.pending_traverse_id,
-            action_obstacle_type(guidance),
+        # Replace every queued geometry field with the immutable pair that passed the
+        # final gate.  The old pending message remains scheduling history only and is
+        # never copied into the controller goal or crossing posterior.
+        guidance = snapshot.guidance
+        safety = snapshot.safety
+        self.pending_traverse = guidance
+        self.pending_traverse_id = snapshot.semantic_id
+        self.pending_traverse_position = snapshot.obstacle_position
+        self.pending_traverse_robot_start = (
+            snapshot.robot_pose[0], snapshot.robot_pose[1]
         )
-        goal.obstacle_id = str(self.pending_traverse_id)
+        goal = TraverseObstacle.Goal()
+        goal.header = deepcopy(guidance.header)
+        goal.obstacle_type = int(snapshot.action_type)
+        goal.obstacle_id = str(snapshot.semantic_id)
+        goal.entry_stage = int(snapshot.entry_stage)
         for field in ("confidence", "distance", "lateral_offset", "heading_error"):
             setattr(goal, field, getattr(guidance, field))
-        # 与 Nav2 相同，先获得 Future 再提交本地 pending 状态；同步异常可能处于
-        # “请求已送达但调用端未拿到响应”的未知所有权区间，因此直接锁住自主速度。
+        for field in (
+            "obstacle_height",
+            "pit_depth",
+            "slope_pitch",
+            "slope_roll",
+            "roughness",
+            "width",
+            "structure_heading",
+            "structure_heading_confidence",
+            "clearance_height",
+            "valid_points",
+        ):
+            setattr(goal, field, getattr(safety, field))
+        # Arm the generation before sending so even an unusually fast in-process test
+        # server cannot deliver feedback into the previous goal's state.  A synchronous
+        # send exception still has unknown delivery semantics and enters the existing
+        # fail-closed ownership fault path.
+        token = self.traverse_generation + 1
+        self.traverse_generation = token
+        self.state, self.traverse_started = "TRAVERSING", now
+        self.traverse_send_started = now
+        self.traverse_send_pending = True
+        self.traverse_entry_stage = int(goal.entry_stage)
+        self.traverse_feedback_state = 0
+        self.traverse_feedback_progress = 0.0
+        self.traverse_feedback_received = 0.0
+        self.traverse_progress_time = now
+        self.traverse_feedback_invalid = False
+        self.traverse_cancel_reason = ""
         try:
-            future = self.traverse_client.send_goal_async(goal)
+            future = self.traverse_client.send_goal_async(
+                goal,
+                feedback_callback=(
+                    lambda message, request_token=token: self._traverse_feedback(
+                        message, request_token
+                    )
+                ),
+            )
         except Exception as exc:
             self.get_logger().error(f"TraverseObstacle goal request failed: {exc}")
             self._enter_action_ownership_fault(
                 "TraverseObstacle request failed with unknown delivery state"
             )
             return False
-        token = self.traverse_generation + 1
-        self.traverse_generation = token
-        self.state, self.traverse_started = "TRAVERSING", now
-        self.traverse_send_started = now
-        self.traverse_send_pending = True
         self._publish_state(
             f"handoff obstacle={self.pending_traverse_id}, "
-            f"action_type={goal.obstacle_type}"
+            f"action_type={goal.obstacle_type}, entry_stage={goal.entry_stage}"
         )
         try:
             future.add_done_callback(
@@ -3934,6 +4794,7 @@ class AutonomousMission(Node):
         Gazebo、真机 SDK 或未来运动控制器都只能通过同一个 Action 合同接入。任务管理器
         不猜测腿部动作，也不会因服务缺失继续选择障碍背后的前沿目标。
         """
+        self._publish_immediate_stop()
         self.pending_traverse = target
         self.pending_traverse_id = self._action_semantic_id(
             target,
@@ -3980,6 +4841,95 @@ class AutonomousMission(Node):
             "TraverseObstacle controller unavailable for "
             f"{float(self.params['controller_wait_timeout']):.1f} seconds",
         )
+
+    def _traverse_feedback(
+        self, feedback_message, generation: Optional[int] = None
+    ) -> None:
+        """Validate feedback for one Action generation and advance its watchdog.
+
+        Feedback is advisory only after it passes this protocol boundary.  Malformed,
+        out-of-order or regressing samples never raise through the rclpy executor and can
+        never prove task completion.  If a handle is already known we request cancellation;
+        otherwise the invalid latch is carried into the goal-response callback, which then
+        cancels the accepted handle without releasing unknown remote ownership early.
+        """
+        token = self.traverse_generation if generation is None else int(generation)
+        if token != self.traverse_generation:
+            return
+        if not (self.traverse_send_pending or self.traverse_handle is not None):
+            return
+        try:
+            feedback = feedback_message.feedback
+            state = int(feedback.state)
+            progress = float(feedback.progress)
+            valid = traversal_feedback_transition_is_valid(
+                self.traverse_entry_stage,
+                self.traverse_feedback_state,
+                self.traverse_feedback_progress,
+                state,
+                progress,
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            state, progress, valid = 0, float("nan"), False
+        if not valid:
+            if not self.traverse_feedback_invalid:
+                self.get_logger().error(
+                    "Invalid TraverseObstacle feedback; cancelling without "
+                    "crediting completion"
+                )
+            self.traverse_feedback_invalid = True
+            self._publish_immediate_stop()
+            if self.traverse_handle is not None and not self.traverse_cancel_pending:
+                self._cancel_traverse("invalid feedback protocol")
+            return
+        now = time.monotonic()
+        meaningful_progress = bool(
+            self.traverse_feedback_state == 0
+            or state != self.traverse_feedback_state
+            or progress > self.traverse_feedback_progress + 1e-6
+        )
+        self.traverse_feedback_state = state
+        self.traverse_feedback_progress = progress
+        self.traverse_feedback_received = now
+        if meaningful_progress:
+            self.traverse_progress_time = now
+
+    def _traverse_feedback_proves_stabilizing(self) -> bool:
+        """Require the canonical terminal state and complete global progress.
+
+        A controller that returns success quickly without feedback, or reaches a named
+        state while reporting partial progress, has not fulfilled the Action contract and
+        cannot enter task-level crossing verification.
+        """
+        return bool(
+            not self.traverse_feedback_invalid
+            and self.traverse_feedback_received > 0.0
+            and self.traverse_feedback_state
+            == TraverseObstacle.Feedback.STATE_STABILIZING
+            and self.traverse_feedback_progress >= 1.0 - 1e-6
+        )
+
+    def _check_traversal_progress(self, now: float) -> bool:
+        """Cancel a known traversal whose valid state/progress stopped advancing.
+
+        The cancellation request does not clear the handle.  The ordinary result/cancel
+        watchdogs continue to own that boundary, so a silent external controller remains
+        a locked, observable owner rather than being replaced by another Action.
+        """
+        if (
+            self.traverse_handle is None
+            or self.traverse_cancel_pending
+            or self.traverse_feedback_invalid
+        ):
+            return False
+        if timeout_reached(
+            self.traverse_progress_time,
+            float(now),
+            float(self.params["traversal_progress_timeout"]),
+        ):
+            self._cancel_traverse("traversal feedback made no progress")
+            return True
+        return False
 
     def _traverse_cancel_response(
         self,
@@ -4030,6 +4980,7 @@ class AutonomousMission(Node):
         self.traverse_cancel_pending = True
         self.traverse_cancel_generation += 1
         cancel_token = self.traverse_cancel_generation
+        self.traverse_cancel_reason = str(reason)
         self.traverse_cancel_started = time.monotonic()
         try:
             future.add_done_callback(
@@ -4065,6 +5016,11 @@ class AutonomousMission(Node):
             return
         self.traverse_send_pending = False
         self.traverse_send_started = 0.0
+        deadline_now = time.monotonic()
+        if self.hard_deadline_active or self._hard_deadline_reached(deadline_now):
+            self._enforce_hard_deadline(deadline_now)
+        elif self._work_deadline_reached(deadline_now):
+            self._begin_return_phase(deadline_now)
         try:
             handle = future.result()
             response_error = ""
@@ -4077,6 +5033,25 @@ class AutonomousMission(Node):
             )
             return
         if handle is None or not handle.accepted:
+            if self.hard_deadline_active:
+                self.pending_traverse = None
+                self.pending_traverse_position = None
+                self.pending_traverse_robot_start = None
+                self.pending_traverse_id = ""
+                self._remain_incomplete_stop(
+                    "TraverseObstacle response released after hard deadline"
+                )
+                return
+            if self.return_phase_requested:
+                self.pending_traverse = None
+                self.pending_traverse_position = None
+                self.pending_traverse_robot_start = None
+                self.pending_traverse_id = ""
+                self.state = "RETURNING_TO_FINISH"
+                self._publish_state(
+                    "TraverseObstacle response ended after return deadline"
+                )
+                return
             semantic_id = self.pending_traverse_id
             position = self.pending_traverse_position
             self.pending_traverse = None
@@ -4091,7 +5066,18 @@ class AutonomousMission(Node):
             )
             return
         self.traverse_handle = handle
-        if not self.enabled:
+        # The response handshake is bounded separately.  Do not subtract DDS/service
+        # latency from the controller's full progress window, but also do not erase a
+        # legitimate feedback sample that arrived before this callback was scheduled.
+        if self.traverse_feedback_received <= 0.0:
+            self.traverse_progress_time = time.monotonic()
+        if self.hard_deadline_active:
+            self._cancel_traverse("hard mission deadline")
+        elif self.return_phase_requested:
+            self._cancel_traverse("work deadline return")
+        elif self.traverse_feedback_invalid:
+            self._cancel_traverse("invalid feedback protocol")
+        elif not self.enabled:
             self._cancel_traverse("stopped_before_accept")
         try:
             result_future = handle.get_result_async()
@@ -4121,27 +5107,48 @@ class AutonomousMission(Node):
             return
         # DDS/服务器异常会让 result Future 抛出，而不是返回失败 Result。此时远端可能
         # 仍在运动，任务锁住自主速度并保持清单未完成，绝不沿用上一次 success。
+        deadline_now = time.monotonic()
+        hard_deadline_due = bool(
+            getattr(self, "hard_deadline_active", False)
+            or (
+                getattr(self, "home_pose", None) is not None
+                and self._hard_deadline_reached(deadline_now)
+            )
+        )
         try:
             wrapped = future.result()
             result_exception = ""
         except Exception as exc:  # rclpy future exposes several middleware errors.
+            if hard_deadline_due:
+                self._enforce_hard_deadline(deadline_now)
             self.get_logger().error(f"Action result exception: {exc}")
             self._enter_action_ownership_fault(
                 "TraverseObstacle result failed before ownership was released"
             )
             return
+        feedback_proved_stabilizing = self._traverse_feedback_proves_stabilizing()
+        feedback_invalid = bool(self.traverse_feedback_invalid)
+        cancel_reason = str(self.traverse_cancel_reason)
+        try:
+            wrapped_status = int(getattr(wrapped, "status", 0))
+            action_result = getattr(wrapped, "result", None)
+            controller_succeeded = bool(getattr(action_result, "success", False))
+        except (TypeError, ValueError, OverflowError):
+            wrapped_status = 0
+            action_result = None
+            controller_succeeded = False
         action_succeeded = bool(
-            wrapped
-            and int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED
-            and wrapped.result.success
+            wrapped_status == GoalStatus.STATUS_SUCCEEDED
+            and controller_succeeded
+            and feedback_proved_stabilizing
+            and not cancel_reason
         )
         controller_message = (
-            str(wrapped.result.message)
-            if wrapped and wrapped.result
+            str(getattr(action_result, "message", ""))
+            if action_result is not None
             else result_exception
         )
         completed_position = self.pending_traverse_position
-        was_cancel_pending = bool(self.traverse_cancel_pending)
         completed_robot_start = self.pending_traverse_robot_start
         completed_type = (
             int(self.pending_traverse.obstacle_type)
@@ -4152,15 +5159,38 @@ class AutonomousMission(Node):
         self.traverse_handle, self.pending_traverse = None, None
         self.traverse_cancel_pending = False
         self.traverse_cancel_started = 0.0
+        self.traverse_cancel_reason = ""
+        self.traverse_entry_stage = 0
+        self.traverse_feedback_state = 0
+        self.traverse_feedback_progress = 0.0
+        self.traverse_feedback_received = 0.0
+        self.traverse_progress_time = 0.0
+        self.traverse_feedback_invalid = False
         self.pending_traverse_position = None
         self.pending_traverse_robot_start = None
         self.pending_traverse_id = ""
-        if was_cancel_pending:
-            self._release_autonomy_stop_after_cancel()
+        # Keep Nav2 locked during task-level crossing/landing verification and recovery.
+        # Only the next _send_nav_goal call may reopen the autonomous velocity branch.
+        self._publish_immediate_stop()
+        if hard_deadline_due:
+            self._enforce_hard_deadline(deadline_now)
+        elif self._work_deadline_reached(deadline_now):
+            self._begin_return_phase(deadline_now)
         # 无论 Action 成功、失败还是被取消，下一障碍都必须重新累计入口停滞，不能继承
         # 当前障碍获得的交接许可。
         self.approach_stall_id = ""
         self.approach_stall_count = 0
+        if self.hard_deadline_active:
+            self._remain_incomplete_stop(
+                "TraverseObstacle ownership released after hard deadline"
+            )
+            return
+        if self.return_phase_requested:
+            self.state = "RETURNING_TO_FINISH"
+            self._publish_state(
+                "unfinished traversal ended at work deadline; returning"
+            )
+            return
         if not self.enabled:
             self.state = "STOPPED"
             return
@@ -4194,7 +5224,9 @@ class AutonomousMission(Node):
         self._reject_traversal_completion(
             completed_id,
             completed_position,
-            "controller result/ROS Action status did not prove success"
+            "controller result/ROS Action status/feedback did not prove success"
+            + (" (invalid feedback protocol)" if feedback_invalid else "")
+            + (f" (cancel={cancel_reason})" if cancel_reason else "")
             + (f" ({controller_message})" if controller_message else ""),
         )
 
@@ -4208,6 +5240,7 @@ class AutonomousMission(Node):
         and one bounded in-place viewpoint change.  The latter is executed by Nav2 and
         remains subject to the normal health/scan watchdogs.
         """
+        self._publish_immediate_stop()
         now = time.monotonic()
         self.traversal_verification = None
         semantic_id = str(semantic_id)
@@ -4250,7 +5283,18 @@ class AutonomousMission(Node):
         robot_exit: Tuple[float, float, float],
     ) -> None:
         """Commit one obstacle after controller and independent task checks pass."""
+        deadline_now = time.monotonic()
+        if self.hard_deadline_active or self._hard_deadline_reached(deadline_now):
+            if not self.hard_deadline_active:
+                self._enforce_hard_deadline(deadline_now)
+            self.traversal_verification = None
+            self._remain_incomplete_stop(
+                "late traversal verification ignored after hard deadline"
+            )
+            return
+        self._publish_immediate_stop()
         self.completed_obstacles.append((
+            verification.semantic_id,
             verification.obstacle_type,
             verification.obstacle_position[0],
             verification.obstacle_position[1],
@@ -4341,7 +5385,17 @@ class AutonomousMission(Node):
             )
 
     def _tick(self):
+        ros_now = self.get_clock().now()
+        if ros_clock_moved_backward(ros_now, self.last_ros_clock_time):
+            self._reset_observation_epoch(ros_now)
+        else:
+            self.last_ros_clock_time = ros_now
         self.state_pub.publish(String(data=self.state))
+        # The volatile heartbeat is ownership, not a generic enable bit.  It remains true
+        # while a goal/cancel/fault may still own motion, even after Ctrl-C sets enabled=false.
+        # A clean terminal/shutdown path publishes false only after every Action is released.
+        if self._autonomy_owner_active():
+            self._publish_autonomy_lease(True)
         # 20 Hz 速度门只接受新鲜许可；任务崩溃或 Ctrl-C 后最多一个心跳
         # 窗口便恢复默认拒绝。许可仅让速度门提取有界 angular.z，所有线速度
         # 都被强制归零。approach 必须包含在内：障碍将地形限速置零时，机体仍需要
@@ -4350,14 +5404,40 @@ class AutonomousMission(Node):
         self.rotation_recovery_pub.publish(Bool(data=bool(
             navigation_purpose_allows_yaw_only_recovery(self.nav_purpose)
             and (self.nav_handle is not None or self.nav_send_pending)
+            and self._navigation_health_is_stable(time.monotonic())
         )))
         self._publish_inventory()
         now = time.monotonic()
+        # The hard deadline is evaluated before sensor/health/map early returns.  A TF
+        # outage at 300 s must not leave a Nav2 or traversal owner running indefinitely.
+        if self.hard_deadline_active or self._hard_deadline_reached(now):
+            self._enforce_hard_deadline(now)
+            self._check_action_watchdogs(now)
+            return
         # Action response/cancel Futures must be monitored even if map/TF input drops;
         # otherwise an unrelated sensor outage could hide an unknown motion owner.
         if self._check_action_watchdogs(now):
             return
         if not self.enabled:
+            return
+        if self._work_deadline_reached(now) and not self.return_phase_requested:
+            if self._begin_return_phase(now):
+                return
+        elif self.return_phase_requested and (
+            self.traverse_handle is not None
+            or self.traverse_send_pending
+            or (
+                (self.nav_handle is not None or self.nav_send_pending)
+                and not self._return_phase_nav_purpose(self.nav_purpose)
+            )
+        ):
+            if self._begin_return_phase(now):
+                return
+        if self._check_traversal_progress(now):
+            return
+        # Health is a timed lease, not a one-shot status.  A false/stale heartbeat locks
+        # Nav2 immediately and preserves the interrupted request for stable recovery.
+        if self._handle_navigation_health(now):
             return
         if (
             self.nav_handle is not None
@@ -4614,22 +5694,16 @@ class AutonomousMission(Node):
                 self._start_traverse(self.pending_traverse)
             return
 
-        # 完成八项后立即去终点；达到总任务时限也会携带已完成成绩结束，避免无前沿时
-        # 永远原地等待。默认终点是本次任务实时捕获的起点；若 /autonomy/finish_pose
-        # 提供正式终点则优先使用它。两种情况都不读取仿真 world。
+        # 完成八项、探索有界结束或工作窗口耗尽后立即去终点。hard deadline 只会进入
+        # INCOMPLETE_STOP，绝不会由本分支伪装成“已返航”。默认终点来自实时起点；若
+        # /autonomy/finish_pose 提供正式终点则优先使用，两种情况都不读取仿真 world。
         mission_elapsed = now - self.mission_started
-        # ``mission_timeout`` 是“启动到回到终点”的总预算，不是可以全部用于探索的时间。
-        # 提前保留返程窗口，防止直到 300 秒才开始回头。正在执行的 TraverseObstacle
-        # 不会被硬切断；它完成独立落地验证后，下一 tick 立即进入返程。
-        work_deadline = max(
-            0.0,
-            float(self.params["mission_timeout"])
-            - float(self.params["return_time_reserve"]),
-        )
-        mission_timed_out = mission_elapsed >= work_deadline
+        # The earlier deadline gate latches ``return_phase_requested`` and drains any
+        # non-return owner before this scheduling branch.  ``mission_timeout`` itself is
+        # enforced near the top of the tick as a hard stop, even when map/TF is missing.
         if (
             self._all_obstacles_complete()
-            or mission_timed_out
+            or self.return_phase_requested
             or self.exploration_exhausted
         ):
             if self.nav_handle is not None:
@@ -5079,6 +6153,8 @@ def main(args=None):
             node._publish_immediate_stop()
             node._cancel_nav("shutdown")
             node._cancel_traverse("shutdown")
+            if node._autonomy_owner_active():
+                node._publish_autonomy_lease(True)
             # 正常退出尽量等到 result 释放控制权，而不是固定只 spin 0.75 s。窗口覆盖
             # “pending response 后再 cancel”的两个连续预算并封顶 5 s；若仍不确定，最后
             # 一条自主 Twist 锁保持为 transient-local。Nav2 故障可处理 Nav2/核心栈；
@@ -5110,6 +6186,8 @@ def main(args=None):
                     "(use hardware emergency stop for unconfirmed joint motion) before "
                     "starting autonomy again"
                 )
+            else:
+                node._release_autonomy_owner()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

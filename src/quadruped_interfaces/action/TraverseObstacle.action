@@ -1,5 +1,7 @@
 # 越障控制器的硬件无关 Action 合同。
-# 任务层只在 TraversalGuidance 连续确认 READY 后发送；本接口不规定关节或足端轨迹。
+# Goal 是一个不可拆分的感知快照：距离、姿态和几何必须来自同一个
+# header.stamp/frame_id，控制器不得把它们与后续帧或上一个 Goal 混用。
+# 本接口只约定任务层与运动控制器的边界，不规定关节、足端或全身轨迹。
 uint8 OBSTACLE_UNKNOWN=0
 uint8 OBSTACLE_STEP=2
 uint8 OBSTACLE_PIT=3
@@ -9,14 +11,55 @@ uint8 OBSTACLE_BAR=5
 # 低矮的限高杆支柱仍保持普通导航线索，不能误触发绕杆流程。
 uint8 OBSTACLE_POLE=6
 uint8 OBSTACLE_SLOPE=7
+
+# 入口阶段是 Goal 的必填状态，不能用 UNKNOWN/0 猜测。
+# ENTRY_READY：任务层已确认机身处于控制器的起身/落足入口窗口；
+# 控制器仍必须做快照时效、驱动和支撑状态检查，不等于无条件执行。
+uint8 ENTRY_READY=1
+# ENTRY_PREPARING：已锁定障碍及入口，但还剩最后的低速接近或对正。
+# 控制器必须先在 Feedback.STATE_PREPARING 中闭环完成该过程，再进入
+# STATE_TRAVERSING；收到该值时不得立即抬腿或开始越障步态。
+uint8 ENTRY_PREPARING=2
+
+# 采样时间和度量坐标系。stamp=0、frame_id 为空、时间倒退或超过控制器
+# 时效窗口的 Goal 必须拒绝。移动机器人上通常使用 base_link；若使用其他
+# TF frame，Action server 必须在接受 Goal 前能够把整个快照变换到控制坐标系。
+std_msgs/Header header
+
 uint8 obstacle_type
 # 稳定比赛语义 ID（如 wooden_bridge_b / high_wall）。粗几何类型可能一对多：木桥 B
 # 的板间隙和砂砾坑都可能是 PIT，因此底层控制器不能只靠 obstacle_type 选择完整流程。
 string obstacle_id
+# ENTRY_READY 或 ENTRY_PREPARING；0 和其他值必须拒绝。
+uint8 entry_stage
+# [0, 1]，整个障碍分类与入口快照的融合置信度。
 float32 confidence
+# m，header.frame_id 的 +x 方向，从身体参考点到障碍入口平面；必须 >= 0。
 float32 distance
+# m，header.frame_id 的 +y 向左为正，障碍入口中心相对身体中心的侧向偏差。
 float32 lateral_offset
+# rad，绕 header.frame_id 的 +z，左转为正；为使机身 +x 对准通过方向所需的剩余转角。
 float32 heading_error
+# m，相对已分割地面的最大正高度；没有该特征时为 0，不得用 NaN 表示未知。
+float32 obstacle_height
+# m，相对已分割地面的最大下沉深度，向下使用正值；无坑洞特征时为 0。
+float32 pit_depth
+# rad，地面法向在 header.frame_id 中的俯仰/横滚角；前方上坡为正 pitch，
+# 左侧抬高为正 roll，均必须在 [-pi/2, pi/2] 内。
+float32 slope_pitch
+float32 slope_roll
+# m，去除拟合地面后高程残差的 RMS/等效粗糙度；必须 >= 0。
+float32 roughness
+# m，入口或障碍在 header.frame_id 的 y 方向上的有效宽度；未观测到时为 0。
+float32 width
+# rad，障碍前缘法向相对 header.frame_id +x 的有向角，范围 [-pi, pi]，左转为正。
+float32 structure_heading
+# [0, 1]，structure_heading 的独立几何拟合置信度。
+float32 structure_heading_confidence
+# m，地面到上方横杆/顶部结构最低点的竖直净空；未观测到限高结构时为 0。
+float32 clearance_height
+# 用于生成本快照的 ROI 有效点数；0 表示没有可供控制决策的几何证据，必须拒绝。
+uint32 valid_points
 ---
 # success=true 是底层越障控制器的严格承诺，不等同于“动作序列已经播放完”：
 # 1) 指定 obstacle_id 的越障流程已完整执行，期间没有取消、内部超时或安全故障；

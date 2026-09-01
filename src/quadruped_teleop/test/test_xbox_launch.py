@@ -29,3 +29,10 @@ def test_xbox_launch_starts_exactly_two_nodes():
         "use_sim_time",
     }
     assert sum(isinstance(entity, Node) for entity in description.entities) == 2
+
+
+def test_xbox_manifest_declares_optional_autonomy_process_dependencies():
+    """十字键运行 ros2 launch slam 时，fresh install 必须安装对应 CLI 和包。"""
+    manifest = (Path(__file__).parents[1] / "package.xml").read_text(encoding="utf-8")
+    assert "<exec_depend>ros2launch</exec_depend>" in manifest
+    assert "<exec_depend>slam</exec_depend>" in manifest

@@ -25,7 +25,9 @@ HEALTH_PARAMETER_NAMES = (
     "minimum_scan_field_of_view",
     "expected_odom_frame",
     "max_xy_covariance",
+    "max_yaw_covariance",
     "max_odom_jump",
+    "max_odom_yaw_jump",
     "odom_jump_recovery_samples",
     "future_stamp_tolerance",
 )
@@ -41,6 +43,10 @@ READINESS_PARAMETER_NAMES = (
     "minimum_scan_samples",
     "minimum_scan_field_of_view",
     "max_xy_covariance",
+    "max_yaw_covariance",
+    "max_odom_jump",
+    "max_odom_yaw_jump",
+    "odom_jump_recovery_samples",
     "expected_odom_frame",
     "lifecycle_service",
     "recover_slam_toolbox",
@@ -126,6 +132,8 @@ def _common_scan_and_odom_contract(
 
     if _number(values, "max_xy_covariance", errors) < 0.0:
         errors.append("max_xy_covariance must be >= 0")
+    if _number(values, "max_yaw_covariance", errors) < 0.0:
+        errors.append("max_yaw_covariance must be >= 0")
     future_tolerance = _number(values, "future_stamp_tolerance", errors)
     if future_tolerance < 0.0:
         errors.append("future_stamp_tolerance must be >= 0")
@@ -142,6 +150,9 @@ def validate_navigation_health_parameters(values: Mapping[str, object]) -> None:
     errors: list[str] = []
     _common_scan_and_odom_contract(values, errors)
     _positive(values, "max_odom_jump", errors)
+    yaw_jump = _positive(values, "max_odom_yaw_jump", errors)
+    if yaw_jump > pi:
+        errors.append("max_odom_yaw_jump must be <= pi")
     _integer(values, "odom_jump_recovery_samples", errors, 1)
     _raise("navigation health", errors)
 
@@ -150,6 +161,11 @@ def validate_nav2_readiness_parameters(values: Mapping[str, object]) -> None:
     """Validate Nav2 activation and optional SLAM lifecycle recovery configuration."""
     errors: list[str] = []
     _common_scan_and_odom_contract(values, errors)
+    _positive(values, "max_odom_jump", errors)
+    yaw_jump = _positive(values, "max_odom_yaw_jump", errors)
+    if yaw_jump > pi:
+        errors.append("max_odom_yaw_jump must be <= pi")
+    _integer(values, "odom_jump_recovery_samples", errors, 1)
     for name in ("scan_topic", "odom_topic", "lifecycle_service", "slam_lifecycle_node"):
         _absolute_name(values, name, errors)
     if not isinstance(values.get("recover_slam_toolbox"), bool):

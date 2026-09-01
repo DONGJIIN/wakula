@@ -161,6 +161,7 @@ def odometry_is_valid(
     max_xy_covariance: float,
     expected_frame: str = "",
     expected_child_frame: str = "",
+    max_yaw_covariance: float | None = None,
 ) -> bool:
     """拒绝非有限位姿/速度、错误 frame 以及过大的平面协方差。
 
@@ -179,7 +180,13 @@ def odometry_is_valid(
         msg.twist.twist.linear.y,
         msg.twist.twist.angular.z,
     )
-    covariance = (msg.pose.covariance[0], msg.pose.covariance[7])
+    yaw_covariance_limit = (
+        float(max_xy_covariance)
+        if max_yaw_covariance is None
+        else float(max_yaw_covariance)
+    )
+    xy_covariance = (msg.pose.covariance[0], msg.pose.covariance[7])
+    yaw_covariance = msg.pose.covariance[35]
     quaternion_norm = math.sqrt(
         sum(float(value) ** 2 for value in values[2:6])
     )
@@ -192,12 +199,53 @@ def odometry_is_valid(
     )
     return (
         frames_valid
-        and all(math.isfinite(float(value)) for value in values + covariance)
+        and all(
+            math.isfinite(float(value))
+            for value in values + xy_covariance + (yaw_covariance,)
+        )
         and 0.90 <= quaternion_norm <= 1.10
         and all(
-            0.0 <= float(value) <= max_xy_covariance for value in covariance
+            0.0 <= float(value) <= max_xy_covariance for value in xy_covariance
+        )
+        and 0.0 <= float(yaw_covariance) <= yaw_covariance_limit
+    )
+
+
+def odometry_yaw(msg: Odometry) -> float | None:
+    """Return normalized planar yaw, or ``None`` for a corrupt quaternion.
+
+    The runtime jump filter needs the actual wrapped heading rather than quaternion
+    component differences: +179 degrees to -179 degrees is a normal two-degree update,
+    while 0 to pi at the same position is a localization/IMU discontinuity.
+    """
+    orientation = msg.pose.pose.orientation
+    values = tuple(
+        float(value)
+        for value in (
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
         )
     )
+    if not all(math.isfinite(value) for value in values):
+        return None
+    norm_squared = sum(value * value for value in values)
+    if norm_squared < 1e-12:
+        return None
+    scale = norm_squared ** -0.5
+    x, y, z, w = (value * scale for value in values)
+    return math.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y * y + z * z),
+    )
+
+
+def wrapped_angle_distance(first: float, second: float) -> float:
+    """Return the absolute shortest angular distance in radians."""
+    if not all(math.isfinite(float(value)) for value in (first, second)):
+        return math.inf
+    return abs((float(first) - float(second) + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 def navigation_failures(
@@ -223,26 +271,51 @@ class OdometryJumpFilter:
     10 Hz 健康定时器可能完全看不到该故障；锁存可保证速度门至少经历明确的停止阶段。
     """
 
-    def __init__(self, maximum_jump: float, recovery_samples: int = 3):
+    def __init__(
+        self,
+        maximum_jump: float,
+        recovery_samples: int = 3,
+        maximum_yaw_jump: float = math.pi,
+    ):
         self.maximum_jump = max(0.01, float(maximum_jump))
+        self.maximum_yaw_jump = min(
+            math.pi, max(0.01, float(maximum_yaw_jump))
+        )
         self.recovery_samples = max(1, int(recovery_samples))
         self.previous_xy = None
+        self.previous_yaw = None
         self.latched = False
         self.stable_samples = 0
 
-    def update(self, x: float, y: float, sample_valid: bool) -> bool:
-        """输入一个已校验样本，返回当前锁存状态；非法样本不污染参考位置。"""
-        if not sample_valid or not all(math.isfinite(value) for value in (x, y)):
+    def update(
+        self,
+        x: float,
+        y: float,
+        sample_valid: bool,
+        yaw: float | None = None,
+    ) -> bool:
+        """输入一个已校验样本，锁存位置或航向跳变；非法样本不污染参考。"""
+        numeric = (x, y) if yaw is None else (x, y, yaw)
+        if not sample_valid or not all(math.isfinite(value) for value in numeric):
             return self.latched
         current = (float(x), float(y))
+        current_yaw = None if yaw is None else float(yaw)
         if self.previous_xy is None:
             self.previous_xy = current
+            self.previous_yaw = current_yaw
             return self.latched
-        jumped = math.hypot(
+        position_jumped = math.hypot(
             current[0] - self.previous_xy[0], current[1] - self.previous_xy[1]
         ) > self.maximum_jump
+        yaw_jumped = bool(
+            current_yaw is not None
+            and self.previous_yaw is not None
+            and wrapped_angle_distance(current_yaw, self.previous_yaw)
+            > self.maximum_yaw_jump
+        )
         self.previous_xy = current
-        if jumped:
+        self.previous_yaw = current_yaw
+        if position_jumped or yaw_jumped:
             self.latched = True
             self.stable_samples = 0
         elif self.latched:
@@ -271,7 +344,9 @@ class NavigationHealthMonitor(Node):
         self.declare_parameter("minimum_scan_field_of_view", 3.14)
         self.declare_parameter("expected_odom_frame", "odom")
         self.declare_parameter("max_xy_covariance", 1.0)
+        self.declare_parameter("max_yaw_covariance", 1.0)
         self.declare_parameter("max_odom_jump", 0.75)
+        self.declare_parameter("max_odom_yaw_jump", 0.75)
         self.declare_parameter("odom_jump_recovery_samples", 3)
         self.declare_parameter("future_stamp_tolerance", 0.10)
         # This node gates autonomous motion.  Reject the raw YAML before clamping values or
@@ -299,7 +374,13 @@ class NavigationHealthMonitor(Node):
         self.max_xy_covariance = max(
             0.0, float(self.get_parameter("max_xy_covariance").value)
         )
+        self.max_yaw_covariance = max(
+            0.0, float(self.get_parameter("max_yaw_covariance").value)
+        )
         self.max_odom_jump = max(0.01, float(self.get_parameter("max_odom_jump").value))
+        self.max_odom_yaw_jump = max(
+            0.01, float(self.get_parameter("max_odom_yaw_jump").value)
+        )
         self.future_stamp_tolerance = max(
             0.0, float(self.get_parameter("future_stamp_tolerance").value)
         )
@@ -310,6 +391,7 @@ class NavigationHealthMonitor(Node):
         self.odom_jump_filter = OdometryJumpFilter(
             self.max_odom_jump,
             int(self.get_parameter("odom_jump_recovery_samples").value),
+            self.max_odom_yaw_jump,
         )
         self.odom_jump = False
         self.tf_buffer = Buffer()
@@ -367,12 +449,13 @@ class NavigationHealthMonitor(Node):
             self.max_xy_covariance,
             self.expected_odom_frame,
             self.base_frame,
+            self.max_yaw_covariance,
         )
         self.odom_valid = stamp_valid and numeric_valid
         # 只有数值、协方差和源时间均有效的样本才能更新跳变参考，避免 NaN 将后续比较
         # 永久污染。跳变锁存独立于当前帧 odom_valid，恢复需连续稳定样本。
         self.odom_jump = self.odom_jump_filter.update(
-            xy[0], xy[1], self.odom_valid
+            xy[0], xy[1], self.odom_valid, odometry_yaw(msg)
         )
         self.last_odom_time = now
 

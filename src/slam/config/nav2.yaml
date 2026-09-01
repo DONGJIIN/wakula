@@ -280,7 +280,13 @@ navigation_health_monitor:
     minimum_scan_field_of_view: 3.14
     expected_odom_frame: odom
     max_xy_covariance: 1.0
+    # 航向协方差单位 rad^2。值过大通常意味着 IMU/轮速融合尚未收敛；放宽会让
+    # 不可信 yaw 继续授权导航，收紧则可能延长启动等待，必须按真机 EKF 输出标定。
+    max_yaw_covariance: 1.0
     max_odom_jump: 0.75
+    # 单帧航向变化超过约 43° 视为 odom/IMU 跳变。正常 ±pi 跨界使用最短角差，
+    # 不会被误判。真机高速旋转仍应以相邻消息的最大实测变化留足裕量。
+    max_odom_yaw_jump: 0.75
     # 单次跳变锁存，连续 3 个稳定里程计样本后才恢复导航健康。
     odom_jump_recovery_samples: 3
     future_stamp_tolerance: 0.10
@@ -298,6 +304,11 @@ nav2_readiness_monitor:
     minimum_scan_samples: 90
     minimum_scan_field_of_view: 3.14
     max_xy_covariance: 1.0
+    max_yaw_covariance: 1.0
+    # readiness 与运行期健康门使用同一位置/航向跳变合同，避免 Nav2 刚激活就停车。
+    max_odom_jump: 0.75
+    max_odom_yaw_jump: 0.75
+    odom_jump_recovery_samples: 3
     expected_odom_frame: odom
     # readiness 只通过该服务激活 Nav2；改命名空间时必须同步修改此绝对服务名。
     lifecycle_service: /lifecycle_manager_navigation/manage_nodes

@@ -1,20 +1,29 @@
 """ROS node-construction and watchdog tests for planning parameter contracts."""
 
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import rclpy
+import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
-from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
+from quadruped_interfaces.action import TraverseObstacle
+from quadruped_interfaces.msg import NavigationSafety, TerrainFeatures, TraversalGuidance
+from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, Float32
 
 import quadruped_planning.autonomous_mission as mission_module
-from quadruped_planning.autonomous_mission import AutonomousMission, ObservedObstacle
+from quadruped_planning.autonomous_mission import (
+    AutonomousMission,
+    ObservedObstacle,
+    traversal_feedback_transition_is_valid,
+)
 from quadruped_planning.cmd_vel_gate import NavigationSpeedGate
 from quadruped_planning.terrain_safety_assessor import TerrainSafetyAssessor
 from quadruped_planning.traversal_guidance import TraversalGuidanceNode
@@ -52,16 +61,22 @@ class FakeActionClient:
         self.exception = exception
         self.sent = 0
         self.last_goal = None
+        self.feedback_callback = None
 
     def server_is_ready(self):
         return self.ready
 
-    def send_goal_async(self, goal):
+    def send_goal_async(self, goal, feedback_callback=None):
         self.sent += 1
         self.last_goal = goal
+        self.feedback_callback = feedback_callback
         if self.exception is not None:
             raise self.exception
         return self.future
+
+    def publish_feedback(self, feedback):
+        if self.feedback_callback is not None:
+            self.feedback_callback(SimpleNamespace(feedback=feedback))
 
 
 class FakeGoalHandle:
@@ -88,11 +103,24 @@ class RecordingPublisher:
         self.values.append(bool(message.data))
 
 
+class MessageRecordingPublisher:
+    """Record arbitrary ROS messages without coercing their payload type."""
+
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
 def valid_wall_guidance():
     """Build one internally consistent high-wall handoff snapshot."""
     guidance = TraversalGuidance()
     guidance.phase = guidance.PHASE_READY
     guidance.obstacle_type = guidance.OBSTACLE_WALL
+    guidance.semantic_id = "high_wall"
+    guidance.header.frame_id = "base_link"
+    guidance.header.stamp.sec = 10
     guidance.perception_valid = True
     guidance.traversal_required = True
     guidance.ready_for_handoff = True
@@ -106,10 +134,24 @@ def valid_wall_safety():
     """Build point-cloud geometry satisfying the final high-wall contract."""
     safety = NavigationSafety()
     safety.perception_valid = True
+    safety.mode = safety.MODE_STOP
     safety.obstacle_type = safety.OBSTACLE_WALL
+    safety.semantic_id = "high_wall"
+    safety.header.frame_id = "base_link"
+    safety.header.stamp.sec = 10
     safety.confidence = 0.9
+    safety.distance = 1.0
+    safety.lateral_offset = 0.0
     safety.obstacle_height = 0.30
+    safety.pit_depth = 0.01
+    safety.slope_pitch = 0.02
+    safety.slope_roll = -0.01
+    safety.roughness = 0.03
     safety.width = 1.0
+    safety.structure_heading = 0.04
+    safety.structure_heading_confidence = 0.85
+    safety.clearance_height = 0.12
+    safety.valid_points = 120
     return safety
 
 
@@ -118,7 +160,7 @@ def install_fresh_wall_handoff(mission, guidance=None):
     now = time.monotonic()
     guidance = guidance or valid_wall_guidance()
     mission.enabled = True
-    mission._robot_pose = lambda: (0.0, 0.0, 0.0)
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
     mission.guidance = guidance
     mission.guidance_received = now
     mission.last_safety = valid_wall_safety()
@@ -129,6 +171,16 @@ def install_fresh_wall_handoff(mission, guidance=None):
     mission.pending_traverse_robot_start = (0.0, 0.0)
     mission.pending_traverse_started = now
     return guidance
+
+
+def install_stable_navigation_health(mission):
+    """Satisfy the production health lease for tests focused on another boundary."""
+    now = time.monotonic()
+    mission.navigation_healthy = True
+    mission.navigation_health_received = now
+    mission.navigation_health_true_since = (
+        now - float(mission.params["navigation_health_recovery_duration"]) - 0.1
+    )
 
 
 @pytest.fixture
@@ -175,6 +227,11 @@ def test_all_planning_nodes_accept_the_shipped_default_contract(ros_context):
             "step < climb < stop",
         ),
         (
+            TerrainSafetyAssessor,
+            [Parameter("output_frame", value="")],
+            "output_frame",
+        ),
+        (
             TraversalGuidanceNode,
             [
                 Parameter("approach_start_distance", value=0.8),
@@ -183,9 +240,29 @@ def test_all_planning_nodes_accept_the_shipped_default_contract(ros_context):
             "approach_start_distance",
         ),
         (
+            TraversalGuidanceNode,
+            [Parameter("type_confirmation_frames", value=0)],
+            "type_confirmation_frames",
+        ),
+        (
             NavigationSpeedGate,
             [Parameter("input_topic", value="/cmd_vel")],
             "velocity feedback loop",
+        ),
+        (
+            NavigationSpeedGate,
+            [Parameter("autonomy_lease_timeout", value=0.0)],
+            "autonomy_lease_timeout",
+        ),
+        (
+            NavigationSpeedGate,
+            [Parameter("emergency_scan_min_valid_ratio", value=0.0)],
+            "emergency_scan_min_valid_ratio",
+        ),
+        (
+            NavigationSpeedGate,
+            [Parameter("emergency_scan_max_invalid_gap_angle", value=0.40)],
+            "emergency_scan_max_invalid_gap_angle",
         ),
         (
             AutonomousMission,
@@ -194,6 +271,66 @@ def test_all_planning_nodes_accept_the_shipped_default_contract(ros_context):
                 Parameter("semantic_recent_window", value=5),
             ],
             "semantic_confirmation_votes",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("observation_frame", value="")],
+            "observation_frame",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("observation_frame", value="/base_link")],
+            "observation_frame",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("safety_guidance_spatial_tolerance", value=0.0)],
+            "safety_guidance_spatial_tolerance",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("navigation_health_timeout", value=0.0)],
+            "navigation_health_timeout",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("navigation_health_recovery_duration", value=0.0)],
+            "navigation_health_recovery_duration",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("traversal_progress_timeout", value=0.0)],
+            "traversal_progress_timeout",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("traversal_ready_max_distance", value=2.0)],
+            "traversal_ready_max_distance",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("traversal_ready_max_lateral", value=0.0)],
+            "traversal_ready_max_lateral",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("handoff_fallback_max_lateral", value=0.36)],
+            "handoff_fallback_max_lateral",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("approach_stall_handoff_max_lateral", value=0.0)],
+            "approach_stall_handoff_max_lateral",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("nav_progress_translation", value=0.0)],
+            "nav_progress_translation",
+        ),
+        (
+            AutonomousMission,
+            [Parameter("post_traversal_beyond_margin", value=0.50)],
+            "post_traversal_beyond_margin",
         ),
     ),
 )
@@ -262,6 +399,221 @@ def test_speed_gate_real_timer_stops_after_command_timeout(ros_context):
         executor.shutdown()
 
 
+def test_speed_gate_distinguishes_absent_released_and_expired_mission_lease(
+    ros_context,
+):
+    """普通 Nav2 无需任务心跳；失联 owner 锁存到速度门/核心栈重启。"""
+    gate = NavigationSpeedGate(
+        parameter_overrides=[
+            Parameter("require_emergency_scan", value=False),
+            Parameter("autonomy_lease_timeout", value=0.2),
+        ]
+    )
+    output = MessageRecordingPublisher()
+    gate.pub = output
+    command = Twist()
+    command.linear.x = 0.4
+    try:
+        # No lease history means no autonomous owner: an ordinary RViz/Nav2 goal works.
+        gate.limit_callback(Float32(data=0.5))
+        gate.health_callback(Bool(data=True))
+        gate.cmd_callback(command)
+        gate.publish_safe_command()
+        assert output.messages[-1].linear.x == pytest.approx(0.2)
+
+        # A live mission explicitly acquires the branch and must refresh the lease.
+        gate.autonomy_lease_callback(Bool(data=True))
+        gate.cmd_callback(command)
+        gate.publish_safe_command()
+        assert gate.autonomy_lease_state == "ACTIVE"
+        assert output.messages[-1].linear.x == pytest.approx(0.2)
+
+        # Process heartbeat interruption clears its old Twist and latches fail-closed.
+        gate.last_autonomy_lease_time = (
+            gate.get_clock().now() - Duration(seconds=1.0)
+        )
+        gate.publish_safe_command()
+        assert gate.autonomy_lease_state == "EXPIRED"
+        assert output.messages[-1].linear.x == 0.0
+        gate.cmd_callback(command)
+        # A delayed packet or a newly restarted mission can only send true; neither proves
+        # that the old Nav2 goal stopped, so EXPIRED must remain latched.
+        gate.autonomy_lease_callback(Bool(data=True))
+        gate.publish_safe_command()
+        assert gate.autonomy_lease_state == "EXPIRED"
+        assert output.messages[-1].linear.x == 0.0
+
+        # Bool carries no session/generation.  A delayed false from the failed owner is
+        # no more trustworthy than delayed true and must not unlock EXPIRED.
+        gate.autonomy_lease_callback(Bool(data=False))
+        gate.publish_safe_command()
+        assert gate.autonomy_lease_state == "EXPIRED"
+        assert output.messages[-1].linear.x == 0.0
+        gate.cmd_callback(command)
+        gate.limit_callback(Float32(data=0.5))
+        gate.health_callback(Bool(data=True))
+        gate.publish_safe_command()
+        assert output.messages[-1].linear.x == 0.0
+    finally:
+        gate.destroy_node()
+
+
+def test_speed_gate_accepts_only_a_fresh_active_clean_lease_release(ros_context):
+    """Normal Ctrl-C can release ACTIVE; a stale pre-timer false latches EXPIRED."""
+    gate = NavigationSpeedGate(
+        parameter_overrides=[
+            Parameter("require_emergency_scan", value=False),
+            Parameter("autonomy_lease_timeout", value=0.2),
+        ]
+    )
+    command = Twist()
+    command.linear.x = 0.3
+    try:
+        gate.autonomy_lease_callback(Bool(data=True))
+        gate.cmd_callback(command)
+        gate.autonomy_lease_callback(Bool(data=False))
+        assert gate.autonomy_lease_state == "UNOWNED"
+        # The ownership edge clears cached motion; a later ordinary Nav2 client must
+        # produce a new Twist, preserving the existing clean Ctrl-C behavior.
+        assert gate.last_cmd_time is None
+
+        gate.autonomy_lease_callback(Bool(data=True))
+        gate.last_autonomy_lease_time = (
+            gate.get_clock().now() - Duration(seconds=1.0)
+        )
+        gate.autonomy_lease_callback(Bool(data=False))
+        assert gate.autonomy_lease_state == "EXPIRED"
+        assert gate.last_cmd_time is None
+    finally:
+        gate.destroy_node()
+
+
+def test_speed_gate_stop_unlock_cannot_replay_old_twist(ros_context):
+    """cancel/handoff true->false must wait for a post-unlock Nav2 command."""
+    gate = NavigationSpeedGate(
+        parameter_overrides=[Parameter("require_emergency_scan", value=False)]
+    )
+    output = MessageRecordingPublisher()
+    gate.pub = output
+    command = Twist()
+    command.linear.x = 0.3
+    try:
+        gate.limit_callback(Float32(data=1.0))
+        gate.health_callback(Bool(data=True))
+        gate.cmd_callback(command)
+        gate.publish_safe_command()
+        assert output.messages[-1].linear.x == pytest.approx(0.3)
+
+        gate.autonomy_stop_callback(Bool(data=True))
+        gate.autonomy_stop_callback(Bool(data=False))
+        gate.publish_safe_command()
+        assert output.messages[-1].linear.x == 0.0
+        assert gate.last_cmd_time is None
+
+        gate.cmd_callback(command)
+        gate.publish_safe_command()
+        assert output.messages[-1].linear.x == pytest.approx(0.3)
+    finally:
+        gate.destroy_node()
+
+
+def test_speed_gate_clock_rewind_clears_old_epoch_authority(ros_context):
+    """A simulated /clock rewind must clear Twist/heartbeats and expire an active owner."""
+    gate = NavigationSpeedGate(
+        parameter_overrides=[Parameter("require_emergency_scan", value=False)]
+    )
+    output = MessageRecordingPublisher()
+    gate.pub = output
+    command = Twist()
+    command.linear.x = 0.4
+    try:
+        gate.autonomy_lease_callback(Bool(data=True))
+        gate.limit_callback(Float32(data=1.0))
+        gate.health_callback(Bool(data=True))
+        gate.cmd_callback(command)
+        gate.last_clock_time = gate.get_clock().now() + Duration(seconds=5.0)
+        gate.publish_safe_command()
+        assert output.messages[-1].linear.x == 0.0
+        assert gate.autonomy_lease_state == "EXPIRED"
+        assert gate.last_cmd_time is None
+        assert gate.last_assessment_time is None
+        assert gate.last_health_time is None
+        # A second rewind cannot turn a latched ownership failure back into UNOWNED.
+        gate.last_clock_time = gate.get_clock().now() + Duration(seconds=5.0)
+        gate.publish_safe_command()
+        assert gate.autonomy_lease_state == "EXPIRED"
+        gate.autonomy_lease_callback(Bool(data=False))
+        assert gate.autonomy_lease_state == "EXPIRED"
+    finally:
+        gate.destroy_node()
+
+
+def test_shipped_terrain_yaml_exposes_all_runtime_safety_parameters():
+    """Protect the YAML/Python contract for frames, typed input and temporal filters."""
+    config_path = Path(__file__).parents[1] / "config" / "terrain_navigation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    safety = config["terrain_safety_assessor"]["ros__parameters"]
+    guidance = config["traversal_guidance"]["ros__parameters"]
+    gate = config["navigation_speed_gate"]["ros__parameters"]
+    assert safety["step_threshold"] == 0.07
+    assert safety["output_frame"] == "base_link"
+    assert safety["legacy_features_enabled"] is False
+    assert guidance["type_confirmation_frames"] == 3
+    assert gate["autonomy_lease_timeout"] > 0.0
+    assert gate["emergency_scan_min_valid_ratio"] == 0.80
+    assert gate["emergency_scan_max_invalid_gap_angle"] == 0.20
+
+
+def test_python_fallbacks_match_every_shipped_terrain_yaml_value(ros_context):
+    """Prevent Python declarations from silently becoming a second tuning surface."""
+    config_path = Path(__file__).parents[1] / "config" / "terrain_navigation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    nodes = {
+        "terrain_safety_assessor": TerrainSafetyAssessor(),
+        "traversal_guidance": TraversalGuidanceNode(),
+        "navigation_speed_gate": NavigationSpeedGate(),
+    }
+    try:
+        for node_name, node in nodes.items():
+            expected = config[node_name]["ros__parameters"]
+            for parameter_name, expected_value in expected.items():
+                assert node.has_parameter(parameter_name), (
+                    node_name,
+                    parameter_name,
+                )
+                assert node.get_parameter(parameter_name).value == expected_value, (
+                    node_name,
+                    parameter_name,
+                )
+    finally:
+        for node in nodes.values():
+            node.destroy_node()
+
+
+def test_no_vision_typed_invalid_geometry_publishes_stop(ros_context):
+    """The live no-camera path must respect TerrainFeatures.valid, not plausible numbers."""
+    assessor = TerrainSafetyAssessor(
+        parameter_overrides=[Parameter("prefer_fused_obstacle", value=False)]
+    )
+    speeds = MessageRecordingPublisher()
+    assessor.speed_pub = speeds
+    features = TerrainFeatures()
+    features.header.stamp = assessor.get_clock().now().to_msg()
+    features.header.frame_id = "base_link"
+    features.valid = False
+    features.obstacle_type = TerrainFeatures.CLEAR
+    features.confidence = 1.0
+    features.valid_points = 200
+    try:
+        assessor.typed_features_callback(features)
+        assert not assessor.perception_valid
+        assert assessor.last_features_time is not None
+        assert speeds.messages[-1].data == 0.0
+        assert not assessor.get_parameter("legacy_features_enabled").value
+    finally:
+        assessor.destroy_node()
+
+
 def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
     """Construct the production node and protect the requested non-blocking policy."""
     mission = AutonomousMission()
@@ -272,7 +624,15 @@ def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
         assert mission.params["controller_wait_timeout"] == 5.0
         assert mission.params["action_response_timeout"] == 2.0
         assert mission.params["action_cancel_timeout"] == 2.0
+        assert mission.params["traversal_progress_timeout"] == 5.0
+        assert mission.params["traversal_ready_max_distance"] == 0.45
+        assert mission.params["traversal_ready_max_lateral"] == 0.10
+        assert mission.params["traversal_ready_max_heading_error"] == 0.08
         assert mission.params["safety_geometry_stale_seconds"] == 0.35
+        assert mission.params["observation_frame"] == "base_link"
+        assert mission.params["safety_guidance_spatial_tolerance"] == 0.12
+        assert mission.params["navigation_health_timeout"] == 0.80
+        assert mission.params["navigation_health_recovery_duration"] == 1.00
         assert mission.params["approach_stall_handoff_count"] == 1
         assert mission.params["maximum_search_turns"] == 8
     finally:
@@ -285,11 +645,205 @@ def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
         )
 
 
+def test_python_fallbacks_match_every_shipped_mission_yaml_value(ros_context):
+    """Keep deploy-time YAML and no-file fallback behavior exactly equivalent."""
+    config_path = Path(__file__).parents[1] / "config" / "autonomous_mission.yaml"
+    shipped = yaml.safe_load(config_path.read_text(encoding="utf-8"))[
+        "autonomous_mission"
+    ]["ros__parameters"]
+    mission = AutonomousMission()
+    try:
+        assert set(mission.params) == set(shipped)
+        assert mission.params == shipped
+    finally:
+        mission.destroy_node()
+
+
+def test_out_of_order_typed_observations_cannot_mix_obstacle_identity(ros_context):
+    mission = AutonomousMission()
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    try:
+        newest_guidance = valid_wall_guidance()
+        newest_guidance.header.stamp.sec = 20
+        mission._guidance_callback(newest_guidance)
+        older_guidance = valid_wall_guidance()
+        older_guidance.header.stamp.sec = 19
+        older_guidance.semantic_id = "t_shaped_stairs"
+        older_guidance.obstacle_type = older_guidance.OBSTACLE_STEP
+        mission._guidance_callback(older_guidance)
+        assert mission.guidance is newest_guidance
+        assert mission.guidance.semantic_id == "high_wall"
+
+        newest_safety = valid_wall_safety()
+        newest_safety.header.stamp.sec = 20
+        mission._navigation_safety_callback(newest_safety)
+        older_safety = valid_wall_safety()
+        older_safety.header.stamp.sec = 19
+        older_safety.semantic_id = "t_shaped_stairs"
+        older_safety.obstacle_type = older_safety.OBSTACLE_STEP
+        mission._navigation_safety_callback(older_safety)
+        assert mission.last_safety is newest_safety
+        assert mission.last_safety.semantic_id == "high_wall"
+    finally:
+        mission.destroy_node()
+
+
+def test_mission_clock_rewind_starts_a_clean_observation_epoch(ros_context):
+    """Old stamp 100 must not block new stamp 1 or donate votes after /clock reset."""
+    mission = AutonomousMission()
+    stop = RecordingPublisher()
+    mission.autonomy_stop_pub = stop
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    try:
+        old_safety = valid_wall_safety()
+        old_safety.header.stamp.sec = 100
+        old_guidance = valid_wall_guidance()
+        old_guidance.header.stamp.sec = 100
+        mission._navigation_safety_callback(old_safety)
+        mission._guidance_callback(old_guidance)
+        mission.semantic_votes.extend(["high_wall"] * 3)
+        mission.locked_obstacle_id = "high_wall"
+        mission.locked_obstacle_position = (1.0, 0.0)
+        mission.pending_traverse = old_guidance
+        mission.pending_traverse_id = "high_wall"
+        mission.pending_traverse_position = (1.0, 0.0)
+        mission.observed_obstacles["high_wall"] = ObservedObstacle(
+            "high_wall", 1.0, 0.0, 0.0, 0.0, 0.0, 0.9, time.monotonic()
+        )
+        mission.navigation_healthy = True
+        mission.navigation_health_received = time.monotonic()
+        mission.navigation_health_true_since = time.monotonic() - 10.0
+        # An ownership fault represents a remote Action whose release is unknown.  The
+        # epoch reset must preserve that latch while clearing only observation authority.
+        mission.action_ownership_fault = True
+        mission.action_fault_reason = "test unknown owner"
+
+        mission.last_ros_clock_time = (
+            mission.get_clock().now() + Duration(seconds=5.0)
+        )
+        mission._tick()
+
+        assert mission.last_guidance_stamp is None
+        assert mission.last_safety_stamp is None
+        assert mission.guidance is None
+        assert mission.last_safety is None
+        assert list(mission.semantic_votes) == []
+        assert mission.locked_obstacle_id == ""
+        assert mission.pending_traverse is None
+        assert mission.observed_obstacles == {}
+        assert not mission.navigation_healthy
+        assert not mission._navigation_health_is_stable(time.monotonic())
+        assert mission.action_ownership_fault
+        assert stop.values[-1] is True
+
+        new_safety = valid_wall_safety()
+        new_safety.header.stamp.sec = 1
+        new_guidance = valid_wall_guidance()
+        new_guidance.header.stamp.sec = 1
+        mission._navigation_safety_callback(new_safety)
+        mission._guidance_callback(new_guidance)
+        assert mission.last_safety is new_safety
+        assert mission.guidance is new_guidance
+        assert mission.last_safety_stamp == pytest.approx(1.0)
+        assert mission.last_guidance_stamp == pytest.approx(1.0)
+    finally:
+        mission.destroy_node()
+
+
+def test_mission_clock_rewind_never_drops_live_traversal_ownership(ros_context):
+    """A new sensor epoch cannot be treated as proof that a remote Action stopped."""
+    mission = AutonomousMission()
+    stop = RecordingPublisher()
+    mission.autonomy_stop_pub = stop
+    handle = object()
+    pending = valid_wall_guidance()
+    mission.traverse_handle = handle
+    mission.pending_traverse = pending
+    mission.pending_traverse_id = "high_wall"
+    mission.pending_traverse_position = (1.0, 0.0)
+    try:
+        mission._reset_observation_epoch(mission.get_clock().now())
+        assert mission.traverse_handle is handle
+        assert mission.pending_traverse is pending
+        assert mission.pending_traverse_id == "high_wall"
+        assert mission.pending_traverse_position == (1.0, 0.0)
+        assert stop.values[-1] is True
+    finally:
+        mission.destroy_node()
+
+
+def test_navigation_health_pause_preserves_and_resumes_exact_nav_attempt(ros_context):
+    mission = AutonomousMission()
+    mission.enabled = True
+    mission.nav_client = FakeActionClient(True)
+    mission.nav_handle = FakeGoalHandle()
+    mission.nav_goal_pose = mission._make_pose(2.0, 0.5, 0.2)
+    mission.nav_target = (2.0, 0.5)
+    mission.nav_purpose = "frontier"
+    mission.search_turn_index = 3
+    blocked_before = list(mission.blocked_frontiers)
+    try:
+        now = time.monotonic()
+        mission._navigation_health_callback(Bool(data=False))
+        assert mission._handle_navigation_health(now)
+        assert mission.nav_cancel_pending
+        assert mission.health_interrupted_nav is not None
+
+        canceled = PendingFuture()
+        canceled.value = SimpleNamespace(status=GoalStatus.STATUS_CANCELED)
+        mission._nav_result(canceled)
+        assert mission.state == "WAITING_FOR_NAVIGATION_HEALTH"
+        assert mission.blocked_frontiers == blocked_before
+        assert mission.search_turn_index == 3
+        assert mission.nav_retry_until == 0.0
+
+        recovered = time.monotonic()
+        mission._navigation_health_callback(Bool(data=True))
+        mission.navigation_health_true_since = (
+            recovered
+            - float(mission.params["navigation_health_recovery_duration"])
+            - 0.1
+        )
+        mission.navigation_health_received = recovered
+        assert mission._handle_navigation_health(recovered)
+        assert mission.health_interrupted_nav is None
+        assert mission.nav_send_pending
+        assert mission.nav_client.sent == 1
+        assert mission.blocked_frontiers == blocked_before
+        assert mission.search_turn_index == 3
+    finally:
+        mission.destroy_node()
+
+
+def test_first_true_heartbeat_after_stale_gap_restarts_recovery_dwell(ros_context):
+    """An old true interval must not authorize the first heartbeat after an outage."""
+    mission = AutonomousMission()
+    try:
+        now = time.monotonic()
+        mission.navigation_healthy = True
+        mission.navigation_health_true_since = now - 30.0
+        mission.navigation_health_received = (
+            now - float(mission.params["navigation_health_timeout"]) - 0.1
+        )
+
+        callback_started = time.monotonic()
+        mission._navigation_health_callback(Bool(data=True))
+
+        assert mission.navigation_health_true_since >= callback_started
+        assert not mission._navigation_health_is_stable(time.monotonic())
+        assert not mission._send_nav_goal(
+            mission._make_pose(1.0, 0.0, 0.0), "frontier"
+        )
+    finally:
+        mission.destroy_node()
+
+
 def test_nav_send_watchdog_locks_speed_and_late_response_cannot_restore_goal(
     ros_context,
 ):
     """悬空 send response 有界进入故障；迟到 accepted handle 只能被取消。"""
     mission = AutonomousMission()
+    install_stable_navigation_health(mission)
     pending = PendingFuture()
     client = FakeActionClient(False, pending)
     mission.nav_client = client
@@ -330,6 +884,7 @@ def test_shutdown_marks_disabled_before_pending_nav_response_and_cancels_late_ha
 ):
     """Ctrl-C during send must cancel the handle that appears during the drain loop."""
     mission = AutonomousMission()
+    install_stable_navigation_health(mission)
     pending = PendingFuture()
     mission.nav_client = FakeActionClient(True, pending)
     try:
@@ -355,10 +910,15 @@ def test_shutdown_marks_disabled_before_pending_nav_response_and_cancels_late_ha
 def test_pending_nav_response_cannot_freeze_a_traverse_handoff(ros_context):
     """HANDOFF waits until a Nav request has an observable handle or terminal result."""
     mission = AutonomousMission()
+    install_stable_navigation_health(mission)
     pending = PendingFuture()
     mission.nav_client = FakeActionClient(True, pending)
     mission.traverse_client = FakeActionClient(True)
     mission.enabled = True
+    now = time.monotonic()
+    mission.navigation_healthy = True
+    mission.navigation_health_received = now
+    mission.navigation_health_true_since = now - 2.0
     try:
         assert mission._send_nav_goal(
             mission._make_pose(2.0, 0.0, 0.0), "frontier"
@@ -470,8 +1030,9 @@ def test_live_cancel_transport_error_still_latches_ownership_fault(ros_context):
 
 
 def test_cancel_locks_autonomous_speed_until_matching_result(ros_context):
-    """取消握手期间保持 stop=true，只有最终 result 才允许下一次自主运动。"""
+    """取消结果和 HANDOFF 均保持锁住；只有提交新 Nav2 goal 才解锁。"""
     mission = AutonomousMission()
+    install_stable_navigation_health(mission)
     publisher = RecordingPublisher()
     mission.autonomy_stop_pub = publisher
     mission.nav_generation = 4
@@ -486,9 +1047,63 @@ def test_cancel_locks_autonomous_speed_until_matching_result(ros_context):
         result_future = PendingFuture()
         result_future.value = wrapped
         mission._nav_result(result_future, 4)
-        assert publisher.values[-2:] == [True, False]
+        assert publisher.values[-2:] == [True, True]
         assert mission.nav_handle is None
         assert not mission.nav_cancel_pending
+
+        mission.state = "EXPLORING"
+        mission.nav_client = FakeActionClient(True)
+        assert mission._send_nav_goal(
+            mission._make_pose(1.0, 0.0, 0.0), "frontier"
+        )
+        assert publisher.values[-1] is False
+    finally:
+        mission.destroy_node()
+
+
+def test_handoff_traversal_and_verification_never_unlock_nav2(ros_context):
+    """Every non-Nav2 ownership phase must keep autonomy_stop true."""
+    mission = AutonomousMission()
+    install_stable_navigation_health(mission)
+    stop = RecordingPublisher()
+    mission.autonomy_stop_pub = stop
+    mission.traverse_client = FakeActionClient(True)
+    mission.enabled = True
+    guidance = valid_wall_guidance()
+    try:
+        assert mission._queue_traversal_handoff(
+            guidance, "high_wall", (1.0, 0.0), time.monotonic()
+        )
+        assert mission.state == "HANDOFF"
+        assert stop.values[-1] is True
+        # A state-machine error/direct call cannot open Nav2 while handoff owns motion.
+        mission.nav_client = FakeActionClient(True)
+        assert not mission._send_nav_goal(
+            mission._make_pose(2.0, 0.0, 0.0), "frontier"
+        )
+        assert stop.values[-1] is True
+
+        install_fresh_wall_handoff(mission, guidance)
+        mission.state = "HANDOFF"
+        assert mission._start_traverse(guidance)
+        assert mission.state == "TRAVERSING"
+        assert stop.values[-1] is True
+    finally:
+        mission.destroy_node()
+
+
+def test_idle_or_restarted_mission_cannot_clear_an_expired_owner(ros_context):
+    """Only the verified clean-release method may publish lease=false."""
+    mission = AutonomousMission()
+    lease = RecordingPublisher()
+    mission.autonomy_lease_pub = lease
+    mission.enabled = False
+    mission.action_ownership_fault = False
+    try:
+        mission._tick()
+        assert lease.values == []
+        mission._release_autonomy_owner()
+        assert lease.values == [False]
     finally:
         mission.destroy_node()
 
@@ -537,6 +1152,18 @@ def test_traverse_final_gate_rejects_stale_or_mismatched_live_inputs(ros_context
         assert mission.pending_traverse is None
 
         guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.header.stamp.nanosec = 49_000_000
+        assert not mission._start_traverse(guidance)
+        assert client.sent == 0
+        assert mission.pending_traverse is None
+
+        guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.header.frame_id = "/base_link"
+        assert not mission._start_traverse(guidance)
+        assert client.sent == 0
+        assert mission.pending_traverse is None
+
+        guidance = install_fresh_wall_handoff(mission)
         mission.guidance.distance = 2.0
         # The current wall now projects one metre away from the frozen pending entry,
         # beyond the configured spatial identity tolerance.
@@ -557,13 +1184,800 @@ def test_traverse_final_gate_sends_only_the_fresh_revalidated_snapshot(ros_conte
         queued = install_fresh_wall_handoff(mission)
         live = valid_wall_guidance()
         live.distance = 1.1
+        live.lateral_offset = 0.05
+        live.heading_error = 0.08
         mission.guidance = live
         mission.guidance_received = time.monotonic()
+        mission.last_safety.distance = live.distance
+        mission.last_safety.lateral_offset = live.lateral_offset
+        observed_headers = []
+
+        def historical_pose(header=None):
+            observed_headers.append(header)
+            return (0.0, 0.0, 0.0)
+
+        mission._robot_pose = historical_pose
         assert mission._start_traverse(queued)
         assert client.sent == 1
-        assert mission.pending_traverse is live
+        assert mission.pending_traverse is not live
         assert client.last_goal.distance == pytest.approx(1.1)
         assert client.last_goal.distance != pytest.approx(queued.distance)
+        assert client.last_goal.lateral_offset == pytest.approx(0.05)
+        assert client.last_goal.heading_error == pytest.approx(0.08)
+        assert client.last_goal.confidence == pytest.approx(live.confidence)
+        assert client.last_goal.header == live.header
+        assert client.last_goal.header is not live.header
+        assert client.last_goal.obstacle_id == "high_wall"
+        assert client.last_goal.obstacle_type == TraverseObstacle.Goal.OBSTACLE_WALL
+        # Guidance READY is the broader task-level handoff at 1.20 m.  At 1.10 m the
+        # Action must still perform PREPARING; it is not yet in the 0.45 m lift window.
+        assert client.last_goal.entry_stage == TraverseObstacle.Goal.ENTRY_PREPARING
+        safety = mission.last_safety
+        for field in (
+            "obstacle_height",
+            "pit_depth",
+            "slope_pitch",
+            "slope_roll",
+            "roughness",
+            "width",
+            "structure_heading",
+            "structure_heading_confidence",
+            "clearance_height",
+            "valid_points",
+        ):
+            assert getattr(client.last_goal, field) == pytest.approx(
+                getattr(safety, field)
+            )
+        # Guidance and Safety are each projected with historical TF, never latest TF.
+        assert observed_headers == [live.header, safety.header]
+        assert mission.pending_traverse_robot_start == (0.0, 0.0)
+        assert mission.pending_traverse_position == pytest.approx((1.1, 0.05))
+    finally:
+        mission.destroy_node()
+
+
+def test_traverse_snapshot_requires_points_identity_and_spatially_paired_safety(
+    ros_context,
+):
+    """A Header match alone cannot combine geometry from a different obstacle."""
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.valid_points = 0
+        assert not mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 0
+
+        guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.semantic_id = "t_shaped_stairs"
+        assert not mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 0
+
+        guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.distance = 3.0
+        assert not mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 0
+    finally:
+        mission.destroy_node()
+
+
+def test_guidance_safety_spatial_pairing_has_a_tight_noise_boundary(ros_context):
+    """Synchronized headers cannot hide geometry from another nearby structure."""
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.distance = guidance.distance + 0.119
+        assert mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 1
+    finally:
+        mission.destroy_node()
+
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        mission.last_safety.distance = guidance.distance + 0.121
+        assert not mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 0
+    finally:
+        mission.destroy_node()
+
+
+def test_nonready_handoff_is_explicitly_a_preparing_action_goal(ros_context):
+    """A guarded early/stall handoff may approach, but may not masquerade as READY."""
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = valid_wall_guidance()
+        guidance.phase = TraversalGuidance.PHASE_ALIGN
+        guidance.ready_for_handoff = False
+        guidance.heading_error = 0.10
+        install_fresh_wall_handoff(mission, guidance)
+        assert mission._start_traverse(guidance)
+        assert (
+            mission.traverse_client.last_goal.entry_stage
+            == TraverseObstacle.Goal.ENTRY_PREPARING
+        )
+    finally:
+        mission.destroy_node()
+
+
+def test_guidance_ready_uses_controller_lift_window_for_action_entry_stage(
+    ros_context,
+):
+    """Task READY at 1.20 m cannot bypass the controller's 0.45 m lift window."""
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = valid_wall_guidance()
+        install_fresh_wall_handoff(mission, guidance)
+        # The default 1.0 m sample is READY to hand off, but the controller must still
+        # close the remaining distance before lifting a foot.
+        assert mission._start_traverse(guidance)
+        assert (
+            mission.traverse_client.last_goal.entry_stage
+            == TraverseObstacle.Goal.ENTRY_PREPARING
+        )
+    finally:
+        mission.destroy_node()
+
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = valid_wall_guidance()
+        guidance.distance = 0.45
+        guidance.lateral_offset = 0.10
+        guidance.heading_error = 0.08
+        install_fresh_wall_handoff(mission, guidance)
+        mission.last_safety.distance = guidance.distance
+        mission.last_safety.lateral_offset = guidance.lateral_offset
+        mission.pending_traverse_position = (
+            guidance.distance, guidance.lateral_offset
+        )
+        assert mission._start_traverse(guidance)
+        assert (
+            mission.traverse_client.last_goal.entry_stage
+            == TraverseObstacle.Goal.ENTRY_READY
+        )
+    finally:
+        mission.destroy_node()
+
+
+def test_action_handoff_rejects_lateral_pose_outside_controller_envelope(
+    ros_context,
+):
+    """The default server's exact 0.35 m PREPARING boundary is deterministic."""
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = valid_wall_guidance()
+        guidance.phase = TraversalGuidance.PHASE_ALIGN
+        guidance.ready_for_handoff = False
+        guidance.lateral_offset = 0.35
+        install_fresh_wall_handoff(mission, guidance)
+        mission.last_safety.lateral_offset = guidance.lateral_offset
+        mission.pending_traverse_position = (
+            guidance.distance, guidance.lateral_offset
+        )
+        assert mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 1
+        assert (
+            mission.traverse_client.last_goal.entry_stage
+            == TraverseObstacle.Goal.ENTRY_PREPARING
+        )
+    finally:
+        mission.destroy_node()
+
+    mission = AutonomousMission()
+    mission.traverse_client = FakeActionClient(True)
+    try:
+        guidance = valid_wall_guidance()
+        guidance.phase = TraversalGuidance.PHASE_ALIGN
+        guidance.ready_for_handoff = False
+        guidance.lateral_offset = 0.351
+        install_fresh_wall_handoff(mission, guidance)
+        mission.last_safety.lateral_offset = guidance.lateral_offset
+        mission.pending_traverse_position = (
+            guidance.distance, guidance.lateral_offset
+        )
+        assert not mission._start_traverse(guidance)
+        assert mission.traverse_client.sent == 0
+    finally:
+        mission.destroy_node()
+
+
+def _traverse_feedback(state, progress):
+    feedback = TraverseObstacle.Feedback()
+    feedback.state = int(state)
+    feedback.progress = float(progress)
+    return feedback
+
+
+def test_feedback_contract_enforces_entry_sequence_and_monotonic_progress():
+    preparing = TraverseObstacle.Goal.ENTRY_PREPARING
+    ready = TraverseObstacle.Goal.ENTRY_READY
+    state_preparing = TraverseObstacle.Feedback.STATE_PREPARING
+    state_traversing = TraverseObstacle.Feedback.STATE_TRAVERSING
+    state_stabilizing = TraverseObstacle.Feedback.STATE_STABILIZING
+
+    assert traversal_feedback_transition_is_valid(
+        preparing, 0, 0.0, state_preparing, 0.0
+    )
+    assert not traversal_feedback_transition_is_valid(
+        preparing, 0, 0.0, state_traversing, 0.1
+    )
+    assert not traversal_feedback_transition_is_valid(
+        ready, 0, 0.0, state_traversing, 0.2
+    )
+    assert traversal_feedback_transition_is_valid(
+        ready, 0, 0.0, state_preparing, 0.05
+    )
+    assert traversal_feedback_transition_is_valid(
+        ready, state_preparing, 0.05, state_traversing, 0.2
+    )
+    assert traversal_feedback_transition_is_valid(
+        ready, state_traversing, 0.2, state_stabilizing, 0.8
+    )
+    assert not traversal_feedback_transition_is_valid(
+        ready, state_stabilizing, 0.8, state_traversing, 0.9
+    )
+    assert not traversal_feedback_transition_is_valid(
+        ready, state_traversing, 0.5, state_traversing, 0.4
+    )
+    assert not traversal_feedback_transition_is_valid(
+        ready, state_traversing, 0.5, state_stabilizing, float("nan")
+    )
+
+
+def test_feedback_generation_isolated_and_invalid_sequence_cancels_known_owner(
+    ros_context,
+):
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        generation = mission.traverse_generation
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+
+        # A stale callback from a previous goal must not mutate the active generation.
+        mission._traverse_feedback(
+            SimpleNamespace(
+                feedback=_traverse_feedback(
+                    TraverseObstacle.Feedback.STATE_STABILIZING, 1.0
+                )
+            ),
+            generation - 1,
+        )
+        assert mission.traverse_feedback_state == 0
+        assert not mission.traverse_feedback_invalid
+
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_PREPARING, 0.1)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.4)
+        )
+        assert mission.traverse_feedback_state == TraverseObstacle.Feedback.STATE_TRAVERSING
+        progress_time = mission.traverse_progress_time
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.4)
+        )
+        assert mission.traverse_progress_time == progress_time
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_STABILIZING, 0.8)
+        )
+        # Regressing to TRAVERSING is a protocol fault.  The handle remains installed
+        # until result arrives, while exactly one cancel request is issued.
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.9)
+        )
+        assert mission.traverse_feedback_invalid
+        assert handle.cancel_calls == 1
+        assert mission.traverse_handle is handle
+        assert mission.traverse_cancel_pending
+    finally:
+        mission.destroy_node()
+
+
+def test_malformed_feedback_is_contained_cancelled_and_never_credited(ros_context):
+    """A corrupt controller sample cannot escape the callback or satisfy success."""
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        # Missing state/progress is a protocol error, not an executor exception.
+        client.publish_feedback(SimpleNamespace())
+        assert mission.traverse_feedback_invalid
+        assert handle.cancel_calls == 1
+        handle.result_future.complete(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="invalid fast success"),
+        ))
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "RECOVERY"
+    finally:
+        mission.destroy_node()
+
+
+def test_feedback_no_progress_timeout_cancels_but_keeps_remote_ownership(
+    ros_context,
+):
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        started = mission.traverse_progress_time
+        assert not mission._check_traversal_progress(
+            started + float(mission.params["traversal_progress_timeout"]) - 0.01
+        )
+        assert mission._check_traversal_progress(
+            started + float(mission.params["traversal_progress_timeout"])
+        )
+        assert handle.cancel_calls == 1
+        assert mission.traverse_handle is handle
+        assert mission.traverse_cancel_pending
+        assert mission.completed_semantics == []
+    finally:
+        mission.destroy_node()
+
+
+def test_action_success_without_terminal_feedback_cannot_enter_verification(
+    ros_context,
+):
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        wrapped = SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="premature success"),
+        )
+        handle.result_future.complete(wrapped)
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "RECOVERY"
+    finally:
+        mission.destroy_node()
+
+
+def test_partial_terminal_feedback_cannot_be_reported_as_success(ros_context):
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_PREPARING, 0.1)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.5)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_STABILIZING, 0.99)
+        )
+        handle.result_future.complete(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="partial progress"),
+        ))
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "RECOVERY"
+    finally:
+        mission.destroy_node()
+
+
+def test_valid_terminal_feedback_allows_independent_crossing_verification(ros_context):
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_PREPARING, 0.1)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.5)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_STABILIZING, 1.0)
+        )
+        handle.result_future.complete(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="stable landing"),
+        ))
+        assert mission.traversal_verification is not None
+        assert mission.traversal_verification.semantic_id == "high_wall"
+        assert mission.completed_semantics == []
+        assert mission.state == "VERIFYING_TRAVERSAL_RESULT"
+    finally:
+        mission.destroy_node()
+
+
+def test_hard_deadline_without_handle_is_terminal_and_never_claims_return(
+    ros_context,
+):
+    """At 300 s the mission stops even when map/TF/health inputs are unavailable."""
+    mission = AutonomousMission()
+    stop = RecordingPublisher()
+    mission.autonomy_stop_pub = stop
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.mission_started = (
+        time.monotonic() - float(mission.params["mission_timeout"])
+    )
+    try:
+        mission._tick()
+        assert mission.hard_deadline_active
+        assert not mission.enabled
+        assert mission.state == "INCOMPLETE_STOP"
+        assert not mission.returned_home
+        assert mission.completed_semantics == []
+        assert stop.values[-1] is True
+        # A late scheduler call cannot open the Nav2 branch after the terminal state.
+        install_stable_navigation_health(mission)
+        mission.nav_client = FakeActionClient(True)
+        assert not mission._send_nav_goal(
+            mission._make_pose(1.0, 0.0, 0.0), "return_home"
+        )
+    finally:
+        mission.destroy_node()
+
+
+def test_hard_deadline_cancels_active_nav_and_late_success_stays_incomplete(
+    ros_context,
+):
+    mission = AutonomousMission()
+    handle = FakeGoalHandle()
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.nav_generation = 4
+    mission.nav_handle = handle
+    mission.nav_purpose = "return_home"
+    mission.nav_target = (0.0, 0.0)
+    mission.nav_goal_pose = mission._make_pose(0.0, 0.0, 0.0)
+    try:
+        now = time.monotonic()
+        mission.mission_started = now - float(mission.params["mission_timeout"])
+        mission._enforce_hard_deadline(now)
+        assert handle.cancel_calls == 1
+        assert mission.nav_cancel_pending
+        assert mission.nav_handle is handle
+        result = PendingFuture()
+        result.value = SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED)
+        mission._nav_result(result, 4)
+        assert mission.nav_handle is None
+        assert mission.state == "INCOMPLETE_STOP"
+        assert not mission.returned_home
+        assert mission.completed_semantics == []
+    finally:
+        mission.destroy_node()
+
+
+def test_hard_deadline_cancels_active_traverse_and_ignores_late_success(
+    ros_context,
+):
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        generation = mission.traverse_generation
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_PREPARING, 0.1)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.5)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_STABILIZING, 1.0)
+        )
+        now = time.monotonic()
+        mission.home_pose = (0.0, 0.0, 0.0)
+        mission.mission_started = now - float(mission.params["mission_timeout"])
+        mission._enforce_hard_deadline(now)
+        assert handle.cancel_calls == 1
+        assert mission.traverse_handle is handle
+        result = PendingFuture()
+        result.value = SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="late success"),
+        )
+        mission._traverse_result(result, generation)
+        assert mission.traverse_handle is None
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "INCOMPLETE_STOP"
+    finally:
+        mission.destroy_node()
+
+
+def test_hard_deadline_pending_send_cancels_late_accepted_handle(ros_context):
+    """A request with no handle remains owned until its late response can be cancelled."""
+    mission = AutonomousMission()
+    install_stable_navigation_health(mission)
+    pending = PendingFuture()
+    mission.nav_client = FakeActionClient(True, pending)
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    try:
+        assert mission._send_nav_goal(
+            mission._make_pose(2.0, 0.0, 0.0), "frontier"
+        )
+        now = time.monotonic()
+        mission.mission_started = now - float(mission.params["mission_timeout"])
+        mission._enforce_hard_deadline(now)
+        assert mission.nav_send_pending
+        late_handle = FakeGoalHandle()
+        pending.complete(late_handle)
+        assert mission.nav_handle is late_handle
+        assert late_handle.cancel_calls == 1
+        assert mission.nav_cancel_pending
+        assert mission.state == "INCOMPLETE_STOP"
+    finally:
+        mission.destroy_node()
+
+
+def test_hard_deadline_pending_traverse_send_cancels_late_acceptance(
+    ros_context,
+):
+    """A handle-less Traverse request is retained until its callback can cancel it."""
+    mission = AutonomousMission()
+    pending = PendingFuture()
+    mission.traverse_client = FakeActionClient(True, pending)
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        now = time.monotonic()
+        mission.home_pose = (0.0, 0.0, 0.0)
+        mission.mission_started = now - float(mission.params["mission_timeout"])
+        mission._enforce_hard_deadline(now)
+        assert mission.traverse_send_pending
+        late_handle = FakeGoalHandle()
+        pending.complete(late_handle)
+        assert mission.traverse_handle is late_handle
+        assert late_handle.cancel_calls == 1
+        assert mission.traverse_cancel_pending
+        assert mission.state == "INCOMPLETE_STOP"
+        assert mission.completed_semantics == []
+    finally:
+        mission.destroy_node()
+
+
+def test_goal_response_callback_itself_enforces_elapsed_hard_deadline(
+    ros_context,
+):
+    """A response racing the 4 Hz timer cannot run until the next tick."""
+    mission = AutonomousMission()
+    install_stable_navigation_health(mission)
+    pending = PendingFuture()
+    mission.nav_client = FakeActionClient(True, pending)
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    try:
+        assert mission._send_nav_goal(
+            mission._make_pose(2.0, 0.0, 0.0), "frontier"
+        )
+        mission.mission_started = (
+            time.monotonic() - float(mission.params["mission_timeout"])
+        )
+        late_handle = FakeGoalHandle()
+        pending.complete(late_handle)
+        assert mission.hard_deadline_active
+        assert late_handle.cancel_calls == 1
+        assert mission.nav_cancel_pending
+        assert mission.state == "INCOMPLETE_STOP"
+        assert not mission.returned_home
+    finally:
+        mission.destroy_node()
+
+
+def test_result_callback_itself_rejects_success_after_hard_deadline(ros_context):
+    """A terminal traversal result cannot win a race against the 300 s deadline."""
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_PREPARING, 0.1)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.5)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_STABILIZING, 1.0)
+        )
+        mission.home_pose = (0.0, 0.0, 0.0)
+        mission.mission_started = (
+            time.monotonic() - float(mission.params["mission_timeout"])
+        )
+        handle.result_future.complete(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="late success"),
+        ))
+        assert mission.hard_deadline_active
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "INCOMPLETE_STOP"
+        assert not mission.returned_home
+    finally:
+        mission.destroy_node()
+
+
+def test_hard_deadline_cancel_timeout_latches_unknown_ownership_fault(ros_context):
+    """No result after hard-stop cancel is an ownership fault, never a clean stop."""
+    mission = AutonomousMission()
+    stop = RecordingPublisher()
+    mission.autonomy_stop_pub = stop
+    handle = FakeGoalHandle()
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.nav_generation = 5
+    mission.nav_handle = handle
+    mission.nav_purpose = "return_home"
+    try:
+        now = time.monotonic()
+        mission.mission_started = now - float(mission.params["mission_timeout"])
+        mission._enforce_hard_deadline(now)
+        assert mission.nav_cancel_pending
+        assert mission._check_action_watchdogs(
+            mission.nav_cancel_started
+            + float(mission.params["action_cancel_timeout"])
+        )
+        assert mission.action_ownership_fault
+        assert mission.state == "INCOMPLETE_STOP_OWNERSHIP_FAULT"
+        assert stop.values[-1] is True
+        assert not mission.returned_home
+        assert mission.completed_semantics == []
+    finally:
+        mission.destroy_node()
+
+
+def test_work_deadline_cancels_unfinished_nav_without_consuming_failure_budget(
+    ros_context,
+):
+    mission = AutonomousMission()
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.nav_generation = 3
+    mission.nav_handle = FakeGoalHandle()
+    mission.nav_purpose = "frontier"
+    mission.nav_target = (2.0, 0.0)
+    blocked_before = list(mission.blocked_frontiers)
+    try:
+        now = time.monotonic()
+        mission.mission_started = now - (
+            float(mission.params["mission_timeout"])
+            - float(mission.params["return_time_reserve"])
+        )
+        assert mission._work_deadline_reached(now)
+        assert mission._begin_return_phase(now)
+        assert mission.nav_cancel_pending
+        assert mission.nav_cancel_reason == "work_deadline"
+        result = PendingFuture()
+        result.value = SimpleNamespace(status=GoalStatus.STATUS_CANCELED)
+        mission._nav_result(result, 3)
+        assert mission.state == "RETURNING_TO_FINISH"
+        assert mission.blocked_frontiers == blocked_before
+        assert not mission.returned_home
+        assert not mission.hard_deadline_active
+    finally:
+        mission.destroy_node()
+
+
+def test_nav_result_callback_latches_elapsed_work_deadline_without_new_work(
+    ros_context,
+):
+    """A frontier result at 240 s transitions directly to return scheduling."""
+    mission = AutonomousMission()
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.nav_generation = 9
+    mission.nav_handle = FakeGoalHandle()
+    mission.nav_purpose = "frontier"
+    mission.nav_target = (2.0, 0.0)
+    blocked_before = list(mission.blocked_frontiers)
+    try:
+        mission.mission_started = time.monotonic() - (
+            float(mission.params["mission_timeout"])
+            - float(mission.params["return_time_reserve"])
+        )
+        result = PendingFuture()
+        result.value = SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED)
+        mission._nav_result(result, 9)
+        assert mission.return_phase_requested
+        assert mission.state == "RETURNING_TO_FINISH"
+        assert mission.blocked_frontiers == blocked_before
+        assert mission.nav_handle is None
+        assert not mission.returned_home
+    finally:
+        mission.destroy_node()
+
+
+def test_work_deadline_cancels_unfinished_traverse_then_returns(ros_context):
+    """The 240 s work boundary drains traversal ownership without fake credit."""
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        generation = mission.traverse_generation
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        now = time.monotonic()
+        mission.home_pose = (0.0, 0.0, 0.0)
+        mission.mission_started = now - (
+            float(mission.params["mission_timeout"])
+            - float(mission.params["return_time_reserve"])
+        )
+        assert mission._begin_return_phase(now)
+        assert handle.cancel_calls == 1
+        assert mission.traverse_cancel_reason == "work deadline return"
+        result = PendingFuture()
+        result.value = SimpleNamespace(
+            status=GoalStatus.STATUS_CANCELED,
+            result=SimpleNamespace(success=False, message="work deadline"),
+        )
+        mission._traverse_result(result, generation)
+        assert mission.traverse_handle is None
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "RETURNING_TO_FINISH"
+        assert mission.enabled
+    finally:
+        mission.destroy_node()
+
+
+def test_work_deadline_does_not_cancel_an_already_active_return_goal(ros_context):
+    """An early return remains the sole Nav owner when the reserve window begins."""
+    mission = AutonomousMission()
+    stop = RecordingPublisher()
+    mission.autonomy_stop_pub = stop
+    mission.enabled = True
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.nav_handle = FakeGoalHandle()
+    mission.nav_purpose = "return_home"
+    try:
+        now = time.monotonic()
+        mission.mission_started = now - (
+            float(mission.params["mission_timeout"])
+            - float(mission.params["return_time_reserve"])
+        )
+        assert not mission._begin_return_phase(now)
+        assert mission.nav_handle.cancel_calls == 0
+        assert not mission.nav_cancel_pending
+        assert stop.values == []
+        assert mission.state == "RETURNING_TO_FINISH"
     finally:
         mission.destroy_node()
 
@@ -575,6 +1989,7 @@ def test_nav_server_not_ready_does_not_consume_search_recovery_or_revisit(
     mission = AutonomousMission()
     mission.nav_client = FakeActionClient(False)
     grid = OccupancyGrid()
+    grid.header.frame_id = "map"
     grid.info.width = 20
     grid.info.height = 20
     grid.info.resolution = 0.2
@@ -589,7 +2004,10 @@ def test_nav_server_not_ready_does_not_consume_search_recovery_or_revisit(
     mission.home_pose = (0.0, 0.0, 0.0)
     mission.mission_started = now
     mission.mission_ready_after = 0.0
-    mission._robot_pose = lambda: (0.0, 0.0, 0.0)
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    mission.navigation_healthy = True
+    mission.navigation_health_received = now
+    mission.navigation_health_true_since = now - 2.0
     monkeypatch.setattr(mission_module, "extract_frontiers", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         mission_module, "extract_coverage_goals", lambda *args, **kwargs: []

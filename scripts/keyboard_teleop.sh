@@ -9,9 +9,7 @@ source /opt/ros/jazzy/setup.bash
 source "${WAKULA_ROOT}/install/setup.bash"
 set -u
 
-# 独立手动话题由 Gazebo 专用 mux 赋予短时最高优先级，避免与 Collision Monitor 的
-# /cmd_vel 零速度竞争。repeat_rate 保证按住键时连续运动，key_timeout 负责松键停车。
+# Jazzy 自带 teleop_twist_keyboard 每次按键只发布一帧 Twist；按住时由终端键盘重复产生
+# 后续事件。Gazebo 专用 mux 对该候选使用 0.7 s 墙钟超时，输入停止后负责持续归零。
 exec ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args \
-  --remap cmd_vel:=/cmd_vel_teleop \
-  --param repeat_rate:=20.0 \
-  --param key_timeout:=0.6
+  --remap cmd_vel:=/cmd_vel_teleop

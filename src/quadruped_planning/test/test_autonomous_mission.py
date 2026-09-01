@@ -15,7 +15,6 @@ from quadruped_planning.autonomous_mission import (
     action_obstacle_type,
     bounded_shutdown_wait,
     bounded_alignment_delta,
-    canonical_obstacle_id,
     choose_frontier,
     choose_pending_obstacle,
     close_handoff_is_safe,
@@ -39,9 +38,13 @@ from quadruped_planning.autonomous_mission import (
     matching_pending_semantic_from_viewpoint,
     nav_status_allows_guarded_handoff,
     normalized_angle,
+    normalize_semantic_id,
     obstacle_revisit_delay,
     obstacle_geometry_fits_candidate,
     obstacle_was_completed,
+    occupancy_grid_is_well_formed,
+    observation_header_is_well_formed,
+    observation_headers_are_synchronized,
     planar_pose_from_transform,
     resolve_completed_semantics,
     inventory_message,
@@ -64,10 +67,12 @@ from quadruped_planning.autonomous_mission import (
 from action_msgs.msg import GoalStatus
 from quadruped_interfaces.action import TraverseObstacle
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
+from quadruped_planning.terrain_safety_assessor import classify_front_obstacle
 
 
 def map_with_unknown_border():
     grid = OccupancyGrid()
+    grid.header.frame_id = "map"
     grid.info.width = 12
     grid.info.height = 10
     grid.info.resolution = 0.5
@@ -81,6 +86,20 @@ def map_with_unknown_border():
             data[row * grid.info.width + col] = 0
     grid.data = data
     return grid
+
+
+def coherent_action_safety(semantic_id, obstacle_type, **measurements):
+    """Build one finite metric sample suitable for the mission's final pure gate."""
+    safety = NavigationSafety()
+    safety.mode = NavigationSafety.MODE_STOP
+    safety.perception_valid = True
+    safety.obstacle_type = int(obstacle_type)
+    safety.semantic_id = str(semantic_id)
+    safety.confidence = 0.95
+    safety.valid_points = 120
+    for name, value in measurements.items():
+        setattr(safety, name, value)
+    return safety
 
 
 def test_frontier_goal_is_on_known_free_space_and_scored():
@@ -104,6 +123,56 @@ def test_invalid_or_tiny_maps_have_no_frontier():
     assert extract_frontiers(OccupancyGrid(), (0.0, 0.0)) == []
     grid = map_with_unknown_border()
     assert extract_frontiers(grid, (0.0, 0.0), minimum_cells=100) == []
+
+
+def test_occupancy_grid_contract_rejects_bad_metadata_without_throwing():
+    grid = map_with_unknown_border()
+    assert occupancy_grid_is_well_formed(grid)
+
+    grid.info.resolution = float("nan")
+    assert not occupancy_grid_is_well_formed(grid)
+    assert extract_frontiers(grid, (0.0, 0.0)) == []
+    assert world_to_cell(grid, 0.0, 0.0) is None
+
+    grid = map_with_unknown_border()
+    grid.info.origin.orientation.w = 2.0
+    assert not occupancy_grid_is_well_formed(grid)
+    grid = map_with_unknown_border()
+    grid.data = grid.data[:-1]
+    assert not occupancy_grid_is_well_formed(grid)
+    grid = map_with_unknown_border()
+    grid.data[0] = 101
+    assert not occupancy_grid_is_well_formed(grid)
+    grid = map_with_unknown_border()
+    grid.header.frame_id = "odom"
+    assert not occupancy_grid_is_well_formed(grid)
+
+
+def test_typed_observation_headers_require_same_frame_and_sample_time():
+    safety = NavigationSafety()
+    guidance = TraversalGuidance()
+    for msg in (safety, guidance):
+        msg.header.frame_id = "base_link"
+        msg.header.stamp.sec = 10
+        msg.header.stamp.nanosec = 100_000_000
+    assert observation_header_is_well_formed(safety.header, "base_link")
+    assert observation_headers_are_synchronized(safety.header, guidance.header)
+    # Even 49 ms is a different sensor frame and may carry the next obstacle identity.
+    guidance.header.stamp.nanosec = 149_000_000
+    assert not observation_headers_are_synchronized(
+        safety.header, guidance.header
+    )
+    guidance = TraversalGuidance()
+    guidance.header.frame_id = "camera_link"
+    guidance.header.stamp.sec = 10
+    guidance.header.stamp.nanosec = 100_000_000
+    assert not observation_headers_are_synchronized(
+        safety.header, guidance.header
+    )
+    safety.header.frame_id = "/base_link"
+    assert not observation_header_is_well_formed(safety.header, "base_link")
+    guidance.header.frame_id = "/base_link"
+    assert not observation_headers_are_synchronized(safety.header, guidance.header)
 
 
 def test_terminal_arrival_uses_position_even_if_yaw_differs():
@@ -199,6 +268,7 @@ def test_frontier_goal_rejects_unknown_clearance_disk():
 def test_recovery_station_avoids_occupied_forward_corridor():
     """Recovery must choose a free side instead of blindly re-entering a step."""
     grid = OccupancyGrid()
+    grid.header.frame_id = "map"
     grid.info.width = 60
     grid.info.height = 60
     grid.info.resolution = 0.10
@@ -227,6 +297,7 @@ def test_recovery_station_fails_closed_without_body_clearance():
 def test_coverage_goals_visit_known_free_space_after_frontiers_disappear():
     """地图全 known 时仍须巡检未走近区域，而不是原地旋转并提前结束。"""
     grid = OccupancyGrid()
+    grid.header.frame_id = "map"
     grid.info.width = 20
     grid.info.height = 12
     grid.info.resolution = 0.25
@@ -477,18 +548,23 @@ def test_stable_semantic_controls_final_action_when_near_view_degrades():
     )
 
 
-def test_competition_names_have_stable_ids_without_world_coordinates():
-    assert canonical_obstacle_id("直角绕杆区（立柱）") == "right_angle_poles"
-    assert canonical_obstacle_id("砂砾与碎木坑") == "gravel_wood_pit"
-    assert canonical_obstacle_id("限高杆（支柱结构）") == "height_bar"
-    assert canonical_obstacle_id("主斜坡（10°坡面）") == "main_slope"
-    assert canonical_obstacle_id("木桥 B（桥板间隙）") == "wooden_bridge_b"
-    assert canonical_obstacle_id("木桥引坡（14°，A/B 待结构确认）") == "wooden_bridge_unknown"
-    assert canonical_obstacle_id("台阶或木桥踏板（待结构确认）") == ""
-    assert canonical_obstacle_id("T 字形台阶") == "t_shaped_stairs"
-    assert canonical_obstacle_id("高墙") == "high_wall"
-    assert canonical_obstacle_id("场地边界（禁止越界）") == ""
-    assert canonical_obstacle_id("视觉检测到有色障碍") == ""
+def test_mission_accepts_only_typed_english_semantics():
+    for semantic_id in (
+        "right_angle_poles",
+        "gravel_wood_pit",
+        "height_bar",
+        "main_slope",
+        "wooden_bridge_a",
+        "wooden_bridge_b",
+        "wooden_bridge_unknown",
+        "t_shaped_stairs",
+        "high_wall",
+        "arena_boundary",
+    ):
+        assert normalize_semantic_id(semantic_id) == semantic_id
+    # Operator wording/language may change freely and can never become control input.
+    assert normalize_semantic_id("高墙") == ""
+    assert normalize_semantic_id("high wall") == ""
     assert is_actionable_semantic_id("wooden_bridge_a")
     assert is_actionable_semantic_id("wooden_bridge_b")
     # “桥型待确认”与 T 台首级踏面仍有歧义，只能继续换视角，不能触发盲目前冲。
@@ -544,35 +620,312 @@ def test_completed_unique_semantic_is_never_reexecuted_but_bridge_pair_can_finis
 
 
 def test_bridge_platform_alone_cannot_be_traversed_without_a_or_b_evidence():
-    from quadruped_interfaces.msg import NavigationSafety
-
-    deck = NavigationSafety()
-    deck.perception_valid = True
-    deck.obstacle_type = NavigationSafety.OBSTACLE_STEP
-    deck.obstacle_height = 0.24
-    deck.width = 1.0
-    deck.roughness = 0.018
-    deck.slope_pitch = 0.02
-    deck.slope_roll = 0.01
+    deck = coherent_action_safety(
+        "wooden_bridge_unknown",
+        NavigationSafety.OBSTACLE_STEP,
+        obstacle_height=0.24,
+        width=1.0,
+        roughness=0.018,
+        slope_pitch=0.02,
+        slope_roll=0.01,
+    )
     assert not obstacle_geometry_fits_candidate("wooden_bridge_unknown", deck)
 
 
 def test_high_wall_geometry_rejects_pit_rail_but_accepts_full_face():
-    safety = NavigationSafety()
-    safety.perception_valid = True
-    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
-    safety.obstacle_height = 0.25
-    safety.width = 1.0
+    safety = coherent_action_safety(
+        "high_wall",
+        NavigationSafety.OBSTACLE_WALL,
+        obstacle_height=0.25,
+        width=1.0,
+    )
     assert not obstacle_geometry_fits_candidate("high_wall", safety)
     safety.obstacle_height = 0.30
     assert obstacle_geometry_fits_candidate("high_wall", safety)
 
 
+def test_every_actionable_classifier_path_is_accepted_by_the_same_frame_gate():
+    """The mission must not contradict any executable assessor classification.
+
+    Each sample selects one distinct branch of ``classify_front_obstacle``.  In
+    particular this preserves the partial-view aliases that used to be rejected by a
+    second, incompatible set of mission-side thresholds: a height bar seen as one POLE,
+    a pit rail/high-wall edge seen as BAR, and bridge entrances seen as PIT.
+    """
+    profiles = (
+        # POLE: either the full competition pole or a cropped height-bar support.
+        (
+            "pole/full",
+            "right_angle_poles",
+            NavigationSafety.OBSTACLE_POLE,
+            {"obstacle_height": 0.55, "width": 0.08},
+        ),
+        (
+            "pole/height-bar-support",
+            "height_bar",
+            NavigationSafety.OBSTACLE_POLE,
+            {"obstacle_height": 0.32, "width": 0.10},
+        ),
+        # PIT: negative returns can be the pit, an occluded wall/stair or a bridge.
+        (
+            "pit/high-wall-occlusion",
+            "high_wall",
+            NavigationSafety.OBSTACLE_PIT,
+            {
+                "obstacle_height": 0.05,
+                "pit_depth": 0.40,
+                "slope_pitch": 0.261799,
+                "roughness": 0.05,
+                "width": 1.0,
+            },
+        ),
+        (
+            "pit/t-stair-reference-plane",
+            "t_shaped_stairs",
+            NavigationSafety.OBSTACLE_PIT,
+            {
+                "obstacle_height": 0.08,
+                "pit_depth": 0.28,
+                "slope_pitch": 0.349066,
+                "slope_roll": 0.0,
+                "roughness": 0.04,
+                "width": 1.0,
+            },
+        ),
+        (
+            "pit/bridge-a-slope-foot",
+            "wooden_bridge_a",
+            NavigationSafety.OBSTACLE_PIT,
+            {
+                "obstacle_height": 0.05,
+                "pit_depth": 0.15,
+                "slope_pitch": 0.244346,
+                "roughness": 0.02,
+                "width": 1.0,
+            },
+        ),
+        (
+            "pit/bridge-b-board-gap",
+            "wooden_bridge_b",
+            NavigationSafety.OBSTACLE_PIT,
+            {
+                "obstacle_height": 0.20,
+                "pit_depth": 0.16,
+                "roughness": 0.05,
+                "width": 1.0,
+            },
+        ),
+        (
+            "pit/gravel-and-wood",
+            "gravel_wood_pit",
+            NavigationSafety.OBSTACLE_PIT,
+            {
+                "obstacle_height": 0.15,
+                "pit_depth": 0.10,
+                "roughness": 0.055,
+                "width": 1.0,
+            },
+        ),
+        # BAR: width separates the pit rail from a high-wall top edge.
+        (
+            "bar/pit-rail",
+            "gravel_wood_pit",
+            NavigationSafety.OBSTACLE_BAR,
+            {
+                "obstacle_height": 0.15,
+                "clearance_height": 0.20,
+                "width": 0.60,
+            },
+        ),
+        (
+            "bar/high-wall-edge",
+            "high_wall",
+            NavigationSafety.OBSTACLE_BAR,
+            {
+                "obstacle_height": 0.20,
+                "clearance_height": 0.20,
+                "width": 1.0,
+            },
+        ),
+        (
+            "bar/height-bar",
+            "height_bar",
+            NavigationSafety.OBSTACLE_BAR,
+            {
+                "obstacle_height": 0.32,
+                "clearance_height": 0.20,
+                "width": 1.0,
+            },
+        ),
+        # WALL: both a rough narrow pit rail and the actual wall are executable clues.
+        (
+            "wall/pit-rail",
+            "gravel_wood_pit",
+            NavigationSafety.OBSTACLE_WALL,
+            {"obstacle_height": 0.25, "roughness": 0.06, "width": 0.60},
+        ),
+        (
+            "wall/high-wall-face",
+            "high_wall",
+            NavigationSafety.OBSTACLE_WALL,
+            {"obstacle_height": 0.30, "roughness": 0.02, "width": 1.0},
+        ),
+        # STEP: cover both pit-fill envelopes, periodic bridge B and the T platform.
+        (
+            "step/bridge-b-periodic-boards",
+            "wooden_bridge_b",
+            NavigationSafety.OBSTACLE_STEP,
+            {"obstacle_height": 0.22, "roughness": 0.09, "width": 1.0},
+        ),
+        (
+            "step/gravel-entry",
+            "gravel_wood_pit",
+            NavigationSafety.OBSTACLE_STEP,
+            {"obstacle_height": 0.15, "roughness": 0.06, "width": 0.60},
+        ),
+        (
+            "step/gravel-fill",
+            "gravel_wood_pit",
+            NavigationSafety.OBSTACLE_STEP,
+            {
+                "obstacle_height": 0.21,
+                "pit_depth": 0.05,
+                "roughness": 0.06,
+                "width": 1.0,
+            },
+        ),
+        (
+            "step/t-stair-top",
+            "t_shaped_stairs",
+            NavigationSafety.OBSTACLE_STEP,
+            {"obstacle_height": 0.40, "roughness": 0.01, "width": 1.0},
+        ),
+        (
+            "step/t-stair-profile",
+            "t_shaped_stairs",
+            NavigationSafety.OBSTACLE_STEP,
+            {
+                "obstacle_height": 0.081,
+                "slope_pitch": 0.2833,
+                "slope_roll": 0.0005,
+                "roughness": 0.029,
+                "width": 0.998,
+            },
+        ),
+        # CLEAR still carries executable slope semantics when its pitch is distinctive.
+        (
+            "clear/main-slope",
+            "main_slope",
+            NavigationSafety.OBSTACLE_CLEAR,
+            {"slope_pitch": 0.197222, "slope_roll": 0.0},
+        ),
+        (
+            "clear/bridge-a-slope",
+            "wooden_bridge_a",
+            NavigationSafety.OBSTACLE_CLEAR,
+            {"slope_pitch": 0.244346, "slope_roll": 0.0},
+        ),
+    )
+
+    for label, expected, obstacle_type, measurements in profiles:
+        safety = coherent_action_safety(expected, obstacle_type, **measurements)
+        assert classify_front_obstacle(safety).semantic_id == expected, label
+        coarse_action_type = (
+            TraverseObstacle.Goal.OBSTACLE_SLOPE
+            if obstacle_type == NavigationSafety.OBSTACLE_CLEAR
+            else obstacle_type
+        )
+        assert (
+            semantic_id_for_action(expected, coarse_action_type) == expected
+        ), label
+        assert obstacle_geometry_fits_candidate(expected, safety), label
+
+
+def test_final_geometry_gate_rejects_forged_stale_or_malformed_semantics():
+    """Typed identity, same-frame geometry and generic metric guards all fail closed."""
+    wall = coherent_action_safety(
+        "high_wall",
+        NavigationSafety.OBSTACLE_WALL,
+        obstacle_height=0.30,
+        roughness=0.02,
+        width=1.0,
+    )
+    assert obstacle_geometry_fits_candidate("high_wall", wall)
+
+    # A caller cannot relabel one valid frame as another competition obstacle.
+    assert not obstacle_geometry_fits_candidate("height_bar", wall)
+    wall.semantic_id = "height_bar"
+    assert not obstacle_geometry_fits_candidate("height_bar", wall)
+
+    # A temporally stabilised old ID must not authorize newly changed geometry.  It may
+    # pass only after the assessor has also published the new stable semantic ID.
+    wall.semantic_id = "high_wall"
+    wall.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    wall.obstacle_height = 0.40
+    wall.roughness = 0.01
+    assert classify_front_obstacle(wall).semantic_id == "t_shaped_stairs"
+    assert not obstacle_geometry_fits_candidate("high_wall", wall)
+
+    for field, bad_value in (
+        ("valid_points", 0),
+        ("obstacle_height", float("nan")),
+        ("pit_depth", -0.01),
+    ):
+        sample = coherent_action_safety(
+            "high_wall",
+            NavigationSafety.OBSTACLE_WALL,
+            obstacle_height=0.30,
+            roughness=0.02,
+            width=1.0,
+        )
+        setattr(sample, field, bad_value)
+        assert not obstacle_geometry_fits_candidate("high_wall", sample), field
+
+    invalid = coherent_action_safety(
+        "high_wall",
+        NavigationSafety.OBSTACLE_WALL,
+        obstacle_height=0.30,
+        roughness=0.02,
+        width=1.0,
+    )
+    invalid.perception_valid = False
+    assert not obstacle_geometry_fits_candidate("high_wall", invalid)
+
+    # A colour-only OpenCV hint cannot turn geometrically clear ground into an Action.
+    visual_only = coherent_action_safety(
+        "high_wall", NavigationSafety.OBSTACLE_CLEAR
+    )
+    visual_only.visual_assist_active = True
+    assert classify_front_obstacle(visual_only, "高墙").semantic_id == ""
+    assert not obstacle_geometry_fits_candidate("high_wall", visual_only)
+
+    # Both identifiers are intentionally non-executable even when their metric frame is
+    # otherwise well formed: an arena edge is unsafe, and a plain bridge deck is ambiguous.
+    boundary = coherent_action_safety(
+        "arena_boundary",
+        NavigationSafety.OBSTACLE_PIT,
+        pit_depth=0.12,
+        roughness=0.02,
+        width=1.0,
+    )
+    assert classify_front_obstacle(boundary).semantic_id == "arena_boundary"
+    assert not obstacle_geometry_fits_candidate("arena_boundary", boundary)
+    deck = coherent_action_safety(
+        "wooden_bridge_unknown",
+        NavigationSafety.OBSTACLE_STEP,
+        obstacle_height=0.22,
+        roughness=0.01,
+        width=1.0,
+    )
+    assert classify_front_obstacle(deck).semantic_id == "wooden_bridge_unknown"
+    assert not obstacle_geometry_fits_candidate("wooden_bridge_unknown", deck)
+
+
 def test_t_stair_action_gate_accepts_field_stepped_profile_not_slope_side():
     """最终 Action 闸门必须与无闪现名称证据一致，同时拒绝主坡侧面。"""
-    safety = NavigationSafety()
-    safety.perception_valid = True
-    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety = coherent_action_safety(
+        "t_shaped_stairs", NavigationSafety.OBSTACLE_STEP
+    )
     # Stable Gazebo field sample: the fitted reference plane absorbs most tread
     # height, while the stepped pitch/roughness/width remain distinctive.
     safety.obstacle_height = 0.081
@@ -619,28 +972,40 @@ def test_t_stair_action_gate_accepts_field_stepped_profile_not_slope_side():
     safety.slope_pitch = 0.0
     assert not obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
 
-    pole = NavigationSafety()
-    pole.perception_valid = True
-    pole.obstacle_type = NavigationSafety.OBSTACLE_POLE
-    pole.obstacle_height = 0.50
-    pole.width = 0.08
-    pole.pit_depth = -0.01
+    pole = coherent_action_safety(
+        "right_angle_poles",
+        NavigationSafety.OBSTACLE_POLE,
+        obstacle_height=0.50,
+        width=0.08,
+        pit_depth=-0.01,
+    )
     assert not obstacle_geometry_fits_candidate("right_angle_poles", pole)
 
 
 def test_final_geometry_gate_fails_closed_without_fresh_valid_safety():
     """名称和 guidance 不能代替新鲜米制 Action 证据。"""
     mission = object.__new__(AutonomousMission)
-    mission.params = {"safety_geometry_stale_seconds": 0.35}
+    mission.params = {
+        "safety_geometry_stale_seconds": 0.35,
+        "observation_frame": "base_link",
+    }
+    guidance = TraversalGuidance()
+    guidance.header.frame_id = "base_link"
+    guidance.header.stamp.sec = 10
+    guidance.semantic_id = "high_wall"
+    guidance.obstacle_type = TraversalGuidance.OBSTACLE_WALL
+    mission.guidance = guidance
     mission.last_safety = None
     mission.safety_received = 0.0
     assert not mission._geometry_supports_obstacle_id("high_wall", now=10.0)
 
-    wall = NavigationSafety()
-    wall.perception_valid = True
-    wall.obstacle_type = NavigationSafety.OBSTACLE_WALL
-    wall.obstacle_height = 0.30
-    wall.width = 1.0
+    wall = coherent_action_safety(
+        "high_wall",
+        NavigationSafety.OBSTACLE_WALL,
+        obstacle_height=0.30,
+        width=1.0,
+    )
+    wall.header = guidance.header
     wall.slope_pitch = 0.0
     mission.last_safety = wall
     mission.safety_received = 10.0
@@ -650,6 +1015,10 @@ def test_final_geometry_gate_fails_closed_without_fresh_valid_safety():
     # 明确无效帧立即撤销旧有效几何，即使接收时间仍在新鲜窗口内。
     invalid = NavigationSafety()
     invalid.perception_valid = False
+    invalid.mode = NavigationSafety.MODE_STOP
+    invalid.header.frame_id = "base_link"
+    invalid.header.stamp.sec = 11
+    mission.last_safety_stamp = 10.0
     mission._navigation_safety_callback(invalid)
     assert mission.last_safety is invalid
     assert not mission._geometry_supports_obstacle_id(
@@ -764,7 +1133,11 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["controller_wait_timeout"] == 5.0
     assert params["action_response_timeout"] == 2.0
     assert params["action_cancel_timeout"] == 2.0
+    assert params["traversal_progress_timeout"] == 5.0
     assert params["safety_geometry_stale_seconds"] == 0.35
+    assert params["observation_frame"] == "base_link"
+    assert params["navigation_health_timeout"] == 0.80
+    assert params["navigation_health_recovery_duration"] == 1.00
     assert params["approach_stall_handoff_count"] == 1
     assert params["approach_stall_handoff_max_distance"] == 2.35
     assert params["approach_stall_handoff_max_heading_error"] == 0.22
@@ -1007,13 +1380,39 @@ def test_only_success_or_obstacle_boundary_abort_can_enter_guarded_handoff():
     assert not nav_status_allows_guarded_handoff(GoalStatus.STATUS_UNKNOWN)
 
 
-def test_completed_obstacle_filter_keeps_adjacent_different_type():
-    completed = [(TraversalGuidance.OBSTACLE_STEP, 1.0, 2.0)]
+def test_completed_obstacle_filter_prefers_semantic_over_coarse_type():
+    completed = [(
+        "wooden_bridge_a", TraversalGuidance.OBSTACLE_STEP, 1.0, 2.0
+    )]
     assert obstacle_was_completed(
-        TraversalGuidance.OBSTACLE_STEP, (1.2, 2.0), completed, 0.65
+        TraversalGuidance.OBSTACLE_PIT,
+        (1.2, 2.0),
+        completed,
+        0.65,
+        "wooden_bridge_a",
     )
+    # The same coarse STEP and nearby position belongs to another competition task.
     assert not obstacle_was_completed(
-        TraversalGuidance.OBSTACLE_BAR, (1.2, 2.0), completed, 0.65
+        TraversalGuidance.OBSTACLE_STEP,
+        (1.2, 2.0),
+        completed,
+        0.65,
+        "t_shaped_stairs",
+    )
+    # A reliable ID on either side forbids coarse matching, even if the current close
+    # crop temporarily lost its ID.
+    assert not obstacle_was_completed(
+        TraversalGuidance.OBSTACLE_STEP, (1.2, 2.0), completed, 0.65, ""
+    )
+    # Coarse fallback exists only when neither the candidate nor legacy record has ID;
+    # this result only suppresses a duplicate and never writes the task inventory.
+    legacy_completed = [(TraversalGuidance.OBSTACLE_STEP, 1.0, 2.0)]
+    assert obstacle_was_completed(
+        TraversalGuidance.OBSTACLE_STEP,
+        (1.2, 2.0),
+        legacy_completed,
+        0.65,
+        "",
     )
 
 
@@ -1089,7 +1488,8 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert source.count("not self.traverse_client.server_is_ready()") >= 3
     assert '"/navigation/autonomy_stop"' in source
     assert "_publish_immediate_stop()" in source
-    assert '"/perception/front_obstacle_name"' in source
+    assert '"/perception/front_obstacle_name"' not in source
+    assert "msg.semantic_id" in source
     assert '"RETURNING_TO_FINISH"' in source
     assert '"return_home"' in source
     assert '"/autonomy/finish_pose"' in source
@@ -1121,7 +1521,7 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert "if is_actionable_semantic_id(stable_lock):" in source
     # 控制器 success 不能直接改任务账本：必须同时检查 ROS Action 终态，并在主循环
     # 独立验证越过入口平面与落地稳定后，才调用唯一的完成提交函数。
-    assert "int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED" in source
+    assert "wrapped_status == GoalStatus.STATUS_SUCCEEDED" in source
     assert '"VERIFYING_TRAVERSAL_RESULT"' in source
     assert "_verify_traversal_completion(robot, now)" in source
     assert "traversal not counted" in source

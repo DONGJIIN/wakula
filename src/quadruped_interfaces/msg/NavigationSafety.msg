@@ -23,6 +23,10 @@ bool visual_assist_active  # 视觉证据是否正在额外限制 WALK 速度
 
 # 障碍类别常量与 FusedObstacle/TerrainFeatures 完全一致。
 uint8 obstacle_type
+# 同一帧几何分类产生的稳定英文语义 ID。空字符串表示尚未可靠细分；该字段是机器
+# 接口，禁止把中文显示文本反向解析成控制语义。非比赛安全语义可为 arena_boundary，
+# 两座木桥尚不能区分时可为 wooden_bridge_unknown。
+string semantic_id
 float32 confidence         # 下列字段是同一时刻的原子只读快照
 float32 obstacle_height
 float32 pit_depth

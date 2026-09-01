@@ -41,8 +41,8 @@ terrain_safety_assessor:
     sensor_timeout: 3.0
     # 拒绝延迟/重放帧，以及时间戳明显超前于当前 ROS 时钟的帧。
     future_stamp_tolerance: 0.10
-    # vision=true 时带时间戳融合消息是权威输入；vision=false 时 launch 将其关闭，
-    # 节点直接读取 /terrain/features。
+    # vision=true 时带时间戳融合消息是权威输入；vision=false 时仍读取带 Header/valid 的
+    # /terrain/features_stamped。无 Header 的旧数组只能通过下方显式 legacy 开关启用。
     prefer_fused_obstacle: true
     fused_min_confidence: 0.25
     # STOP 立即生效；较低危险与恢复到 WALK 都需要连续帧确认。
@@ -68,6 +68,12 @@ terrain_safety_assessor:
     hazard_approach_speed: 0.25
     # 正前方类别变化立即打印；未变化时按该周期刷新，避免终端按感知帧率刷屏。
     status_log_period: 1.0
+    # TerrainFeatures/FusedObstacle 必须已由感知节点转换到该机身坐标系；不匹配时停车，
+    # 禁止把相机/雷达原始 frame 的前向距离直接解释成 base_link 几何。
+    output_frame: base_link
+    # 默认在线路径使用带 Header/valid 的 /terrain/features_stamped。仅回放无法转换的旧包
+    # 时临时置 true；无 Header 的 /terrain/features 不能作为默认安全权威。
+    legacy_features_enabled: false
 
 navigation_speed_gate:
   ros__parameters:
@@ -83,8 +89,17 @@ navigation_speed_gate:
     scan_topic: /scan
     scan_timeout: 0.5
     # 只作为最后 22 cm 的急停兜底，不参与普通障碍绕行，也不会阻止 Action 越障后端。
+    # 当前全栈是非全向平面差速合同：仅 linear.x + angular.z 可非零。真机若启用
+    # 侧移，必须按 footprint/制动轨迹重做方向扇区，不得只放宽本门。
     emergency_stop_distance: 0.22
     emergency_sector_half_angle: 0.60
+    # 扇区内有限量程必须位于雷达声明的 [range_min, range_max]；ROS 标准正 Inf 表示
+    # 量程内无回波，仍是有效空旷证据。NaN、负 Inf 和有限超量程值无效，不能用一束
+    # 远距离覆盖大片坏数据；下列两值同时必须通过。
+    emergency_scan_min_valid_ratio: 0.80
+    emergency_scan_max_invalid_gap_angle: 0.20
+    # 任何显著 yaw（包括前进+转弯）都按360°机身扫掠检查；未覆盖角也计入
+    # 上述连续无效缺口。0.20 rad 约 11.5°，因而旋转需要约 348.5° 以上覆盖。
     require_emergency_scan: true
     # 进入越障入口后禁止线速度，但允许 Nav2 以有限 yaw 角速度完成机身对正；只有新鲜且
     # 有效的 TraversalGuidance ALIGN 状态能打开该权限，感知断流仍然全停。
@@ -98,6 +113,11 @@ navigation_speed_gate:
     # 发布纯旋转恢复许可。approach 只用于消除障碍前最后几度误差；速度门会
     # 强制 linear=0，并且断流 0.8 s 自动关闭。handoff/traversal 不发布。
     rotation_recovery_timeout: 0.8
+    # autonomous_mission 以 4 Hz 发布 volatile 运动许可。该进程退出、卡死或网络断开后，
+    # 0.8 s 内自主 Nav2 分支归零；Bool 没有 session ID，过期后迟到的 true/false
+    # 均不解锁，需重启 navigation_speed_gate/核心栈。未过期 ACTIVE 的清洁 false（正常
+    # Ctrl-C 收尾）仍会释放为 UNOWNED。/cmd_vel_joy 等人工候选话题不经过这个门。
+    autonomy_lease_timeout: 0.8
 
 # 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。
 traversal_guidance:
@@ -116,3 +136,5 @@ traversal_guidance:
     distance_hysteresis: 0.05
     angle_hysteresis: 0.035
     ready_confirmation_frames: 3
+    # 障碍类别也必须连续多帧一致，避免 BAR/WALL/STEP 单帧跳变触发错误 Action 交接。
+    type_confirmation_frames: 3

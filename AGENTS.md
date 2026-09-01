@@ -28,7 +28,10 @@ Action as proof that a real quadruped can traverse an obstacle.
 2. The hardware boundary uses standard topics and frames: `/scan`, `/odom`, `/tf`,
    camera `Image`, terrain `PointCloud2`, `/cmd_vel`, `map`, `odom`, and `base_link`.
 3. OpenCV is supporting evidence. Metric point-cloud geometry is authoritative for
-   height, depth, slope, clearance, and safe Action handoff.
+   height, depth, slope, clearance, and safe Action handoff. Until calibrated
+   ``CameraInfo`` plus historical-TF point projection exists, vision may only confirm the
+   exact class already produced by the point cloud; it must never reclassify STEP into
+   BAR/POLE or veto valid metric geometry.
 4. Nav2 moves through free space and reaches an obstacle entry. A real motion controller
    must execute the obstacle. Do not make an obstacle traversable by deleting it from a
    costmap.
@@ -36,6 +39,21 @@ Action as proof that a real quadruped can traverse an obstacle.
    declarations may retain tested fallback values required before YAML is loaded, but they
    must stay synchronized and are not a second tuning surface. Never create another inactive
    "tuning" file; numeric values in documentation are versioned snapshots, not overrides.
+6. Missing returns in the central ground corridor are ``UNKNOWN`` and fail closed. They are
+   not proof of a pit, and they are never proof of clear ground. A CLEAR result requires
+   measured, continuous floor coverage; source decode/TF failure must release that source so
+   a healthy configured backup can take over.
+7. Machine decisions consume stamped typed messages and stable English ``semantic_id``
+   values. Chinese obstacle names are operator UI only. Safety and Guidance must refer to
+   the same observation; map projection uses TF at ``header.stamp``, never an unrelated
+   latest transform.
+8. Autonomous Nav2 motion obeys ``/navigation/healthy``, the transient stop lock and the
+   autonomy ownership lease. Lease expiry locks only the autonomous velocity candidate;
+   keyboard/joystick ownership and hardware emergency stop remain separate contracts.
+9. ``TraverseObstacle`` goals are immutable, stamped geometry snapshots. ``ENTRY_PREPARING``
+   permits only the controller's bounded final approach/alignment before gait starts; Action
+   feedback state and progress must advance monotonically. No simulated result is evidence
+   of real foot contact or body stability.
 
 ## Parameter ownership
 
@@ -44,13 +62,15 @@ Action as proof that a real quadruped can traverse an obstacle.
   planner, costmaps, sensor-health contracts.
 - `src/slam/config/sensor_profiles.yaml`: driver topic remaps only; it starts no driver.
 - `src/quadruped_perception/config/vision.yaml`: image quality, HSV/ROI, OpenCV temporal
-  confirmation, camera/point-cloud synchronization.
+  confirmation, camera/point-cloud synchronization, and the calibrated-projection boundary.
 - `src/quadruped_perception/config/terrain.yaml`: point-cloud ROI, ground segmentation,
-  metric obstacle thresholds, and RK3588 point limits.
+  metric obstacle thresholds, no-return coverage, source failover/ground-prior lifetime,
+  and RK3588 point limits.
 - `src/quadruped_planning/config/terrain_navigation.yaml`: perception-to-speed policy,
-  emergency stop, obstacle approach/alignment/READY boundary.
+  emergency stop, obstacle approach/alignment/READY boundary, and autonomy lease timing.
 - `src/quadruped_planning/config/autonomous_mission.yaml`: exploration, five-second stall
-  recovery, Action handoff, traversal verification, task timeout, and return-to-finish.
+  recovery, navigation-health recovery, stamped Action handoff/feedback, traversal
+  verification, hard task timeout, and return-to-finish.
 
 Each file starts with a real-robot tuning index. Follow its symptom-to-parameter guidance
 and change one parameter group at a time from a labelled rosbag. Topic/frame differences

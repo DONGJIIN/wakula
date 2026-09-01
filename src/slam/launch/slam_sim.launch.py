@@ -22,11 +22,17 @@ def _core_launch_file():
     return PathJoinSubstitution([FindPackageShare("slam"), "launch", "slam.launch.py"])
 
 
+def _package_file(package, folder, filename):
+    """构造安装空间资源路径，使仿真覆盖参数与核心入口使用同一默认文件。"""
+    return PathJoinSubstitution([FindPackageShare(package), folder, filename])
+
+
 def generate_launch_description():
     """启动使用仿真时间和仿真 TF 的 SLAM/Nav2/感知栈，但不启动 Gazebo。"""
     forwarded = {
         # 以下参数仍允许测试人员关闭重模块或显式绑定非默认仿真话题。
         "sensor_profile": LaunchConfiguration("sensor_profile"),
+        "sensor_profiles_file": LaunchConfiguration("sensor_profiles_file"),
         "scan_topic": LaunchConfiguration("scan_topic"),
         "odom_topic": LaunchConfiguration("odom_topic"),
         "camera_topic": LaunchConfiguration("camera_topic"),
@@ -35,13 +41,27 @@ def generate_launch_description():
         "nav2_enabled": LaunchConfiguration("nav2_enabled"),
         "nav2_autostart": LaunchConfiguration("nav2_autostart"),
         "vision": LaunchConfiguration("vision"),
+        "speed_gate": LaunchConfiguration("speed_gate"),
         "rviz": LaunchConfiguration("rviz"),
+        "nav2_log_level": LaunchConfiguration("nav2_log_level"),
+        "slam_params_file": LaunchConfiguration("slam_params_file"),
+        "nav2_params_file": LaunchConfiguration("nav2_params_file"),
+        "vision_params_file": LaunchConfiguration("vision_params_file"),
+        "terrain_params_file": LaunchConfiguration("terrain_params_file"),
+        "terrain_navigation_params_file": LaunchConfiguration(
+            "terrain_navigation_params_file"
+        ),
+        "rviz_config_file": LaunchConfiguration("rviz_config_file"),
         # 仿真入口刻意不公开这两个值，防止再次形成双时钟或重复 TF。
         "use_sim_time": "true",
         "robot_model": "false",
     }
     declarations = [
         DeclareLaunchArgument("sensor_profile", default_value="ros_default"),
+        DeclareLaunchArgument(
+            "sensor_profiles_file",
+            default_value=_package_file("slam", "config", "sensor_profiles.yaml"),
+        ),
         DeclareLaunchArgument("scan_topic", default_value=""),
         DeclareLaunchArgument("odom_topic", default_value=""),
         DeclareLaunchArgument("camera_topic", default_value=""),
@@ -50,7 +70,39 @@ def generate_launch_description():
         DeclareLaunchArgument("nav2_enabled", default_value="true"),
         DeclareLaunchArgument("nav2_autostart", default_value="true"),
         DeclareLaunchArgument("vision", default_value="true"),
+        DeclareLaunchArgument("speed_gate", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("nav2_log_level", default_value="info"),
+        DeclareLaunchArgument(
+            "slam_params_file",
+            default_value=_package_file("slam", "config", "slam.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "nav2_params_file",
+            default_value=_package_file("slam", "config", "nav2.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "vision_params_file",
+            default_value=_package_file(
+                "quadruped_perception", "config", "vision.yaml"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "terrain_params_file",
+            default_value=_package_file(
+                "quadruped_perception", "config", "terrain.yaml"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "terrain_navigation_params_file",
+            default_value=_package_file(
+                "quadruped_planning", "config", "terrain_navigation.yaml"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "rviz_config_file",
+            default_value=_package_file("slam", "rviz", "slam.rviz"),
+        ),
     ]
     return LaunchDescription(
         [

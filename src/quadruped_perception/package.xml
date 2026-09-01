@@ -3,7 +3,7 @@
   <name>quadruped_perception</name>
   <version>0.1.0</version>
   <description>Lightweight camera and point-cloud terrain perception.</description>
-  <maintainer email="developer@example.com">Quadruped Developer</maintainer>
+  <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>diagnostic_msgs</exec_depend>

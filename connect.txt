@@ -31,10 +31,12 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   输入：PointCloud2，默认优先 /camera/depth/points。
   输出：/terrain/features_stamped、/perception/obstacle_points、/diagnostics。
   注意：点云必须带有效 frame_id 和传感器到 base_link 的 TF。
-        只有非零新鲜时间戳、完整缓冲区及 FLOAT32/FLOAT64 单值 x/y/z 字段的消息才会锁定来源；
-        坏主话题不会阻止后续候选点云接管。当前来源只接受 Header 时间严格递增的点云，
-        重复/乱序包不替换最新帧，也不刷新来源心跳；时钟回拨会开始新会话并清除地面先验。
-        确认坑洞会以虚拟障碍点写入局部代价地图；无回波盲区不会被当成坑。
+        候选消息须通过非零新鲜 Header、缓冲区/x-y-z 布局、解码、有限数值及采样时刻 TF
+        变换后才锁定来源；坏布局、解码或 TF 失败会进入有限 cooldown，让健康备用源接管。
+        当前来源只接受 Header 时间严格递增的点云；重复/乱序包不刷新心跳。切源、时钟回拨、
+        地面先验超龄或连续高度冲突会清除先验。
+        确认坑洞会以虚拟障碍点写入局部代价地图；中央走廊无回波且没有真实低点时输出
+        UNKNOWN/无效，既不判 PIT，也不判 CLEAR。
         地面由近场有效栅格锚定；同帧多结构按前缘选择最近的有效异常连通域，支撑点数只计
         正/负高度异常原始回波，避免远墙遮住近杆或稀疏飞点抢占真障碍。横杆落地支柱和
         窄立柱分别用高度带/原始回波复核。
@@ -52,6 +54,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         时序门按相邻匹配帧检查位移/尺度，允许目标随接近平滑放大；发布框与当前 Image Header 同帧。
         蓝白限高杆需至少三段尺寸相近、水平对齐且间距规律的蓝色短段；单根着色细柱可提示立柱。孤立 Canny
         横边或大框不会单独输出横杆/墙，WALL 由点云确认。
+        当前融合未用 CameraInfo/外参做三维投影；未来若允许跨类重分类，必须先完成内外参、
+        同步时钟、按图像 Header 的历史 TF 和投影深度门标定。
         真机标定只改 vision.yaml；颜色、横杆间距和图像质量需按 instruction.txt 第五节用
         原始 Image 回放复算，不能只对旧检测结果改置信度。
 
@@ -59,18 +63,21 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   作用：按时间戳同步点云几何与视觉结果，并检查视觉框与前向通道相交，输出统一障碍信息。
   输入：/terrain/features_stamped、/vision/obstacle_stamped。
   输出：/perception/fused_obstacle、/diagnostics。
-  注意：点云负责尺寸和安全判断，视觉只增强兼容类别的置信度；vision_confirmed=true 表示
-        视觉类别已通过点云类别和米制结构一致性检查，不表示仅仅检测到视觉框。类别冲突时
+  注意：点云负责尺寸和安全判断；当前视觉只能确认与点云完全相同的类别，不能把 STEP/WALL
+        跨类改判成 BAR/POLE。vision_confirmed=true 表示同类视觉证据通过时序和前向通道检查，
+        不表示仅仅检测到视觉框。类别冲突时
         保持点云类别/置信度且该位为 false；相机断流 0.25 s 后退化为纯点云输出。
 
 2.2 安全决策节点
 
 /terrain_safety_assessor（quadruped_planning / terrain_safety_assessor）
   作用：把融合障碍结果转换成 WALK、STEP、CLIMB 或 STOP，并给出速度上限。
-  输入：优先 /perception/fused_obstacle；关闭视觉时使用 /terrain/features。
+  输入：优先 /perception/fused_obstacle；关闭视觉时默认使用 /terrain/features_stamped。
+        /terrain/features 仅在 legacy_features_enabled=true 时兼容旧 bag。
   输出：/terrain/navigation_safety、/terrain/navigation_mode、/terrain/speed_limit、
         /perception/front_obstacle_name。
-  注意：终端约每秒打印一次正前方障碍名称、置信度、距离和高度；名称优先来自点云几何，
+  注意：NavigationSafety.semantic_id 是机器控制身份；中文名称仅供终端/RViz 显示，禁止任务
+        节点反向解析。终端约每秒打印一次正前方障碍名称、置信度、距离和高度；名称优先来自点云几何，
         可显示主斜坡、木桥引坡、T 字形台阶、限高杆、直角绕杆区、坑区和高墙。T 字台阶
         同时兼容“直接看到顶部”和“多级踏面形成阶梯趋势”两种视角。仅视觉命中
         会标明“点云未确认/待分类”，且不能覆盖已确认名称。无法由局部数据区分木桥 A/B 时
@@ -88,51 +95,68 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         不生成关节动作。普通/矮 POLE 由 Nav2 绕行；高度≥0.45 m 且语义确认为直角绕杆
         赛项时才触发 Action 交接。READY 需连续 3 帧，
         具有距离/角度迟滞；输入断流输出 INVALID 并清除历史。approach_pose 仅在当前确有
-        有效越障目标时发布，程序必须以 guidance 为权威有效性来源。
+        有效越障目标时发布，程序必须以 guidance 为权威有效性来源。Guidance 原样转发同一
+        Safety 的 Header、obstacle_type 和 semantic_id；任务交接要求两者时间/帧/身份一致。
 
 /navigation_speed_gate（quadruped_planning / navigation_speed_gate）
   作用：依据地形限制和导航健康状态缩放 Nav2 速度，并以雷达做极近距离急停兜底；
         数据异常、关键心跳超时或自动导航退出时立即输出零速度。
   输入：/cmd_vel_smoothed、/terrain/speed_limit、/navigation/healthy、/scan、
-        /navigation/autonomy_stop。
+        /navigation/autonomy_stop、/navigation/autonomy_lease。
   输出：最终标准 /cmd_vel。
   注意：它只限制已有速度，不自行生成运动指令；雷达急停距离默认 0.22 m，不负责把
         可越障目标改成绕行目标。地形限速为零时，可把 DWB 线速度不超过 0.12 m/s 且含
         yaw 的转向主导输入转换为纯 yaw 输出；输出线速度仍为零，用于换视角和返程脱困。
-        Twist 六个分量按一个原子命令校验，任一 NaN/Inf 都使整条自动导航命令归零。
+        Twist 六个分量按一个原子命令校验，任一 NaN/Inf 或非零侧移/垂直/横滚/俯仰分量
+        都使整条自动导航命令归零。纯直行检查前/后完整雷达扇区；任何 yaw 按近 360°
+        机身扫掠检查。扇区有效比例和连续无效角缺口任一不合格都停车。
   转向恢复输入：/navigation/rotation_recovery（std_msgs/Bool，4 Hz 心跳）。仅自主任务拥有
         Nav2 转向的返航、探索、覆盖、回访、接近、对正和换视角阶段为 true；断流 0.8 s
         自动失效。速度门只提取最大 0.30 rad/s yaw，绝不放行 linear，全部安全守卫仍有效。
+  所有权：lease 为 reliable + volatile，状态为 UNOWNED/ACTIVE/EXPIRED。UNOWNED 允许普通
+        RViz/Nav2；ACTIVE 要求 0.8 s 内持续心跳；超时转 EXPIRED、清旧 Twist 并锁自动分支，
+        ACTIVE 未超时且任务确认所有权释放时，false 可回到 UNOWNED。EXPIRED 是失联
+        锁存；因 Bool 无 session，后到 true 或任意 false 都不解锁，必须确认旧控制器停止后
+        重启 navigation_speed_gate/核心栈。人工候选不经过本节点。
 
 /autonomous_mission（quadruped_planning / autonomous_mission）
   作用：在未知地图中选择探索前沿；确认障碍后让 Nav2 到达入口、调用越障 Action，成功后
         记录该障碍；优先回访已知未完成项，再探索未知项，全部完成后去终点。每次只处理
         一个障碍。它负责任务编排，不生成腿部或关节命令。
   输入：/map、/traversal/guidance、/terrain/navigation_safety、
-        /perception/front_obstacle_name、/global_costmap/costmap、map -> base_link TF、
+        /navigation/healthy、/global_costmap/costmap、按观测 Header 查询的 map -> base_link TF、
         Nav2/越障 Action 结果；可选
         /autonomy/finish_pose（PoseStamped，map）覆盖默认“起点即终点”。
   输出：调用 /navigate_to_pose 和 /traverse_obstacle；发布 /autonomy/state、/autonomy/event、
         /autonomy/progress，以及 transient-local 的 /autonomy/completed_obstacles 和
-        /autonomy/pending_obstacles（String 内为 count/ids/names_zh JSON）。
+        /autonomy/pending_obstacles（String 内为 count/ids/names_zh JSON）；另发布
+        /navigation/autonomy_stop、/navigation/autonomy_lease 和 /navigation/rotation_recovery。
   进度显示：自主任务终端每 5 秒及清单变化时显示“已越过/未越过”；上述三个话题用于其他
         节点、UI 或晚启动终端读取同一账本。/autonomy/progress 是分号分隔的可读 String，
         关键字段为 state、completed、score、elapsed_seconds、budget_remaining_seconds、
-        completed_ids、pending_ids；默认总预算 300 s，最后 60 s 预留返程。
+        completed_ids、pending_ids。默认 240 s 工作截止会取消未完成的非返程
+        Nav2/Traverse 目标并开始返程；300 s 硬截止会锁自主 Twist、取消全部已知 Action
+        并保留未完成账本，绝不进入 COMPLETED。
   生命周期：仅随 autonomous_navigation.launch.py 存在；启动 launch 即执行，Ctrl-C 即取消退出。
   额外输出：/navigation/rotation_recovery（std_msgs/Bool）。只允许速度门从 Nav2 命令提取
         纯 yaw，不是 Twist，不开放线速度，也不绕过导航健康、外部停车或雷达急停。
   停滞时限：前沿/覆盖/入口等普通 Nav2 目标 5 s 无位姿进展即取消改选；return_home 使用
         20 s，允许 Nav2 行为树先执行 Spin/BackUp/重规划；若仍被正前障碍锁住，则先执行
         有界转向和安全换站，再重试终点。
-  安全输出：/navigation/autonomy_stop（std_msgs/Bool，可靠 + transient_local）。启动发布
-  false；退出先发布 true。最终仲裁器收到 true 后只锁 Nav2 Twist；它不能停止失联外部
-  越障控制器的关节动作。只有 Action 取消/结果已确认或硬件急停、停服确认所有权释放后，
-  键盘/手柄才可人工接管。
+  安全输出：启动先以 autonomy_stop=true 清旧自动 Twist 并持续发布 lease=true；只有发送新
+        Nav2 goal 时才解除停车锁。Ctrl-C 先停车并取消 Action，所有权确认释放后发布
+        lease=false。autonomy_stop 只锁自动 Twist，人工候选由外部 mux 独立仲裁；外部越障
+        关节动作未知时仍须硬件急停/停服。
+  Nav 健康：false 或 0.8 s 断流时取消当前 Nav2 目标但保留目标，不计失败/黑名单/退避；连续
+        健康 1.0 s 后重发同一目标。等待状态为 WAITING_FOR_NAVIGATION_HEALTH；已接管的
+        Traverse Action 不因 SLAM/Nav 健康下降而由任务层直接取消。
   Action 通信：goal/cancel/result 均有超时和 generation 隔离；Nav2 未 ready 不消耗任务次数。
         无法确认旧控制权释放时进入 ACTION_COMMUNICATION_FAULT，并保持 autonomy_stop=true。
         Nav2 故障可停/重启 Nav2 或核心栈；Traverse 故障必须停/重启外部越障控制器；归属
         不明时两者都处理并使用硬件急停。不能只重启本节点或只重启核心栈。
+  截止状态：300 s 时运动所有权可确认释放则为 INCOMPLETE_STOP；响应/取消/结果超时
+        且所有者无法确认时为 INCOMPLETE_STOP_OWNERSHIP_FAULT。两者都不计完成；后者
+        需要停服外部控制器并使用硬件急停。autonomy_stop 只锁自主速度，人工分支独立。
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
         /traverse_obstacle 服务端。autonomous_navigation.launch.py 永远不启动仿真服务端；
         仿真替身只由 quadruped_gazebo 的独立 launch 显式启动。
@@ -142,6 +166,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         趋势和严格 16～24° 近场 PIT 踏面轮廓，并保留高度/横滚/粗糙度上限排除主坡侧面。
         Action 结果 Future 异常按“控制权未知”锁住自主 Twist，不会清句柄后盲目重试；
         外部越障关节运动仍由其服务端取消和硬件急停负责。
+  身份与时间：任务只消费 Safety/Guidance.semantic_id，不消费中文名称。两消息必须具有非零
+        递增 Header、同一 observation_frame、时间差不超过 0.05 s，并且 obstacle_type/
+        semantic_id 一致；地图位置使用该 Header 时刻的历史 TF，latest TF 不可替代。
   地图边缘：普通目标贴近当前 OccupancyGrid 外框时禁止交接；只有语义已确认为 high_wall、
         实时粗类型为 WALL 且名称不是场地边界时，才允许墙体遮挡造成的“墙后未知区”特例。
         该规则不新增话题，也不能用于放行通用 WALL、未知边界或未确认障碍。
@@ -182,17 +209,20 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
 
 /nav2_readiness_monitor（slam / nav2_readiness_monitor）
   作用：校验 /scan 的 frame/角度/样本/回波和 /odom 的时间/frame/数值，再等待源时间新鲜的
-        动态定位 TF 就绪并激活 Nav2；缓存中的冻结旧 TF 不算就绪。
+        动态定位 TF 就绪并激活 Nav2；位置/yaw 协方差或平移/航向突跳也会保持未就绪，
+        缓存中的冻结旧 TF 不算就绪。
   输入：/scan、/odom、map -> base_link TF。
   输出：调用 /lifecycle_manager_navigation/manage_nodes，不发布运动话题。
   注意：传感器话题和生命周期服务均要求绝对 ROS 名称；frame 不带前导 `/`。
 
 /navigation_health_monitor（slam / navigation_health_monitor）
-  作用：运行中继续检查上述数据合同、里程计突跳、时间戳和 TF 是否可靠。
+  作用：运行中继续检查上述数据合同、里程计平移/航向突跳、时间戳和 TF 是否可靠。
   输入：/scan、/odom、map -> base_link TF。
   输出：/navigation/healthy、/diagnostics。
-  注意：任何关键输入断流或异常都会将健康状态置为 false；里程计跳变需连续稳定样本后恢复。
-        雷达有效率必须在 (0, 1]，扫描样本数至少 2，传感器超时必须大于 0。
+  注意：任何关键输入断流或异常都会将健康状态置为 false；位置/yaw 协方差越界或单帧
+        航向突跳同样锁止，正常跨越 ±pi 使用最短角差；里程计跳变需连续稳定样本后恢复。
+        雷达有效率必须在 (0, 1]，扫描样本数至少 2，传感器超时必须大于 0。自主任务收到
+        false/断流后暂停并保存当前 Nav2 目标，连续健康恢复后重发；不会把该次暂停记作失败。
 
 2.4 Nav2 节点组
 
@@ -203,9 +233,6 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
 
 /controller_server
   作用：运行 DWBLocalPlanner，结合局部代价地图跟踪全局路径并产生 /cmd_vel_nav。
-
-/smoother_server
-  作用：平滑路径，减少折线和不必要转向。
 
 /behavior_server
   作用：提供等待、后退、旋转和清图后的恢复行为。
@@ -230,6 +257,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         STOPPED/RUNNING/STOPPING/FAILED）。
   进程：上键执行 ros2 launch slam autonomous_navigation.launch.py；下键向其进程组发送
         SIGINT。只管理自己启动的 PID，不停止 Gazebo、核心 SLAM 或外部自主任务。
+  急停：B 锁存 /teleop/emergency_stop=true；Start 仅在安全条件下解除。最终仲裁器必须让
+        true 覆盖人工和自主候选、清旧 Twist 并持续零，解除后等待新命令；它不是硬件急停。
   注意：默认不直接发布 /cmd_vel；真机使用 twist_mux 仲裁后再进入硬件安全层与驱动。
   启动：xbox_teleop.launch.py 同时拉起外部 /joy 驱动和本节点，但不加入 slam.launch.py。
 
@@ -250,6 +279,11 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
   作用：读取 rosbag 和人工标签，统计分类 accuracy、precision、recall、F1 与混淆矩阵；
         有限搜索视觉置信度和三个高度等级。米制几何误差需用已知尺寸真值另行对照。
 
+scripts/record_bag.sh（录包工具，不随一键启动运行）
+  作用：复用 sensor_profiles.yaml 解析 LaserScan/Odometry/Image/PointCloud2/CameraInfo，并记录
+        TF、/clock、强类型感知/引导、速度、健康和诊断话题。`--profile` 选设备，显式 topic
+        参数临时覆盖，`--print-topics` 只核对清单；不再手工修改脚本内话题。
+
 stack_regression（测试工具，不随一键启动运行）
   作用：在 Gazebo 中交替验证矩形异路闭合与旋转/倒退、多目标、1 m 窄通道、恢复行为、
         核心进程资源和感知 Header 延迟；位姿闭合不等同于证明 SLAM 回环图优化。
@@ -261,6 +295,11 @@ stack_regression（测试工具，不随一键启动运行）
 
 2.7 独立 Gazebo 节点（只由 quadruped_gazebo 的 launch 管理）
 
+场地合同：robocon_obstacle_field.sdf 按 2026 年第二十五届 ROBOCON 仿生足式挑战赛
+V2.0 已公布数据建模；大斜坡水平投影 3.00 m、
+宽 2.00 m、坡角 11.3°。直角绕杆三个必达区为直径约 0.35 m、圆心距杆 0.40 m 的红色
+虚线 visual，圆内保持黄色且无 collision。全局坐标仍是 REFERENCE LAYOUT 参考值，不供算法读取。
+
 /robocon_clock_bridge（ros_gz_bridge / parameter_bridge）
   作用：独立发布 /clock，避免其他传感器转换阻塞所有 use_sim_time 节点。
 
@@ -271,6 +310,8 @@ stack_regression（测试工具，不随一键启动运行）
 /sim_cmd_vel_mux（quadruped_gazebo）
   作用：仅在仿真中仲裁算法 /cmd_vel、键盘 /cmd_vel_teleop 和 Xbox /cmd_vel_joy，输出
         /cmd_vel_gazebo；人工输入优先于自主锁，两路人工输入按最新有效消息选择。
+  急停：订阅 reliable + transient-local /teleop/emergency_stop；true 覆盖三路候选、清空
+        旧 Twist 并持续零，false 后必须收到新命令才恢复。它只是仿真软件急停。
 
 /sim_keyboard_teleop（teleop_twist_keyboard，仅 GUI 仿真默认启动）
   作用：让第一条 Gazebo 命令自动提供键盘人工控制，不再要求第四条启动命令。
@@ -281,8 +322,9 @@ stack_regression（测试工具，不随一键启动运行）
   作用：在无动力学测试载体上实现 /traverse_obstacle；任务对准后把模型一次传送到障碍出口，
         限时模式下在核心清单变化后切换下一参考观察位，用于验证任务登记与继续探索；不模拟
         碰撞、步态或中间轨迹，也不拥有核心任务清单。
-  输入：TraverseObstacle goal、/odom、/autonomy/completed_obstacles、Gazebo set_pose 服务；
-        航向误差绝对值必须不超过 0.24 rad（普通独立后端默认 0.22 rad）。
+  输入：TraverseObstacle goal、/odom、/autonomy/completed_obstacles、
+        /teleop/emergency_stop、Gazebo set_pose 服务；
+        最宽接收包络为距离 2.50 m、横偏 0.35 m、航向误差 0.22 rad。
   输出：Action feedback/Result、停止用零 Twist；限时模式额外发布标准
         /perception/fused_obstacle 和返场后的 /autonomy/finish_pose。
   生命周期：推荐随 quadruped_gazebo/robocon_field_teleport.launch.py 启动；也可在纯场地
@@ -290,6 +332,9 @@ stack_regression（测试工具，不随一键启动运行）
         autonomous_navigation.launch.py 或真机入口启动，不能代表真实越障。
   注意：限时融合输入只验证跨节点流程，不是 OpenCV/点云识别成绩；核心仍必须通过 Action、
         位移、入口平面和落地稳定后验才会更新 completed_obstacles。
+  软件停车：/teleop/emergency_stop=true 时拒绝新 Goal，已接受 Goal 停止并以
+        非 success 结束；一次已提交的 Gazebo 位姿不能伪造回滚。这只是仿真软件急停，
+        不是真机硬件急停或驱动失能。
 
 /robocon_aux_sensor_bridge（ros_gz_bridge / parameter_bridge）
   作用：桥接 /imu/data 和 /camera/camera_info；辅助数据异常不影响导航桥。
@@ -313,6 +358,8 @@ stack_regression（测试工具，不随一键启动运行）
 仿真算法请在另一终端执行 `ros2 launch slam slam_sim.launch.py`。该入口不新增节点，也不
 启动 Gazebo，只固定 use_sim_time=true、robot_model=false，确保传感器时间和 TF 所有权一致。
 普通 slam.launch.py 也会自动探测 /clock，启动首行应显示 simulation_detected=true。
+自动探测按 `ros2 topic info /clock --no-daemon` 的 Publisher count 判断；只有话题名或订阅者、
+没有发布者时不会切到仿真时钟。暂停但仍存在的发布者仍算仿真；同一 ROS 域禁止多个发布者。
 若 /scan、/odom 或 /camera/depth/points 任一路停止，地图/障碍结果会保持最后一帧或进入
 “感知数据无效”；先用 `ros2 topic hz <话题>` 区分数据源断流与算法识别失败。
 TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输出，避免诊断管道关闭被
@@ -378,9 +425,9 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   字段：header、obstacle_type、confidence、geometry_confirmed、vision_confirmed、
   obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、lateral_offset、width、
   structure_heading、structure_heading_confidence、clearance_height、time_skew、valid_points。
-  融合约束：点云提供米制尺度；视觉 BAR 需点云 clearance_height 支持，POLE 需点云窄宽度
-  支持。vision_confirmed 只在类别/结构兼容时为 true；视觉/几何冲突时该位为 false，类别
-  和 confidence 均保持点云结果。所有类别、连续字段、视觉框
+  融合约束：点云提供米制尺度；当前视觉类别必须与点云 obstacle_type 完全相同，不能跨类
+  重分类。vision_confirmed 只在同类证据、时间和前向通道均通过时为 true；视觉/几何冲突时
+  该位为 false，类别和 confidence 均保持点云结果。所有类别、连续字段、视觉框
   和有效位在融合消费者处二次校验；旧/未来 Header 不得维持 perception_valid。
 
 五、决策和速度接口
@@ -394,8 +441,9 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 /cmd_vel_nav、/cmd_vel_smoothed、/cmd_vel
   类型均为 geometry_msgs/msg/Twist。分别表示 Nav2 原始、平滑后和通过地形/健康/雷达
   急停检查后的最终自动导航速度。`speed_gate:=false` 时第三段不由 Wakula 发布；目标仲裁器
-  必须订阅 `/cmd_vel_smoothed` 作为自动候选，并结合 NavigationSafety、navigation/healthy、
-  autonomy_stop、命令超时及硬件安全条件后唯一发布 `/cmd_vel`。
+  必须订阅 `/cmd_vel_smoothed` 作为自动候选，并结合 `/terrain/navigation_safety`、
+  `/navigation/healthy`、`/navigation/autonomy_stop`、`/navigation/autonomy_lease`、
+  `/teleop/emergency_stop`、命令超时及硬件安全条件后唯一发布 `/cmd_vel`。
 
 /cmd_vel_joy，geometry_msgs/msg/Twist
   Xbox 手柄独立速度候选；LB 未安全解锁/松开、B 急停或 /joy 断流时为零；断流恢复后
@@ -404,12 +452,21 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /teleop/active、/teleop/emergency_stop、/teleop/speed_mode
   类型依次为 Bool、Bool、String，均采用 reliable + transient local，供后来启动的监控或
-  仲裁节点立即取得当前使能、急停和 slow/normal/fast 档位状态。
+  仲裁节点立即取得当前使能、急停和 slow/normal/fast 档位状态。emergency_stop=true 必须
+  覆盖人工与自主速度、清缓存并持续零；false 只解除锁存，不得恢复旧 Twist，须等待新命令。
+  该话题是跨软件候选的停车合同，不是硬件断电/抱闸急停。
 
 /navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
   健康监控检查 LaserScan 厂商量程、NaN/±Inf、里程计有限性/协方差/四元数、采样时间戳、
   接收超时、动态 map -> base_link TF 源时间和位置突跳。正 Inf 表示量程内无障碍，仍是
   合法 LaserScan 回波；诊断键 tf_age_seconds 给出 TF 年龄，缺失/零时间为 unavailable。
+
+/navigation/autonomy_lease，std_msgs/msg/Bool（reliable + volatile）
+  自主任务以 4 Hz 发布的运动所有权心跳，不是普通使能位。true 表示 ACTIVE；false 显式释放为
+  UNOWNED，但只在 ACTIVE 未超时且任务已确认 Nav2/Traverse 所有权释放时有效。ACTIVE
+  超时进入 EXPIRED 后，因 Bool 不含 session/generation，任意 false 或迟到 true 均无法安全
+  证明旧所有者已释放；EXPIRED 锁存到 navigation_speed_gate/核心栈重启。人工候选不经过
+  该自动速度门。
 
 /terrain/visual_assist_active，std_msgs/msg/Bool
   表示当前速度上限是否受稳定视觉证据限制，仅供调试和 rosbag 统计。
@@ -418,20 +475,26 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   Header：感知观测时间及算法使用的 base_link 坐标系；感知超时时使用当前时间。
   模式：MODE_UNKNOWN=0、MODE_WALK=1、MODE_STEP=2、MODE_CLIMB=3、MODE_STOP=4。
   有效性：perception_valid、visual_assist_active；无效或断流时 mode=STOP、speed_limit=0。
-  几何：obstacle_type、confidence、obstacle_height、pit_depth、slope_pitch、slope_roll、
+  几何：obstacle_type、semantic_id、confidence、obstacle_height、pit_depth、slope_pitch、slope_roll、
   roughness、distance、lateral_offset、width、structure_heading、
   structure_heading_confidence、clearance_height、valid_points。障碍码与
   FusedObstacle 一致；lateral_offset 在 base_link 中左正右负，用于入口对正。
-  语义：同一条消息给出一个原子只读快照，供未来运动/越障模块做输入校验；它不是动作、
+  语义：semantic_id 是稳定英文机器身份，空表示未可靠细分；中文名称不是控制输入。同一条
+  消息给出一个原子只读快照，供未来运动/越障模块做输入校验；它不是动作、
   关节、足端或控制器切换命令。消费者必须检查 perception_valid、Header 新鲜度和 mode。
+  ID：八项为 right_angle_poles、gravel_wood_pit、height_bar、main_slope、wooden_bridge_a、
+  wooden_bridge_b、t_shaped_stairs、high_wall；arena_boundary 和 wooden_bridge_unknown 是
+  非可执行安全/歧义身份，空字符串表示未可靠细分。
 
 /traversal/guidance，quadruped_interfaces/msg/TraversalGuidance（越障交接首选）
   阶段：INVALID、CLEAR、APPROACH、ALIGN、READY。
-  关键字段：header、phase、obstacle_type、perception_valid、traversal_required、
+  关键字段：header、phase、obstacle_type、semantic_id、perception_valid、traversal_required、
   ready_for_handoff、confidence、distance、lateral_offset、heading_error、approach_x、
   approach_y、approach_yaw、speed_limit。
   语义：APPROACH/ALIGN 表示 Nav2 应到达障碍前方入口并对正；READY 表示可以由未来运动
-  控制器申请接管。它不是“越障已经完成”，也不是关节命令。
+  控制器申请接管。它不是“越障已经完成”，也不是关节命令。任务消费者要求 Safety/Guidance
+  Header 非零递增、frame 相同、时间差不超过 0.05 s，且 obstacle_type/semantic_id 一致；
+  地图投影使用 Header 时刻的历史 TF，不允许 latest TF 替代。
 
 /traversal/approach_pose，geometry_msgs/msg/PoseStamped
   相对入口建议，frame 通常为 base_link；autonomous_mission 在接收时转换到 map 后再发送
@@ -441,16 +504,32 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   人类调试速查，值为 INVALID/CLEAR/APPROACH/ALIGN/READY；程序应优先使用强类型 guidance。
 
 /traverse_obstacle，quadruped_interfaces/action/TraverseObstacle（运动组实现的交接合同）
-  Goal：obstacle_type（STEP=2、PIT=3、WALL=4、BAR=5、POLE=6、SLOPE=7）、稳定比赛
-  obstacle_id、confidence、distance、lateral_offset、heading_error；坡面不会与 CLEAR 共用动作编码。
-  Feedback：PREPARING/TRAVERSING/STABILIZING、progress、message。
+  Goal 定义：同一个非零 header.stamp/frame_id 的不可拆分快照；字段为 header、
+        obstacle_type、obstacle_id（稳定 semantic_id）、entry_stage、confidence、distance、
+        lateral_offset、heading_error、obstacle_height、pit_depth、slope_pitch、slope_roll、
+        roughness、width、structure_heading、structure_heading_confidence、clearance_height、
+        valid_points。Guidance 提供入口姿态，同 Header/同类/同 semantic_id 的 Safety 提供
+        几何；客户端用 Header 时刻历史 TF 校验后原子拷贝，服务端不得与新旧帧拼接。
+  入口定义：Guidance READY 的 1.20 m 是“任务可交接”，不是“已可抬腿”。只有
+        distance<=0.45 m、|lateral_offset|<=0.10 m、|heading_error|<=0.08 rad 才是
+        ENTRY_READY。其他合法交接使用 ENTRY_PREPARING，服务端必须先低速闭环接近/对正，
+        不得立即起步越障。任务端最宽包络为 2.35 m/0.35 m/0.22 rad；仿真服务端
+        可接收上限为 2.50 m/0.35 m/0.22 rad。
+  Feedback 定义：必须严格 PREPARING -> TRAVERSING -> STABILIZING；progress 必须为
+        [0,1] 内有限数、单调不降并最终到 1.0。重复同一 state/progress 不刷新进展时间；
+        5 s 无实质进展取消，单次 Action 总限 45 s。
   Result：success、message；只有真实控制器确认稳定完成跨越后才能令 success=true。
+  客户端只在反馈完整到达 STABILIZING/progress=1.0、ROS 终态 SUCCEEDED 且
+        Result.success=true 时进入任务层位移/越过入口/稳定后验；无反馈的快速 success 不计完成。
+  真机责任：外部服务端必须自行实现客户端失联、取消收尾、内部超时、硬件急停与
+        足端接触/机身姿态/驱动故障/落地稳定判定。仿真位姿传送不证明真机越障。
 
 /autonomy/state、/autonomy/event，std_msgs/msg/String
-  关键 state：WAITING_FOR_INPUTS、EXPLORING、COVERAGE_EXPLORING、
+  关键 state：WAITING_FOR_INPUTS、WAITING_FOR_NAVIGATION_HEALTH、EXPLORING、COVERAGE_EXPLORING、
   SEEKING_PENDING_OBSTACLE、ALIGNING_OBSTACLE、HANDOFF、TRAVERSING、
   SEARCHING_MISSING_OBSTACLES、RETURNING_TO_FINISH、RECOVERY、
-  ACTION_COMMUNICATION_FAULT、COMPLETED；event 是低频原因。ACTION_COMMUNICATION_FAULT
+  ACTION_COMMUNICATION_FAULT、INCOMPLETE_STOP、INCOMPLETE_STOP_OWNERSHIP_FAULT、COMPLETED；
+  event 是低频原因。ACTION_COMMUNICATION_FAULT
   表示 Action 运动所有权无法确认，必须按节点信息中的停服/重启顺序人工恢复。
   节点没有键盘或 toggle 服务；进程生命周期就是自主功能的启停边界。
 
@@ -525,6 +604,9 @@ Isaac Lab 训练/策略接口同样尚未定义。应在真机关节、状态估
 | `/cmd_vel_smoothed` | 本项目 Nav2 velocity_smoother | `speed_gate:=false` 时目标仲裁器必须把它接成自动候选 |
 | `/cmd_vel` | 目标 twist_mux/安全层，或本项目 speed gate 二选一 | 只能有一个最终发布链 |
 | `/navigation/autonomy_stop` | autonomous_mission | 目标仲裁器必须只封锁自动候选，不得封锁人工分支 |
+| `/navigation/autonomy_lease` | autonomous_mission | volatile 所有权心跳；目标仲裁器须实现 UNOWNED/ACTIVE/EXPIRED，EXPIRED 需确认旧所有者已停后重启仲裁器复位 |
+| `/navigation/healthy` | 本项目 navigation_health_monitor | 速度门和任务层共同消费；false/断流时自动分支停车 |
+| `/teleop/emergency_stop` | xbox_teleop | 最终仲裁器让 true 覆盖人工+自主并清旧 Twist；仍不能替代硬件急停 |
 | `/navigate_to_pose` | 本项目 Nav2 bt_navigator | autonomous_mission 为客户端 |
 | `/traverse_obstacle` | 真机运动/越障控制器 | 本项目只提供 Action 客户端与合同 |
 
@@ -538,8 +620,10 @@ quadruped_planning、quadruped_bringup、slam 六个包。传感器、里程计�
 该入口同时启动 SLAM、Nav2 和感知算法。若目标已有 twist_mux/底盘安全层，在命令中增加
 `speed_gate:=false`；Wakula 此时只把 Nav2 自动候选发布到 `/cmd_vel_smoothed`，不会发布
 `/cmd_vel`。目标层必须订阅该候选以及 `/terrain/navigation_safety`、`/navigation/healthy`、
-`/navigation/autonomy_stop`，再结合命令超时、雷达与硬件急停唯一发布 `/cmd_vel`；其中
-autonomy_stop 只封锁自动候选。否则 Nav2 速度不会到达真机，Ctrl-C 也无法锁住目标仲裁器的
+`/navigation/autonomy_stop`、`/navigation/autonomy_lease` 和 `/teleop/emergency_stop`，再结合
+命令超时、雷达与硬件急停条件唯一发布 `/cmd_vel`；其中 autonomy_stop/lease 只封锁自动候选，
+emergency_stop 覆盖自动与人工且解除后等待新 Twist。否则 Nav2 速度不会到达真机，Ctrl-C
+也无法锁住目标仲裁器的
 自动分支。这不表示复用目标 SLAM/Nav2；目标端不能把 STEP/CLIMB/READY 直接解释成关节动作。
 
 若采用本项目完整速度链，所有权必须是：Nav2 controller -> `/cmd_vel_nav` -> velocity

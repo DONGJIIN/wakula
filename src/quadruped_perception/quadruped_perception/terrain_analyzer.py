@@ -343,6 +343,11 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("max_roughness", 0.06)
         self.declare_parameter("min_valid_points", 30)
         self.declare_parameter("source_switch_timeout", 2.0)
+        self.declare_parameter("source_failure_cooldown", 2.0)
+        self.declare_parameter("source_geometry_failure_frames", 5)
+        self.declare_parameter("ground_prior_max_age", 3.0)
+        self.declare_parameter("ground_prior_max_consecutive_conflicts", 3)
+        self.declare_parameter("ground_prior_max_height_shift", 0.10)
         self.declare_parameter("grid_cell_size", 0.05)
         self.declare_parameter("ground_height_bin", 0.03)
         self.declare_parameter("pit_depth_threshold", 0.07)
@@ -350,6 +355,10 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("bar_min_clearance", 0.18)
         self.declare_parameter("min_connected_region_cells", 4)
         self.declare_parameter("min_connected_region_points", 16)
+        self.declare_parameter("clear_ground_corridor_half_width", 0.25)
+        self.declare_parameter("clear_ground_required_distance", 0.80)
+        self.declare_parameter("clear_ground_max_gap", 0.15)
+        self.declare_parameter("clear_ground_min_lateral_fraction", 0.25)
 
         # Validate the configured geometry as one contract.  Continuing with a corrected 10 cm
         # ROI after a typo is unsafe because downstream nodes cannot tell that the requested
@@ -409,6 +418,26 @@ class TerrainAnalyzer(Node):
         self.source_switch_timeout = max(
             0.1, float(self.get_parameter("source_switch_timeout").value)
         )
+        self.source_failure_cooldown = max(
+            0.1, float(self.get_parameter("source_failure_cooldown").value)
+        )
+        self.source_geometry_failure_frames = int(
+            self.get_parameter("source_geometry_failure_frames").value
+        )
+        # ``ground_height_prior`` is only a short-lived aid for frames where a wall or platform
+        # hides the floor.  It is not a calibration constant: body-height changes, a new TF, or a
+        # replay seek make an old base_link-relative height physically wrong.  Age bounds its
+        # lifetime; the conflict count bounds how many consecutive translated floors may remain
+        # UNKNOWN before the node deliberately reacquires the new level.
+        self.ground_prior_max_age = float(
+            self.get_parameter("ground_prior_max_age").value
+        )
+        self.ground_prior_max_consecutive_conflicts = int(
+            self.get_parameter("ground_prior_max_consecutive_conflicts").value
+        )
+        self.ground_prior_max_height_shift = float(
+            self.get_parameter("ground_prior_max_height_shift").value
+        )
         self.grid_cell_size = max(
             0.02, float(self.get_parameter("grid_cell_size").value)
         )
@@ -431,6 +460,21 @@ class TerrainAnalyzer(Node):
         self.min_connected_region_points = max(
             4, int(self.get_parameter("min_connected_region_points").value)
         )
+        # CLEAR 是允许 Nav2 继续前进的安全结论，因此不能仅凭“整帧总点数很多”批准。
+        # 下列四项描述中央落脚通道必须被深度/三维雷达连续看见多远，以及最多容忍多宽
+        # 的回波缺带。缺带返回 UNKNOWN，而不是凭空把无回波猜成 PIT。
+        self.clear_ground_corridor_half_width = float(
+            self.get_parameter("clear_ground_corridor_half_width").value
+        )
+        self.clear_ground_required_distance = float(
+            self.get_parameter("clear_ground_required_distance").value
+        )
+        self.clear_ground_max_gap = float(
+            self.get_parameter("clear_ground_max_gap").value
+        )
+        self.clear_ground_min_lateral_fraction = float(
+            self.get_parameter("clear_ground_min_lateral_fraction").value
+        )
         if self.x_max <= self.x_min:
             self.get_logger().warning(
                 "front_x_max must exceed front_x_min; using a 0.10 m ROI"
@@ -439,6 +483,9 @@ class TerrainAnalyzer(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        # ``latest_cloud`` keeps its source beside the message.  A candidate may provisionally own
+        # this slot after cheap metadata validation, but it only refreshes the healthy-source clock
+        # after XYZ decoding and the timestamped TF both succeed in ``processing_callback``.
         self.latest_cloud = None
         self.last_processed_stamp = None
         # Header watermark belongs to the currently selected source. Duplicate or
@@ -447,9 +494,24 @@ class TerrainAnalyzer(Node):
         self.last_received_source_stamp = None
         self.active_topic = None
         self.last_active_cloud_time = None
+        self.last_candidate_cloud_time = None
+        # Source arbitration, header watermarks, cooldown deadlines and the ground prior all use
+        # ROS time.  Remember the last observed epoch independently of source health so a bag seek
+        # is detected *before* an old future timestamp/cooldown can reject the first new frame.
+        self.last_ros_time_ns = None
+        # Decode/TF failures quarantine only the offending candidate.  This lets a correctly wired
+        # backup camera/lidar take over instead of being suppressed by a high-rate broken topic.
+        self.source_cooldown_until = {}
+        # Finite XYZ and a valid TF still do not prove that a sensor sees the forward traversal
+        # corridor.  Count consecutive sparse/UNKNOWN geometry frames for the active session; the
+        # YAML threshold deliberately exceeds one so body pitch or one dropped depth frame cannot
+        # flap between otherwise healthy sensors.
+        self.consecutive_geometry_failures = 0
         # 只由明确 CLEAR 帧更新，用于近场被墙/平台完全遮挡时防止地面层翻转。
         # 它属于同一传感器会话的短期几何先验，不含场地坐标或障碍标签。
         self.ground_height_prior = None
+        self.ground_height_prior_time = None
+        self.ground_prior_conflict_count = 0
         self.features_pub = self.create_publisher(
             Float32MultiArray, "/terrain/features", 10
         )
@@ -483,26 +545,45 @@ class TerrainAnalyzer(Node):
     def cloud_callback(self, msg: PointCloud2, source: str) -> None:
         """只缓存最新帧；处理速度落后时主动丢旧帧，避免决策使用过期环境。"""
         now = self.get_clock().now()
+        self._observe_ros_epoch(now)
+        now_seconds = now.nanoseconds * 1e-9
+        cooldown_until = self.source_cooldown_until.get(source, float("-inf"))
+        if now_seconds < cooldown_until:
+            return
+        # Drop expired entries so a repeatedly unplugged/replugged sensor cannot grow this mapping.
+        self.source_cooldown_until = {
+            topic: deadline
+            for topic, deadline in self.source_cooldown_until.items()
+            if deadline > now_seconds
+        }
         # Validate metadata before source arbitration.  Otherwise a continuously published
         # empty cloud or a cloud without floating XYZ fields can monopolize the preferred topic
         # and prevent a healthy secondary depth camera/3-D lidar from ever taking over.
-        if (
-            not point_cloud_message_contract_valid(msg)
-            or not source_stamp_is_plausible(
-                msg.header,
-                now.nanoseconds * 1e-9,
-                self.source_switch_timeout,
-            )
-        ):
+        if not point_cloud_message_contract_valid(msg):
             self.get_logger().warning(
                 f"Ignoring invalid PointCloud2 contract from {source}",
                 throttle_duration_sec=2.0,
             )
+            # If a once-healthy driver changes to a corrupt field layout, waiting for the ordinary
+            # silence timeout unnecessarily blocks a backup sensor.  Quarantine malformed traffic
+            # immediately; a single-sensor installation retries it after the configured cooldown.
+            self._mark_source_unhealthy(source)
             return
+        if not source_stamp_is_plausible(
+            msg.header,
+            now_seconds,
+            self.source_switch_timeout,
+        ):
+            self.get_logger().warning(
+                f"Ignoring stale/future PointCloud2 from {source}",
+                throttle_duration_sec=2.0,
+            )
+            return
+        ownership_reference = self.last_active_cloud_time or self.last_candidate_cloud_time
         active_age = (
             float("inf")
-            if self.last_active_cloud_time is None
-            else (now - self.last_active_cloud_time).nanoseconds / 1e9
+            if ownership_reference is None
+            else (now - ownership_reference).nanoseconds / 1e9
         )
         if not should_accept_source(
             self.active_topic,
@@ -511,25 +592,19 @@ class TerrainAnalyzer(Node):
             self.source_switch_timeout,
         ):
             return
-        clock_rewound = (
-            self.last_active_cloud_time is not None
-            and now.nanoseconds < self.last_active_cloud_time.nanoseconds
-        )
         # 锁定首个有效点云源；当前源超时后允许其他默认话题接管。
-        if source != self.active_topic or clock_rewound:
+        if source != self.active_topic:
             self.active_topic = source
             self.last_processed_stamp = None
             self.last_received_source_stamp = None
+            self.last_active_cloud_time = None
+            self.last_candidate_cloud_time = None
+            self.consecutive_geometry_failures = 0
             # A replay/simulator clock reset starts a new physical observation
             # session. Keeping the previous ground prior could shift all new relative
             # heights and turn flat ground into a step until many CLEAR frames arrive.
-            self.ground_height_prior = None
-            if clock_rewound:
-                self.get_logger().warning(
-                    "ROS clock moved backward; reset point-cloud history"
-                )
-            else:
-                self.get_logger().info(f"Using point-cloud topic {source}")
+            self._reset_ground_prior()
+            self.get_logger().info(f"Using point-cloud topic {source}")
         if not source_stamp_strictly_advances(
             msg.header, self.last_received_source_stamp
         ):
@@ -542,21 +617,33 @@ class TerrainAnalyzer(Node):
             float(msg.header.stamp.sec)
             + float(msg.header.stamp.nanosec) * 1e-9
         )
-        self.last_active_cloud_time = now
-        self.latest_cloud = msg
+        self.last_candidate_cloud_time = now
+        self.latest_cloud = (msg, source)
 
     def processing_callback(self) -> None:
         """处理一帧未见过的点云；每个传感器时间戳最多处理一次。"""
-        msg = self.latest_cloud
-        if msg is None:
+        # A /clock rewind may occur between the last subscriber callback and this timer.  Observe
+        # it before reading ``latest_cloud`` so an old-epoch pending frame is never processed.
+        if self._observe_ros_epoch(self.get_clock().now()):
             return
+        pending = self.latest_cloud
+        if pending is None:
+            return
+        msg, source = pending
         stamp = (msg.header.frame_id, msg.header.stamp.sec, msg.header.stamp.nanosec)
         if stamp == self.last_processed_stamp:
             return
         self.last_processed_stamp = stamp
         transformed = self._xyz_in_target_frame(msg)
         if transformed is None:
+            self._mark_source_unhealthy(source)
             return
+        # Decoding and TF are necessary but not sufficient source-health evidence.  The sensor must
+        # also contain enough forward geometry for a conservative valid classification below.
+        processing_time = self.get_clock().now()
+        if self._observe_ros_epoch(processing_time):
+            return
+        self._expire_ground_prior(processing_time)
         header, xyz = transformed
         # 先保留较完整的分析 ROI。这里使用 max_points 而不是 Nav2 的发布上限，避免为了
         # 节省 costmap 带宽而同时降低地面拟合、细横杆和窄立柱的分类支撑点数。
@@ -584,6 +671,7 @@ class TerrainAnalyzer(Node):
             z_max=self.z_max,
         )
         if result is None:
+            self._record_geometry_failure(source, "insufficient forward ROI points")
             self._publish_diagnostic(
                 DiagnosticStatus.WARN,
                 "Insufficient terrain points",
@@ -604,15 +692,18 @@ class TerrainAnalyzer(Node):
             min_region_cells=self.min_connected_region_cells,
             min_region_points=self.min_connected_region_points,
             ground_height_prior=self.ground_height_prior,
+            ground_prior_max_height_shift=self.ground_prior_max_height_shift,
+            clear_ground_corridor_half_width=self.clear_ground_corridor_half_width,
+            clear_ground_start_x=self.x_min,
+            clear_ground_required_distance=self.clear_ground_required_distance,
+            clear_ground_max_gap=self.clear_ground_max_gap,
+            clear_ground_min_lateral_fraction=self.clear_ground_min_lateral_fraction,
         )
-        if geometry.valid and geometry.obstacle_type == CLEAR:
-            if self.ground_height_prior is None:
-                self.ground_height_prior = float(geometry.ground_height)
-            else:
-                self.ground_height_prior = (
-                    0.90 * float(self.ground_height_prior)
-                    + 0.10 * float(geometry.ground_height)
-                )
+        if geometry.valid:
+            self.consecutive_geometry_failures = 0
+            self.last_active_cloud_time = processing_time
+            self.last_candidate_cloud_time = None
+        self._update_ground_prior(geometry, processing_time)
         # 代价地图只接收相对局部地面凸起的点。平地和可通行坡面不会再因为 base_link
         # 高度或坡度而被标成障碍；几何无效时输出空云，同时安全评估保持 STOP。
         nav2_points = navigation_obstacle_points(
@@ -686,6 +777,163 @@ class TerrainAnalyzer(Node):
                 "roughness_m": roughness,
             },
         )
+        if not geometry.valid:
+            # Publish the typed UNKNOWN result first so downstream safety remains fail-closed, then
+            # release this source only after the configured consecutive-frame debounce expires.
+            self._record_geometry_failure(source, "no valid forward terrain geometry")
+
+    def _observe_ros_epoch(self, now: Time) -> bool:
+        """Reset every ROS-time-bound sensor state before accepting data after a rewind.
+
+        Cooldown deadlines and receive/processing watermarks from a later rosbag/Gazebo epoch must
+        not suppress the first frame after a seek.  The observer is called by both the subscription
+        and timer entry points; equal time while simulation is paused is not a rewind.
+        """
+        current_ns = int(now.nanoseconds)
+        rewound = (
+            self.last_ros_time_ns is not None
+            and current_ns < self.last_ros_time_ns
+        )
+        if rewound:
+            self._reset_sensor_epoch()
+            self.get_logger().warning(
+                "ROS clock moved backward; reset point-cloud source epoch",
+                throttle_duration_sec=2.0,
+            )
+        self.last_ros_time_ns = current_ns
+        return rewound
+
+    def _reset_sensor_epoch(self) -> None:
+        """Forget state whose meaning is limited to one monotonic ROS-time epoch."""
+        self.latest_cloud = None
+        self.last_processed_stamp = None
+        self.last_received_source_stamp = None
+        self.active_topic = None
+        self.last_active_cloud_time = None
+        self.last_candidate_cloud_time = None
+        self.source_cooldown_until.clear()
+        self.consecutive_geometry_failures = 0
+        self._reset_ground_prior()
+
+    def _record_geometry_failure(self, source: str, reason: str) -> None:
+        """Debounce geometrically unusable frames, then quarantine the active source.
+
+        A finite cloud outside the configured ROI, or one that cannot establish valid ground/
+        obstacle geometry, is not healthy merely because decoding and TF succeeded.  Several such
+        frames in sequence identify a wrong optical axis, blocked lens or unsuitable fallback
+        topic.
+        """
+        if source != self.active_topic:
+            return
+        self.consecutive_geometry_failures += 1
+        if self.consecutive_geometry_failures < self.source_geometry_failure_frames:
+            return
+        self.get_logger().warning(
+            f"Point-cloud source {source} produced "
+            f"{self.consecutive_geometry_failures} unusable geometry frames "
+            f"({reason}); trying a backup",
+            throttle_duration_sec=2.0,
+        )
+        self._mark_source_unhealthy(source)
+
+    def _mark_source_unhealthy(self, source: str) -> None:
+        """Cooldown a source after decoding/TF failure and release it for healthy failover.
+
+        ``source_failure_cooldown`` is longer than one processing period so a high-rate malformed
+        topic cannot reacquire before the backup's next frame.  With one sensor,
+        the same topic is automatically retried after cooldown.
+        """
+        now = self.get_clock().now()
+        if self._observe_ros_epoch(now):
+            # Rewind already discarded the old-epoch frame and all source ownership.  Starting a
+            # cooldown in the new epoch would incorrectly punish whichever source arrives first.
+            return
+        self.source_cooldown_until[source] = (
+            now.nanoseconds * 1e-9 + self.source_failure_cooldown
+        )
+        if source != self.active_topic:
+            return
+        self.get_logger().warning(
+            f"Point-cloud source {source} is unusable; allowing backup source takeover",
+            throttle_duration_sec=2.0,
+        )
+        self.active_topic = None
+        self.last_active_cloud_time = None
+        self.last_candidate_cloud_time = None
+        self.last_processed_stamp = None
+        self.last_received_source_stamp = None
+        self.latest_cloud = None
+        self.consecutive_geometry_failures = 0
+        # Ground height belongs to the old source/TF calibration and must not cross a failover.
+        self._reset_ground_prior()
+
+    def _reset_ground_prior(self) -> None:
+        """Forget all state tied to a previously observed base_link-relative floor."""
+        self.ground_height_prior = None
+        self.ground_height_prior_time = None
+        self.ground_prior_conflict_count = 0
+
+    def _expire_ground_prior(self, now: Time) -> None:
+        """Expire a stale or future-dated floor prior before classifying the current cloud.
+
+        ``ground_prior_max_age`` is measured in ROS time, not wall time, so paused simulation does
+        not age the model.  A negative age indicates a rosbag/Gazebo clock rewind and is treated as
+        a new observation session.  Increase the age only if a labelled bag shows a long, genuine
+        floor occlusion; decrease it to limit how long changed TF/body height affects geometry.
+        """
+        if self.ground_height_prior is None:
+            return
+        if self.ground_height_prior_time is None:
+            self._reset_ground_prior()
+            return
+        age = (now - self.ground_height_prior_time).nanoseconds * 1e-9
+        if age < 0.0 or age > self.ground_prior_max_age:
+            self.get_logger().warning(
+                "Ground-height prior expired; reacquiring from current point cloud",
+                throttle_duration_sec=2.0,
+            )
+            self._reset_ground_prior()
+
+    def _update_ground_prior(self, geometry, now: Time) -> None:
+        """Update, retain, or invalidate the short-term floor-height state.
+
+        The geometry core deliberately does not mutate state.  A broad translated floor raises
+        ``ground_reference_conflict`` and remains UNKNOWN; this method requires consecutive frames
+        before dropping the old prior.  Raise ``ground_prior_max_consecutive_conflicts`` when
+        isolated gait impacts cause false resets, and lower it when a commanded body-height change
+        takes too long to recover.  Always tune it together with ``ground_prior_max_height_shift``.
+        """
+        if geometry.ground_reference_conflict:
+            # The core raises this only for a broad, observed plane shifted as a whole.
+            # Keep initial frames UNKNOWN so one vibration cannot erase a useful prior.
+            # A persistent shift likely means commanded body height or recalibrated TF; discard the
+            # prior after the configured count so the next CLEAR frame establishes the new height.
+            self.ground_prior_conflict_count += 1
+            if (
+                self.ground_prior_conflict_count
+                >= self.ground_prior_max_consecutive_conflicts
+            ):
+                self.get_logger().warning(
+                    "Ground-height prior conflicts with consecutive full-floor observations; "
+                    "reacquiring the current ground level",
+                    throttle_duration_sec=2.0,
+                )
+                self._reset_ground_prior()
+        elif geometry.valid and geometry.obstacle_type == CLEAR:
+            if self.ground_height_prior is None:
+                self.ground_height_prior = float(geometry.ground_height)
+            else:
+                self.ground_height_prior = (
+                    0.90 * float(self.ground_height_prior)
+                    + 0.10 * float(geometry.ground_height)
+                )
+            self.ground_height_prior_time = now
+            self.ground_prior_conflict_count = 0
+        else:
+            # A real obstacle or a sparse/invalid frame says nothing about whether the stored floor
+            # level is wrong.  It breaks the *consecutive translated-floor* sequence but leaves the
+            # age-limited prior available for the next occluded wall frame.
+            self.ground_prior_conflict_count = 0
 
     def _xyz_in_target_frame(self, msg: PointCloud2):
         """读取 XYZ 并按采样时刻变换，忽略不相关的厂商扩展字段。"""
@@ -693,8 +941,15 @@ class TerrainAnalyzer(Node):
             xyz = point_cloud2.read_points_numpy(
                 msg, field_names=["x", "y", "z"], skip_nans=True
             )
-        except (AssertionError, ValueError) as exc:
+        except (AssertionError, TypeError, ValueError, RuntimeError) as exc:
             self.get_logger().warning(f"Invalid PointCloud2 XYZ layout: {exc}")
+            return None
+        xyz = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
+        # A non-empty cloud may encode every no-return as NaN/Inf.  Such a stream cannot
+        # support terrain geometry and must not keep ownership over a usable backup sensor.
+        xyz = xyz[np.isfinite(xyz).all(axis=1)]
+        if not len(xyz):
+            self.get_logger().warning("PointCloud2 contains no finite XYZ samples")
             return None
         # 先降采样再做 TF。后续仍会按 base_link 前向 ROI 和 max_points 二次筛选；这一层
         # 只负责限制全图变换成本，不假设任何厂商坐标轴或图像宽高。

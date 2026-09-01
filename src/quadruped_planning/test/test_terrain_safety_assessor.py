@@ -1,7 +1,8 @@
 """地形安全评估和 Nav2 速度门的纯逻辑回归测试。"""
 
 from geometry_msgs.msg import Twist
-from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
+from quadruped_interfaces.msg import FusedObstacle, NavigationSafety, TerrainFeatures
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 
 from quadruped_planning.cmd_vel_gate import (
@@ -11,13 +12,16 @@ from quadruped_planning.cmd_vel_gate import (
     is_pure_rotation_request,
     scan_allows_command,
     twist_components_are_finite,
+    twist_matches_differential_drive,
 )
 from quadruped_planning.terrain_safety_assessor import (
-    ObstacleNameStabilizer,
+    ObstacleClassification,
+    ObstacleClassificationStabilizer,
     ConservativeAssessmentFilter,
     apply_distance_aware_constraint,
     apply_geometry_classification,
     apply_visual_assist,
+    classify_front_obstacle,
     finite_or_zero,
     format_front_obstacle_status,
     front_obstacle_name_zh,
@@ -31,30 +35,39 @@ from quadruped_planning.terrain_safety_assessor import (
     obstacle_name_zh,
     select_fused_assessment,
     select_terrain_assessment,
+    terrain_features_to_fused_observation,
     validate_height_thresholds,
     visual_obstacle_name_zh,
     visual_evidence_in_path,
+)
+from quadruped_planning.time_utils import (
+    ros_age_is_fresh,
+    ros_age_seconds,
+    ros_clock_moved_backward,
 )
 
 
 def test_competition_name_requires_repeated_frames_and_invalid_clears_immediately():
     """类别边界抖动不能刷屏或污染任务投票，断流仍必须立即显式失效。"""
-    filter_ = ObstacleNameStabilizer(
+    filter_ = ObstacleClassificationStabilizer(
         confirmation_frames=3,
         clear_frames=4,
     )
-    assert filter_.update("高墙", True) == "感知数据无效"
-    assert filter_.update("T 字形台阶", True) == "感知数据无效"
-    assert filter_.update("高墙", True) == "感知数据无效"
-    assert filter_.update("高墙", True) == "感知数据无效"
-    assert filter_.update("高墙", True) == "高墙"
+    invalid = ObstacleClassification("", "感知数据无效")
+    wall = ObstacleClassification("high_wall", "高墙")
+    stairs = ObstacleClassification("t_shaped_stairs", "T 字形台阶")
+    assert filter_.update(wall, True) == invalid
+    assert filter_.update(stairs, True) == invalid
+    assert filter_.update(wall, True) == invalid
+    assert filter_.update(wall, True) == invalid
+    assert filter_.update(wall, True) == wall
 
     # 一帧近裁剪误分类不允许覆盖已确认名称。
-    assert filter_.update("T 字形台阶", True) == "高墙"
-    assert filter_.update("高墙", True) == "高墙"
+    assert filter_.update(stairs, True) == wall
+    assert filter_.update(wall, True) == wall
     # 但感知断流不能因时序滤波继续显示旧障碍。
-    assert filter_.update("高墙", False) == "感知数据无效"
-    assert filter_.reset() == "感知数据无效"
+    assert filter_.update(wall, False) == invalid
+    assert filter_.reset() == invalid
 
 
 def test_duplicate_or_out_of_order_fused_stamp_cannot_add_a_temporal_vote():
@@ -139,8 +152,8 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety = NavigationSafety()
     safety.perception_valid = True
     safety.obstacle_type = NavigationSafety.OBSTACLE_CLEAR
-    safety.slope_pitch = 0.174533  # 规则主斜坡 10°
-    assert front_obstacle_name_zh(safety) == "主斜坡（10°坡面）"
+    safety.slope_pitch = 0.197222  # 第二十五届 V2.0 主斜坡 11.3°
+    assert front_obstacle_name_zh(safety) == "主斜坡（11.3°坡面）"
     safety.slope_pitch = 0.244346  # 规则木桥 A 的连续 14° 入口坡
     assert front_obstacle_name_zh(safety) == "木桥 A（14°入口坡）"
 
@@ -205,6 +218,37 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.roughness = 0.06
     safety.slope_pitch = 0.0
     assert front_obstacle_name_zh(safety) == "T 字形台阶"
+
+
+def test_display_and_machine_semantic_are_derived_from_one_classification():
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.30
+    safety.width = 1.0
+    classification = classify_front_obstacle(safety)
+    assert classification.display_name == "高墙"
+    assert classification.semantic_id == "high_wall"
+
+    # UI 文案可任意改写/装饰，机器 ID 仍是几何分支同时产生的字段；
+    # 系统不提供“中文 -> ID”反向解析路径。
+    decorated = ObstacleClassification(
+        classification.semantic_id, "【UI】墙面候选（文案可变）"
+    )
+    stable = ObstacleClassificationStabilizer(confirmation_frames=1).update(
+        decorated, True
+    )
+    assert stable.semantic_id == "high_wall"
+    assert stable.display_name == "【UI】墙面候选（文案可变）"
+
+    # 普通低台阶不足以区分木桥/T 台，必须保持未确认 ID。
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    safety.obstacle_height = 0.10
+    safety.width = 0.30
+    safety.roughness = 0.01
+    ambiguous = classify_front_obstacle(safety)
+    assert ambiguous.display_name == "台阶或木桥踏板（待结构确认）"
+    assert ambiguous.semantic_id == ""
 
 
 def test_flat_arena_edge_is_not_named_as_the_competition_pit():
@@ -359,14 +403,24 @@ def test_main_slope_side_is_not_segmented_bridge_b():
     assert "木桥 B" not in front_obstacle_name_zh(safety)
 
 
-def test_crossbar_vision_preserves_height_bar_during_near_step_crop():
+def test_raw_crossbar_hint_cannot_override_authoritative_geometry_semantic():
     safety = NavigationSafety()
     safety.perception_valid = True
-    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
-    safety.obstacle_height = 0.34
-    safety.width = 1.12
-    safety.roughness = 0.05
-    assert front_obstacle_name_zh(safety, "横杆") == "限高杆"
+    safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    safety.obstacle_height = 0.30
+    safety.width = 1.0
+    safety.roughness = 0.02
+    classification = classify_front_obstacle(safety, "横杆")
+    assert classification.display_name == "高墙"
+    assert classification.semantic_id == "high_wall"
+    status = format_front_obstacle_status(safety, "横杆")
+    assert "仅提示" in status
+
+    # 只有强类型点云自身确认 BAR，才可产生可执行的限高杆 ID。
+    safety.obstacle_type = NavigationSafety.OBSTACLE_BAR
+    confirmed = classify_front_obstacle(safety, "横杆")
+    assert confirmed.semantic_id == "height_bar"
+    assert confirmed.display_name == "限高杆"
 
 
 def test_overheight_flat_step_requires_another_view_before_t_stair_handoff():
@@ -395,7 +449,7 @@ def test_field_calibration_disambiguates_slope_side_stairs_and_bridge_entries():
     safety = NavigationSafety()
     safety.perception_valid = True
 
-    # Looking at the long side of the 10-degree ramp is a tall vertical edge, not
+    # Looking at the long side of the 11.3-degree ramp is a tall vertical edge, not
     # a T-shaped stair traversal entry.
     safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
     safety.obstacle_height = 0.473
@@ -405,7 +459,7 @@ def test_field_calibration_disambiguates_slope_side_stairs_and_bridge_entries():
     safety.slope_roll = 0.1745
     assert "T 字形" not in front_obstacle_name_zh(safety)
 
-    # 即使侧面只量到 0.40 m（落入普通 T 台高度范围），10° 横向坡仍必须阻止误交接。
+    # 即使侧面只量到 0.40 m（落入普通 T 台高度范围），11.3° 横向坡仍必须阻止误交接。
     safety.obstacle_height = 0.40
     safety.roughness = 0.042
     assert "T 字形" not in front_obstacle_name_zh(safety)
@@ -545,7 +599,7 @@ def test_visual_target_requires_valid_centered_evidence():
 def test_invalid_height_thresholds_restore_safe_defaults():
     """乱序高度阈值恢复为保守默认值。"""
     assert validate_height_thresholds(0.08, 0.18, 0.32) == (0.08, 0.18, 0.32)
-    assert validate_height_thresholds(0.30, 0.10, 0.20) == (0.08, 0.18, 0.32)
+    assert validate_height_thresholds(0.30, 0.10, 0.20) == (0.07, 0.18, 0.32)
 
 
 def test_typed_handoff_codes_and_numeric_sanitization_are_stable():
@@ -569,6 +623,7 @@ def test_observation_timestamp_rejects_replay_and_future_clock_errors():
     assert not observation_stamp_is_current(100.0, 0.0, 0.7, 0.1)
     assert not observation_stamp_is_current(100.0, 98.0, 0.7, 0.1)
     assert not observation_stamp_is_current(100.0, 100.2, 0.7, 0.1)
+    assert observation_stamp_is_current(100.0, 100.05, 0.7, 0.1)
     assert not observation_stamp_is_current(
         100.0, float("nan"), 0.7, 0.1
     )
@@ -680,6 +735,41 @@ def test_velocity_gate_requires_fresh_command_and_assessment():
     assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
     assert gated_twist(command, float("nan"), True, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, True, True, True, True).linear.x == 0.0
+    assert gated_twist(
+        command, 1.0, True, True, True, True, False, False
+    ).linear.x == 0.0
+
+
+def test_ros_clock_rewind_is_never_treated_as_fresh_data():
+    """A cached heartbeat from a later ROS epoch must fail every age watchdog."""
+    old_epoch_stamp = Time(seconds=10.0)
+    rewound_now = Time(seconds=5.0)
+    assert ros_clock_moved_backward(rewound_now, old_epoch_stamp)
+    assert ros_age_seconds(rewound_now, old_epoch_stamp) == -5.0
+    assert not ros_age_is_fresh(rewound_now, old_epoch_stamp, 10.0)
+
+
+def test_invalid_typed_geometry_cannot_authorize_motion():
+    """TerrainFeatures.valid=false remains STOP even when its numbers look plausible."""
+    features = TerrainFeatures()
+    features.valid = False
+    features.obstacle_type = TerrainFeatures.CLEAR
+    features.confidence = 1.0
+    features.valid_points = 100
+    observation = terrain_features_to_fused_observation(features)
+    assert not observation.geometry_confirmed
+    assert not fused_observation_valid(observation, 0.25, 30)
+    assert select_fused_assessment(
+        observation,
+        0.25,
+        30,
+        0.07,
+        0.18,
+        0.32,
+        0.45,
+        0.06,
+        0.35,
+    ) == ("STOP", 0.0)
 
 
 def test_velocity_gate_rejects_nonfinite_twist_as_one_atomic_command():
@@ -710,7 +800,6 @@ def test_alignment_twist_never_preserves_translation():
     """近障碍对正权限只能放行有界 yaw，不能重新放开向前运动。"""
     command = Twist()
     command.linear.x = 0.8
-    command.linear.y = -0.2
     command.angular.z = 0.7
     output = alignment_twist(command, 0.3)
     assert output.linear.x == 0.0
@@ -744,18 +833,26 @@ def test_rotation_dominant_dwb_command_can_escape_a_zero_speed_limit():
     assert not is_pure_rotation_request(command, 0.02)
 
 
-def test_final_velocity_gate_checks_only_the_command_direction():
-    """前后扇区和原地旋转急停应独立，不能把远处比赛障碍提前当成绕行目标。"""
+def _full_scan(sample_count=361, distance=1.0):
+    """Build a metadata-consistent 360-degree scan for velocity-gate tests."""
     scan = LaserScan()
     scan.angle_min = -3.141592653589793
-    scan.angle_increment = 3.141592653589793 / 4.0
+    scan.angle_max = 3.141592653589793
+    scan.angle_increment = (scan.angle_max - scan.angle_min) / (sample_count - 1)
     scan.range_min = 0.05
-    scan.ranges = [1.0] * 9
+    scan.range_max = 10.0
+    scan.ranges = [float(distance)] * sample_count
+    return scan
+
+
+def test_final_velocity_gate_checks_only_the_command_direction():
+    """前后扇区和原地旋转急停应独立，不能把远处比赛障碍提前当成绕行目标。"""
+    scan = _full_scan()
     command = Twist()
     command.linear.x = 0.2
     assert scan_allows_command(scan, command, 0.22, 0.60)
-    # 正前方索引 4 进入 22 cm，前进必须停车；后退仍可脱离。
-    scan.ranges[4] = 0.18
+    # 正前方进入 22 cm，前进必须停车；后退仍可脱离。
+    scan.ranges[len(scan.ranges) // 2] = 0.18
     assert not scan_allows_command(scan, command, 0.22, 0.60)
     command.linear.x = -0.2
     assert scan_allows_command(scan, command, 0.22, 0.60)
@@ -765,6 +862,128 @@ def test_final_velocity_gate_checks_only_the_command_direction():
     command.linear.x = 0.0
     command.angular.z = 0.4
     assert not scan_allows_command(scan, command, 0.22, 0.60)
+
+
+def test_scan_rejects_sparse_or_out_of_range_evidence_and_bad_metadata():
+    command = Twist()
+    command.linear.x = 0.2
+
+    sparse = _full_scan(sample_count=68)
+    sparse.ranges = [float("nan")] * 67 + [5.0]
+    assert not scan_allows_command(sparse, command, 0.22, 0.60)
+
+    impossible = _full_scan(sample_count=68)
+    impossible.ranges = [1_000_000.0] * 68
+    assert not scan_allows_command(impossible, command, 0.22, 0.60)
+
+    # REP-117 style positive Inf means no obstacle was returned within sensor range;
+    # common real/Gazebo lidars use it in open space, so it must not brick navigation.
+    open_space = _full_scan()
+    open_space.ranges = [float("inf")] * len(open_space.ranges)
+    assert scan_allows_command(open_space, command, 0.22, 0.60)
+
+    # The sector still has >80% valid rays, but one continuous hole exceeds 0.20 rad.
+    # Ratio and maximum-gap guards are independent and both must pass.
+    gapped = _full_scan()
+    center = len(gapped.ranges) // 2
+    for index in range(center - 6, center + 7):
+        gapped.ranges[index] = float("nan")
+    assert not scan_allows_command(gapped, command, 0.22, 0.60)
+
+    malformed = _full_scan()
+    malformed.angle_increment = 0.0
+    assert not scan_allows_command(malformed, command, 0.22, 0.60)
+    malformed = _full_scan()
+    malformed.angle_max -= 0.5
+    assert not scan_allows_command(malformed, command, 0.22, 0.60)
+    malformed = _full_scan()
+    malformed.range_max = malformed.range_min
+    assert not scan_allows_command(malformed, command, 0.22, 0.60)
+    coarse = _full_scan(sample_count=9)
+    assert not scan_allows_command(coarse, command, 0.22, 0.60)
+
+
+def test_scan_requires_directional_coverage_and_near_full_rotation_coverage():
+    # A forward-only scanner can authorize straight forward motion, but it provides no
+    # rear evidence and cannot protect the footprint during rotation.
+    scan = LaserScan()
+    scan.angle_min = -1.5707963267948966
+    scan.angle_max = 1.5707963267948966
+    scan.angle_increment = (scan.angle_max - scan.angle_min) / 180
+    scan.range_min = 0.05
+    scan.range_max = 10.0
+    scan.ranges = [1.0] * 181
+    command = Twist()
+    command.linear.x = 0.2
+    assert scan_allows_command(scan, command, 0.22, 0.60)
+    command.linear.x = -0.2
+    assert not scan_allows_command(scan, command, 0.22, 0.60)
+    command.linear.x = 0.0
+    command.angular.z = 0.3
+    assert not scan_allows_command(scan, command, 0.22, 0.60)
+
+    full = _full_scan()
+    assert scan_allows_command(full, command, 0.22, 0.60)
+
+    # A nominal 10-degree blind arc is just inside the configured 0.20 rad limit.  Two
+    # invalid endpoint rays on each side join that blind arc into one unsafe hole.
+    near_full = LaserScan()
+    near_full.angle_min = -3.0543261909900767  # -175 deg
+    near_full.angle_max = 3.0543261909900767   # +175 deg
+    near_full.angle_increment = (near_full.angle_max - near_full.angle_min) / 350
+    near_full.range_min = 0.05
+    near_full.range_max = 10.0
+    near_full.ranges = [1.0] * 351
+    assert scan_allows_command(near_full, command, 0.22, 0.60)
+    for index in (0, 1, len(near_full.ranges) - 2, len(near_full.ranges) - 1):
+        near_full.ranges[index] = float("nan")
+    assert not scan_allows_command(near_full, command, 0.22, 0.60)
+
+
+def test_turning_arc_checks_full_body_sweep_not_only_front_sector():
+    scan = _full_scan()
+    command = Twist()
+    command.linear.x = 0.2
+    command.angular.z = 0.3
+    # A left-side obstacle is outside the forward 0.60 rad sector but can be swept by
+    # the body during the arc, so any yaw request must reject it.
+    left_index = round((1.5707963267948966 - scan.angle_min) / scan.angle_increment)
+    scan.ranges[left_index] = 0.18
+    assert not scan_allows_command(scan, command, 0.22, 0.60)
+
+
+def test_velocity_gate_enforces_planar_differential_drive_contract():
+    scan = _full_scan()
+    for field_group, field_name in (
+        ("linear", "y"),
+        ("linear", "z"),
+        ("angular", "x"),
+        ("angular", "y"),
+    ):
+        command = Twist()
+        command.linear.x = 0.2
+        command.angular.z = 0.2
+        setattr(getattr(command, field_group), field_name, 0.05)
+        assert not twist_matches_differential_drive(command)
+        assert gated_twist(command, 1.0, True, True).linear.x == 0.0
+        assert alignment_twist(command, 0.3).angular.z == 0.0
+        assert not scan_allows_command(scan, command, 0.22, 0.60)
+
+    lateral = Twist()
+    lateral.linear.y = 0.2
+    assert not twist_matches_differential_drive(lateral)
+    assert not scan_allows_command(scan, lateral, 0.22, 0.60)
+    diagonal = Twist()
+    diagonal.linear.x = 0.2
+    diagonal.linear.y = 0.1
+    assert gated_twist(diagonal, 1.0, True, True).linear.x == 0.0
+    tiny_noise = Twist()
+    tiny_noise.linear.x = 0.2
+    tiny_noise.linear.y = 5e-7
+    assert twist_matches_differential_drive(tiny_noise)
+    sanitized = gated_twist(tiny_noise, 1.0, True, True)
+    assert sanitized.linear.x == 0.2
+    assert sanitized.linear.y == 0.0
 
 
 def test_filter_confirms_hazard_and_clearance_but_stops_immediately():

@@ -41,7 +41,6 @@ def generate_launch_description():
     lifecycle_nodes = [
         # 顺序是生命周期管理器的配置/激活顺序；新增服务器时必须同步此列表。
         "controller_server",
-        "smoother_server",
         "planner_server",
         "behavior_server",
         "velocity_smoother",
@@ -72,13 +71,6 @@ def generate_launch_description():
             configured_params,
             log_level,
             controller_remaps,
-        ),
-        nav2_node(
-            "nav2_smoother",
-            "smoother_server",
-            configured_params,
-            log_level,
-            tf_remaps,
         ),
         nav2_node(
             "nav2_planner",

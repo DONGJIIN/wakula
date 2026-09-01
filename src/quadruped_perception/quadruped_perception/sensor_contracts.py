@@ -69,7 +69,9 @@ def source_stamp_strictly_advances(header, previous_seconds) -> bool:
     return isfinite(previous) and current > previous + 1e-9
 
 
-def image_message_contract_valid(message: Image) -> bool:
+def image_message_contract_valid(
+    message: Image, minimum_bytes_per_pixel: int = 1
+) -> bool:
     """Reject empty/inconsistent raw Image buffers before selecting their topic.
 
     ``step`` may include row padding, therefore the contract allows more than the minimum
@@ -78,13 +80,17 @@ def image_message_contract_valid(message: Image) -> bool:
     width = int(message.width)
     height = int(message.height)
     step = int(message.step)
+    bytes_per_pixel = max(1, int(minimum_bytes_per_pixel))
     return (
         header_contract_valid(message.header)
         and width > 0
         and height > 0
-        and step >= width
+        and step >= width * bytes_per_pixel
         and bool(str(message.encoding).strip())
-        and len(message.data) >= step * height
+        # ROS Image defines exactly ``step * height`` bytes.  Extra trailing bytes are not row
+        # padding (padding is already included in step) and usually indicate a stale width/step
+        # metadata bug; accepting them lets CvBridge reinterpret a corrupt frame differently.
+        and len(message.data) == step * height
     )
 
 
@@ -100,10 +106,20 @@ def point_cloud_message_contract_valid(message: PointCloud2) -> bool:
         or height <= 0
         or point_step <= 0
         or row_step < point_step * width
-        or len(message.data) < row_step * height
+        # PointCloud2 row padding is represented by row_step itself, so the serialized payload must
+        # match it exactly.  A larger buffer with stale dimensions can make different decoders read
+        # different physical points and is not a portable sensor contract.
+        or len(message.data) != row_step * height
     ):
         return False
+    field_names = [str(field.name) for field in message.fields]
+    # ``read_points_numpy`` rejects duplicate names even when the requested XYZ names themselves
+    # look valid.  Reject them before source arbitration so a malformed preferred topic cannot own
+    # the pipeline and starve a healthy backup sensor.
+    if len(field_names) != len(set(field_names)):
+        return False
     fields = {field.name: field for field in message.fields}
+    xyz_fields = []
     for name in ("x", "y", "z"):
         field = fields.get(name)
         scalar_size = (
@@ -117,4 +133,22 @@ def point_cloud_message_contract_valid(message: PointCloud2) -> bool:
             or int(field.offset) + scalar_size > point_step
         ):
             return False
+        xyz_fields.append(
+            (
+                int(field.offset),
+                int(field.offset) + scalar_size,
+                int(field.datatype),
+            )
+        )
+    # Jazzy's vectorized decoder requires all selected fields to have one datatype.  Distinct byte
+    # ranges are also part of a conventional XYZ layout; overlapping fields otherwise decode three
+    # copies of one coordinate and can create plausible but completely false terrain geometry.
+    if len({item[2] for item in xyz_fields}) != 1:
+        return False
+    intervals = sorted((start, end) for start, end, _ in xyz_fields)
+    if any(
+        next_start < end
+        for (_, end), (next_start, _) in zip(intervals, intervals[1:])
+    ):
+        return False
     return True

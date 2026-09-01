@@ -3,10 +3,11 @@
   <name>quadruped_tools</name>
   <version>0.1.0</version>
   <description>Offline rosbag calibration and perception accuracy tools.</description>
-  <maintainer email="developer@example.com">Quadruped Developer</maintainer>
+  <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>quadruped_planning</exec_depend>
+  <exec_depend>quadruped_interfaces</exec_depend>
   <exec_depend>action_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>

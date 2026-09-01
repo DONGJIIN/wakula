@@ -80,7 +80,7 @@ Visualization Manager:
       Value: false
     - Class: rviz_default_plugins/RobotModel
       Name: RobotModel
-      Enabled: true
+      Enabled: false
       Alpha: 1
       Description Source: Topic
       Description Topic:
@@ -91,7 +91,7 @@ Visualization Manager:
         Value: /robot_description
       TF Prefix: ""
       Update Interval: 0
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 1

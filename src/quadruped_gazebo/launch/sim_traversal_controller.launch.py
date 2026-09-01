@@ -12,8 +12,14 @@ from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
+    """创建唯一仿真 Action server；不探测或启动其他三个独立进程。"""
     return LaunchDescription([
         DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument(
+            "world_name",
+            default_value="robocon_obstacle_field",
+            description="必须与已启动 Gazebo 的 <world name> 完全一致",
+        ),
         Node(
             package="quadruped_gazebo",
             executable="sim_traverse_obstacle",
@@ -22,7 +28,8 @@ def generate_launch_description():
             parameters=[{
                 "use_sim_time": ParameterValue(
                     LaunchConfiguration("use_sim_time"), value_type=bool
-                )
+                ),
+                "world_name": LaunchConfiguration("world_name"),
             }],
         ),
     ])

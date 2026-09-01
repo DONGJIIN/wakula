@@ -11,12 +11,14 @@ import yaml
 from slam.navigation_health_monitor import (
     navigation_failures,
     odometry_is_valid,
+    odometry_yaw,
     OdometryJumpFilter,
     scan_contract_is_valid,
     scan_is_valid,
     source_stamp_is_current,
     transform_stamp_age_seconds,
     transform_stamp_is_current,
+    wrapped_angle_distance,
 )
 from slam.parameter_validation import (
     validate_nav2_readiness_parameters,
@@ -104,6 +106,7 @@ def test_odometry_health_checks_covariance_and_finite_pose():
     msg.pose.pose.orientation.w = 1.0
     msg.pose.covariance[0] = 0.1
     msg.pose.covariance[7] = 0.1
+    msg.pose.covariance[35] = 0.1
     assert odometry_is_valid(msg, 1.0)
     msg.header.frame_id = "odom"
     msg.child_frame_id = "base_link"
@@ -114,8 +117,37 @@ def test_odometry_health_checks_covariance_and_finite_pose():
     msg.pose.covariance[0] = 5.0
     assert not odometry_is_valid(msg, 1.0)
     msg.pose.covariance[0] = 0.1
+    msg.pose.covariance[35] = 5.0
+    assert not odometry_is_valid(msg, 1.0, max_yaw_covariance=1.0)
+    msg.pose.covariance[35] = 0.1
     msg.pose.pose.orientation.w = 0.0
     assert not odometry_is_valid(msg, 1.0)
+
+
+def test_odometry_yaw_and_wrapped_jump_filter_reject_heading_discontinuity():
+    """同位置 180° 突跳必须锁存，正常跨越 ±pi 只按最短角差计算。"""
+    msg = Odometry()
+    msg.pose.pose.orientation.w = 1.0
+    assert odometry_yaw(msg) == pytest.approx(0.0)
+
+    monitor = OdometryJumpFilter(
+        maximum_jump=0.75,
+        recovery_samples=2,
+        maximum_yaw_jump=0.75,
+    )
+    assert not monitor.update(0.0, 0.0, True, 0.0)
+    assert monitor.update(0.0, 0.0, True, math.pi)
+    assert monitor.update(0.0, 0.0, True, math.pi - 0.05)
+    assert not monitor.update(0.0, 0.0, True, math.pi - 0.10)
+
+    wrap_monitor = OdometryJumpFilter(0.75, 2, 0.20)
+    before_wrap = math.radians(179.0)
+    after_wrap = math.radians(-179.0)
+    assert wrapped_angle_distance(before_wrap, after_wrap) == pytest.approx(
+        math.radians(2.0)
+    )
+    assert not wrap_monitor.update(0.0, 0.0, True, before_wrap)
+    assert not wrap_monitor.update(0.0, 0.0, True, after_wrap)
 
 
 def test_sensor_header_age_rejects_replayed_and_future_data():

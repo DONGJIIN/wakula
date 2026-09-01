@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 import re
+import subprocess
 
 from launch.actions import DeclareLaunchArgument
 import pytest
@@ -17,6 +18,7 @@ from slam.nav2_readiness_monitor import (
     Nav2ReadinessMonitor,
     slam_transition_for_state,
 )
+import slam.runtime_detection as runtime_detection
 from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
 
 
@@ -132,6 +134,10 @@ def test_navigation_health_parameters_are_versioned_with_nav2():
         "minimum_scan_samples",
         "minimum_scan_field_of_view",
         "max_xy_covariance",
+        "max_yaw_covariance",
+        "max_odom_jump",
+        "max_odom_yaw_jump",
+        "odom_jump_recovery_samples",
         "expected_odom_frame",
     ):
         assert readiness[key] == health[key]
@@ -221,6 +227,10 @@ def test_mapping_and_rviz_follow_live_robot_without_long_visual_lag():
     rviz = (PACKAGE_ROOT / "rviz" / "slam.rviz").read_text(encoding="utf-8")
     assert "Fixed Frame: map" in rviz
     assert "Target Frame: base_link" in rviz
+    robot_model = rviz[rviz.index("Class: rviz_default_plugins/RobotModel"):]
+    robot_model = robot_model[:robot_model.index("Class: rviz_default_plugins/Image")]
+    assert "Enabled: false" in robot_model
+    assert "Value: false" in robot_model
 
 
 def test_depth_costmap_accepts_low_steps_after_ground_filtering():
@@ -268,6 +278,10 @@ def test_navigation_launch_description_is_constructible():
     assert len(description.entities) >= 2
     source = path.read_text(encoding="utf-8")
     assert '"use_sim_time": use_sim_time' in source
+    # Wakula's BT does not call SmoothPath.  The velocity_smoother remains, but an
+    # idle path smoother must not consume one more lifecycle process on RK3588.
+    assert '"smoother_server"' not in source
+    assert '"velocity_smoother"' in source
 
 
 def test_final_velocity_gate_does_not_depend_on_silent_collision_relay():
@@ -407,15 +421,13 @@ def test_slam_launch_is_the_complete_one_command_entry():
     } <= launch_argument_names(description)
 
 
-def test_core_entry_auto_detects_clock_without_ros2_daemon_cache(monkeypatch):
-    """即使误用核心入口，运行中的 Gazebo /clock 也应自动选择仿真时间和 TF 所有权。"""
-    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
-    spec = importlib.util.spec_from_file_location("slam_launch_auto", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
+def test_clock_probe_requires_a_publisher_and_ignores_subscriber_only_topics(
+    monkeypatch,
+):
+    """仅有 use_sim_time 订阅者时，/clock 不能把真机误判成仿真。"""
     class Result:
-        stdout = "/clock\n/map\n"
+        returncode = 0
+        stdout = "Type: rosgraph_msgs/msg/Clock\nPublisher count: 0\nSubscription count: 2\n"
 
     calls = []
 
@@ -423,37 +435,65 @@ def test_core_entry_auto_detects_clock_without_ros2_daemon_cache(monkeypatch):
         calls.append((command, kwargs))
         return Result()
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    assert module._robocon_simulation_is_running()
-    assert "--no-daemon" in calls[0][0]
-    source = path.read_text(encoding="utf-8")
-    assert '"use_sim_time",\n                default_value="auto"' in source
-    assert '"robot_model",\n                default_value="auto"' in source
+    monkeypatch.setattr(runtime_detection.subprocess, "run", fake_run)
+    monkeypatch.setattr(runtime_detection.time, "sleep", lambda _seconds: None)
+    assert not runtime_detection.clock_publisher_is_available()
+    assert len(calls) == 2
+    assert all(
+        command[:4] == ["ros2", "topic", "info", "/clock"]
+        for command, _ in calls
+    )
+    assert all("--no-daemon" in command for command, _ in calls)
+    assert all(kwargs["timeout"] <= 1.2 for _command, kwargs in calls)
 
 
-def test_core_entry_retries_transient_clock_discovery_failure(monkeypatch):
-    """首次 DDS 查询漏掉 /clock 时不能立即把 Gazebo 当成真机。"""
-    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
-    spec = importlib.util.spec_from_file_location("slam_launch_retry", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
+def test_clock_probe_retries_then_accepts_a_real_publisher(monkeypatch):
+    """DDS 首轮未发现时允许一次有界重试，但必须解析到非零 publisher count。"""
     class Result:
-        def __init__(self, publishers):
-            self.stdout = "/clock\n/map\n" if publishers else "/map\n"
+        returncode = 0
 
-    results = iter([Result(0), Result(1)])
+        def __init__(self, publisher_count):
+            self.stdout = (
+                "Type: rosgraph_msgs/msg/Clock\n"
+                f"Publisher count: {publisher_count}\n"
+                "Subscription count: 1\n"
+            )
+
+    results = iter((Result(0), Result(1)))
     calls = []
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
         return next(results)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
-    assert module._robocon_simulation_is_running()
+    monkeypatch.setattr(runtime_detection.subprocess, "run", fake_run)
+    monkeypatch.setattr(runtime_detection.time, "sleep", lambda _seconds: None)
+    assert runtime_detection.clock_publisher_is_available()
     assert len(calls) == 2
-    assert all("--no-daemon" in command for command, _kwargs in calls)
+    assert runtime_detection.topic_publisher_count("Unknown topic '/clock'") is None
+
+
+def test_core_entry_uses_shared_bounded_clock_probe(monkeypatch):
+    """核心入口只消费共享探测结论，不重新退化成 topic-list 存在性检查。"""
+    path = PACKAGE_ROOT / "launch" / "slam.launch.py"
+    spec = importlib.util.spec_from_file_location("slam_launch_auto", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "clock_publisher_is_available", lambda: True)
+    assert module._robocon_simulation_is_running()
+    source = path.read_text(encoding="utf-8")
+    assert '"use_sim_time",\n                default_value="auto"' in source
+    assert '"robot_model",\n                default_value="auto"' in source
+
+
+def test_autonomous_entry_uses_the_same_clock_publisher_contract(monkeypatch):
+    """第三条命令必须与核心入口使用同一时钟所有权判据。"""
+    path = PACKAGE_ROOT / "launch" / "autonomous_navigation.launch.py"
+    spec = importlib.util.spec_from_file_location("autonomous_launch_clock", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "clock_publisher_is_available", lambda: True)
+    assert module._clock_is_available()
 
 
 def test_simulation_entry_locks_clock_and_tf_ownership():
@@ -465,11 +505,24 @@ def test_simulation_entry_locks_clock_and_tf_ownership():
     description = module.generate_launch_description()
     assert {
         "sensor_profile",
+        "sensor_profiles_file",
         "scan_topic",
         "odom_topic",
         "camera_topic",
         "point_cloud_topic",
+        "slam_enabled",
+        "nav2_enabled",
+        "nav2_autostart",
+        "vision",
+        "speed_gate",
         "rviz",
+        "nav2_log_level",
+        "slam_params_file",
+        "nav2_params_file",
+        "vision_params_file",
+        "terrain_params_file",
+        "terrain_navigation_params_file",
+        "rviz_config_file",
     } <= launch_argument_names(description)
     source = path.read_text(encoding="utf-8")
     assert '"use_sim_time": "true"' in source
@@ -499,6 +552,27 @@ def test_autonomous_entry_has_no_simulation_action_backend():
     # 算法移植到真机仓库时不得要求复制或安装 Gazebo 包。
     manifest = (PACKAGE_ROOT / "package.xml").read_text(encoding="utf-8")
     assert "<exec_depend>quadruped_gazebo</exec_depend>" not in manifest
+    assert "<exec_depend>python3-yaml</exec_depend>" in manifest
+
+
+def test_record_bag_resolves_profiles_without_editing_the_script():
+    """录包入口应跟随现有 profile，并提供不启动 rosbag 的可测试解析模式。"""
+    repository_root = PACKAGE_ROOT.parents[1]
+    script = repository_root / "scripts" / "record_bag.sh"
+    result = subprocess.run(
+        [str(script), "--profile", "oak_d", "--print-topics"],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "record_topic=/scan" in result.stdout
+    assert "record_topic=/odom" in result.stdout
+    assert "record_topic=/oak/rgb/image_raw" in result.stdout
+    assert "record_topic=/oak/stereo/points" in result.stdout
+    assert "record_topic=/oak/rgb/camera_info" in result.stdout
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

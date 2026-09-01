@@ -81,7 +81,6 @@ CORE_PROCESS_EXECUTABLES = frozenset(
         # SLAM、Nav2 服务器、生命周期与速度链；RViz/Gazebo 故意不计入算法预算。
         "async_slam_toolbox_node",
         "controller_server",
-        "smoother_server",
         "planner_server",
         "behavior_server",
         "velocity_smoother",
@@ -191,6 +190,7 @@ class ResourceStats:
     _previous_time: Optional[float] = field(default=None, repr=False)
 
     def sample(self) -> None:
+        """采样白名单核心进程，并按稳定的 ``(pid,starttime)`` 身份累计峰值。"""
         process_samples = []
         try:
             entries = tuple(self.proc_root.iterdir())
@@ -501,6 +501,7 @@ class StackRegression(Node):
         pipeline_latency_budget: float = 0.35,
         use_sim_time: bool = True,
     ):
+        """建立只读观测链；只有 CLI 显式授权后，外层流程才会发布测试运动。"""
         # 本工具明确只允许驱动仓库自带 Gazebo 测试载体，因此默认与被测消息、TF 和
         # Action Pose 共用 /clock。否则系统墙钟减去仿真 Header 会产生数十亿秒假延迟，
         # 同时 Nav2 也会拒绝本节点用错误时钟生成的目标时间。离线纯系统时间排障可由
@@ -1033,6 +1034,7 @@ class StackRegression(Node):
 
 
 def parse_args(argv: Optional[Sequence[str]] = None):
+    """解析长测预算与输出位置；运动授权默认关闭且不能被配置文件隐式打开。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-motion", action="store_true", help="明确允许发布仿真测试速度")
     parser.add_argument(
@@ -1064,6 +1066,7 @@ def parse_args(argv: Optional[Sequence[str]] = None):
 
 
 def main(args=None):
+    """运行有界 Gazebo 回归，始终在退出路径发布零速并关闭 ROS 实体。"""
     options = parse_args(args)
     if not options.allow_motion:
         raise SystemExit("Refusing to publish motion without --allow-motion")

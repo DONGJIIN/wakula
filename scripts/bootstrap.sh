@@ -7,5 +7,13 @@ workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source /opt/ros/jazzy/setup.bash
 set -u
 cd "$workspace_dir"
-rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y
+# ament_python 是 ROS 构建类型而不是 Ubuntu rosdep key；Noble 的 rosdep 数据库会对它
+# 报“无定义”，即使 /opt/ros/jazzy 中已经正确安装。先显式验证 ROS 包，再只跳过这一项。
+# 不使用 rosdep 的 -r：除该已解释例外外，任何未知依赖都必须让新机安装立即失败。
+if ! ros2 pkg prefix ament_python >/dev/null 2>&1; then
+  echo "缺少 ament_python；请先安装 ros-jazzy-ament-python。" >&2
+  exit 2
+fi
+rosdep install --from-paths src --ignore-src --rosdistro jazzy \
+  --skip-keys ament_python -y
 "${workspace_dir}/scripts/build.sh"

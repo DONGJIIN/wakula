@@ -3,8 +3,8 @@
 职责
 ----
 在有界小队列中按 Header 选择时间差最小的一对观测，并发布一条原子融合消息。点云始终
-负责高度、坑深、坡度和净空；OpenCV 只能提高一致类别的置信度或辅助细分横杆/立柱，不能
-凭单目图像批准越障。相机超时后明确降级为纯点云结果。
+负责高度、坑深、坡度和净空；OpenCV 只能提高与点云完全同类的置信度，不能凭
+单目图像改写点云类别或批准越障。相机超时后明确降级为纯点云结果。
 
 真机标定入口
 ------------
@@ -15,8 +15,10 @@
 
 安全边界
 --------
-超过同步窗口、字段非法或空间不相交的证据不会互相确认。放大窗口会把运动前后的不同
-障碍错配；降低视觉置信度会增加误确认，两者都必须用独立验证 bag 复测。
+当前消息不包含相机内参、外参或像素—点云投影关系，因此时间同步和二维前向走廊都不
+是“同一物体”的空间证明：跨类别重分类在代码中强制禁止。超过同步窗口、字段非法或二维走廊
+不相交的证据也不会互相确认。放大窗口会把运动前后的不同障碍错配；降低视觉置信度会增加误确认，
+两者都必须用独立验证 bag 复测。
 """
 
 from collections import deque
@@ -31,6 +33,7 @@ from quadruped_perception.parameter_validation import (
     FUSION_PARAMETER_NAMES,
     validate_fusion_parameters,
 )
+from quadruped_perception.sensor_contracts import header_contract_valid
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
@@ -93,6 +96,23 @@ def terrain_fallback_ready(
         return False
     age = float(now_seconds) - float(receive_seconds)
     return maximum_wait > 0.0 and age >= maximum_wait
+
+
+def ros_clock_moved_backward(previous_seconds: float | None, now_seconds: float) -> bool:
+    """Return whether a new ROS-time sample belongs to an earlier replay/simulation epoch.
+
+    Camera/cloud queues contain observations from one monotonic ROS-time epoch.  After ``ros2 bag
+    play --clock`` seeks backward or Gazebo resets, numerically close old and new Header stamps
+    must not be fused.  A non-finite value is treated conservatively as a reset signal; online
+    rclpy clocks are finite; the explicit rule keeps tests and adapters deterministic.
+    """
+    if previous_seconds is None:
+        return False
+    return not (
+        math.isfinite(float(previous_seconds))
+        and math.isfinite(float(now_seconds))
+        and float(now_seconds) >= float(previous_seconds)
+    )
 
 
 def terrain_observation_valid(terrain) -> bool:
@@ -164,8 +184,9 @@ def vision_overlaps_forward_corridor(vision, center_margin: float) -> bool:
 
     点云分析只覆盖 ``base_link`` 前方窄 ROI，而相机通常具有更宽视场。若画面最左侧的
     立柱与正前方台阶恰好同帧出现，仅凭时间同步就融合会把两个不同物体当作一个。
-    在尚未获得相机内参/像素到点云投影前，采用归一化中心走廊是低成本保守约束：目标
-    框只要与 ``[margin, 1-margin]`` 相交即可，不会苛刻要求中心完全位于走廊内。
+    在尚未获得相机内参/像素到点云投影前，采用归一化中心走廊仅是低成本的额外误关联
+    屏蔽：目标框只要与 ``[margin, 1-margin]`` 相交即可。它不能证明像素框与点云 ROI 是
+    同一物体，因此永远不能用来放开跨类别重分类。
     """
     if vision is None:
         return False
@@ -196,9 +217,10 @@ def fuse_observations(
 ):
     """融合一对同步消息并返回强类型结果，保持点云几何的安全优先级。
 
-    “时间接近”只证明两传感器看的是同一时刻，不证明看的是同一物体。因此视觉还要
-    通过前向走廊约束；未来获得相机内外参后，可在此处替换为三维投影关联而不改变消息
-    合同和下游规划接口。
+    “时间接近”只证明两传感器看的是同一时刻，不证明看的是同一物体。当前视觉还要
+    通过前向走廊约束，并且只有视觉/点云类别完全相同才能确认。未来如要跨类别细分，
+    必须先引入带采样时间的 CameraInfo、标定外参 TF 和像素—点云投影关联，不得只放宽本函数
+    的二维走廊。
     """
     result = FusedObstacle()
     result.header = terrain.header
@@ -242,22 +264,10 @@ def fuse_observations(
         TerrainFeatures.BAR,
         TerrainFeatures.POLE,
     ):
-        # 视觉细分类还必须满足米制几何条件，不能把普通台阶仅凭像素外观改成横杆
-        # 或立柱。横杆要求离地净空；立柱要求点云横向宽度较窄。
-        compatible = visual_type == int(terrain.obstacle_type)
-        if (
-            visual_type == FusedObstacle.BAR
-            and terrain.clearance_height >= 0.12
-            and terrain.obstacle_height >= 0.10
-        ):
-            compatible = True
-        elif (
-            visual_type == FusedObstacle.POLE
-            and 0.0 < terrain.width <= 0.25
-            and terrain.obstacle_height >= 0.10
-        ):
-            compatible = True
-        if compatible:
+        # 当前没有 CameraInfo+外参 TF+投影后的空间关联，所以即使 STEP 同时具有
+        # “像横杆的净空”或“像立柱的宽度”，也不能把画面里另一物体的标签覆盖
+        # 点云类别。此类米制条件应由 terrain_analyzer 直接分类，视觉只能同类加信。
+        if visual_type == int(terrain.obstacle_type):
             # ``vision_confirmed`` 表示视觉和米制几何指向同一类别，而不只是“同一时刻
             # 有一个视觉框”。这个区别很重要：规划层会用该位决定视觉限速；冲突框若
             # 也置真，会把画面边缘的墙/立柱错误关联到正前方的 CLEAR 或台阶几何。
@@ -310,6 +320,9 @@ class PerceptionFusion(Node):
         self.terrain_queue = deque(maxlen=queue_size)
         self.vision_queue = deque(maxlen=queue_size)
         self.terrain_receive_times = {}
+        # Queues are valid only while ROS time is monotonic.  Wall-clock storage would miss bag
+        # seeks when ``use_sim_time`` is active, so every callback observes the node's ROS clock.
+        self.last_clock_seconds = self.get_clock().now().nanoseconds * 1e-9
         self.output_pub = self.create_publisher(
             FusedObstacle, "/perception/fused_obstacle", 10
         )
@@ -324,13 +337,27 @@ class PerceptionFusion(Node):
 
     def terrain_callback(self, msg: TerrainFeatures) -> None:
         """缓存一条带采样时间的点云几何摘要并尝试配对。"""
+        now = self._observe_ros_clock()
+        if not header_contract_valid(msg.header):
+            self.get_logger().warning(
+                "Ignoring TerrainFeatures with invalid Header contract",
+                throttle_duration_sec=2.0,
+            )
+            return
         self.terrain_queue.append(msg)
-        self.terrain_receive_times[id(msg)] = self.get_clock().now().nanoseconds * 1e-9
+        self.terrain_receive_times[id(msg)] = now
         self._prune_receive_times()
         self._try_pair()
 
     def vision_callback(self, msg: VisionObstacle) -> None:
         """缓存一条稳定视觉证据并尝试配对。"""
+        self._observe_ros_clock()
+        if not header_contract_valid(msg.header):
+            self.get_logger().warning(
+                "Ignoring VisionObstacle with invalid Header contract",
+                throttle_duration_sec=2.0,
+            )
+            return
         self.vision_queue.append(msg)
         self._try_pair()
 
@@ -363,6 +390,7 @@ class PerceptionFusion(Node):
 
     def _publish_terrain_fallback(self) -> None:
         """相机缺帧时延迟发布纯点云结果，保证视觉辅助不会阻断安全几何链。"""
+        now = self._observe_ros_clock()
         if not self.terrain_queue:
             return
         # 定时器与任一传感器回调可能交错；先再尝试一次配对，避免刚到达的图像被漏用。
@@ -374,7 +402,6 @@ class PerceptionFusion(Node):
             return
         terrain = self.terrain_queue[0]
         received = self.terrain_receive_times.get(id(terrain), float("nan"))
-        now = self.get_clock().now().nanoseconds * 1e-9
         if not terrain_fallback_ready(received, now, self.terrain_only_timeout):
             return
         # vision=None 会保留点云几何和置信度，同时明确 vision_confirmed=false。
@@ -415,6 +442,30 @@ class PerceptionFusion(Node):
             maxlen=self.vision_queue.maxlen,
         )
         self._prune_receive_times()
+
+    def _observe_ros_clock(self, now_seconds: float | None = None) -> float:
+        """Clear all cross-sensor history when ROS time rewinds and return current seconds.
+
+        This method runs *before* a callback appends its new sample.  Therefore the first message
+        in a new bag/Gazebo epoch may remain, but no receive-time, image, or cloud from
+        the old epoch can pair with it or immediately trigger the geometry-only timeout.  The
+        optional argument supports tests; production callbacks always read the ROS clock.
+        """
+        current = (
+            self.get_clock().now().nanoseconds * 1e-9
+            if now_seconds is None
+            else float(now_seconds)
+        )
+        if ros_clock_moved_backward(self.last_clock_seconds, current):
+            self.terrain_queue.clear()
+            self.vision_queue.clear()
+            self.terrain_receive_times.clear()
+            self.get_logger().warning(
+                "ROS clock moved backward; cleared camera/cloud fusion queues",
+                throttle_duration_sec=2.0,
+            )
+        self.last_clock_seconds = current
+        return current
 
     def _prune_receive_times(self) -> None:
         """删除 deque 自动淘汰消息的接收时间，保持辅助字典有界。"""

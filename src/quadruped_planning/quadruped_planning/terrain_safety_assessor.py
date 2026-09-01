@@ -8,9 +8,13 @@
 
 真机标定入口
 ------------
-参数只在 ``config/terrain_navigation.yaml``。必须先完成 ``vision.yaml`` 与
+导航风险参数只在 ``config/terrain_navigation.yaml``。必须先完成 ``vision.yaml`` 与
 ``terrain.yaml`` 的传感器标定，再用已标注 rosbag 调整 STEP/CLIMB/STOP 高度、迟滞和感知
 超时；最后结合实测 footprint、Nav2 inflation 和运动团队可接管距离调整入口停车参数。
+比赛专名的米制观测包络目前仍是依据 2026 V2.0 规则名义尺寸和 Gazebo
+样本建立的初始值，不是已完成的真机标定。确定相机/雷达安装后，应用带真值标签的
+rosbag 重新估计这些包络，并将它们迁移到单一的版本化配置；在此之前不要把
+代码中的观测上下限误解为规则精确尺寸。
 离线工具只会建议视觉最低置信度及三个高度阈值，不会替你决定真机可跨越能力，具体流程
 见 ``instruction.txt`` 第五节。
 
@@ -25,11 +29,16 @@ from math import atan, degrees, isfinite
 from typing import Sequence, Tuple
 
 import rclpy
-from quadruped_interfaces.msg import FusedObstacle, NavigationSafety
+from quadruped_interfaces.msg import FusedObstacle, NavigationSafety, TerrainFeatures
 
 from quadruped_planning.parameter_validation import (
     SAFETY_PARAMETER_NAMES,
     validate_safety_parameters,
+)
+from quadruped_planning.time_utils import (
+    ros_age_is_fresh,
+    ros_age_seconds,
+    ros_clock_moved_backward,
 )
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -89,8 +98,9 @@ class ObstacleMeasurements:
 
     字段名明确标出米或度，避免在长条件表达式里反复出现 ``float(msg.field)``，也避免
     把消息中的弧度坡角与规则书中的角度数混用。这个结构只提高可读性，不保存历史、
-    不修改消息，也不包含可调阈值；传感器与地形阈值仍分别归属 ``terrain.yaml`` 和
-    ``terrain_navigation.yaml``。
+    不修改消息，也不包含阈值。传感器几何/地形安全参数分别归属
+    ``terrain.yaml`` 和 ``terrain_navigation.yaml``；比赛专名分类器中暂存的 2026 V2.0/Gazebo
+    观测包络尚待真机 rosbag 标定后迁入单一版本化配置。
     """
 
     height_m: float
@@ -128,6 +138,20 @@ class ObstacleMeasurements:
                 self.clearance_m,
             )
         )
+
+
+@dataclass(frozen=True)
+class ObstacleClassification:
+    """One atomic classifier result for machines and people.
+
+    ``semantic_id`` is the stable English control identity. ``display_name`` is only
+    a Chinese UI label and may be reworded or decorated without changing that identity.
+    An empty ID deliberately means that the available geometry has not uniquely
+    identified a task obstacle.
+    """
+
+    semantic_id: str
+    display_name: str
 
 
 def obstacle_measurements_are_valid(safety: NavigationSafety) -> bool:
@@ -195,47 +219,42 @@ class ConservativeAssessmentFilter:
         return self.current
 
 
-class ObstacleNameStabilizer:
-    """稳定人机共用的比赛名称，同时不掩盖无效感知。
+class ObstacleClassificationStabilizer:
+    """Stabilize one complete ``semantic_id``/display pair.
 
-    米制几何已在上游过滤，但最终专名仍组合高度、宽度、粗糙度、坡度和可选 OpenCV
-    证据。量测靠近阈值时，逐帧名称可能在“高墙”和“T 字形台阶”等候选之间跳变；
-    只有连续相同名称才能更新输出，确保终端显示和任务层语义投票描述同一持续目标。
-
-    感知或任一必需几何字段无效时立即清除旧名称，不参与迟滞。恢复“无障碍”通常使用
-    更长的独立帧数，避免一次深度丢帧把正在接近的障碍过早抹掉。
+    The immutable pair is voted and replaced atomically. No code reconstructs the
+    machine ID from the Chinese label after stabilization. Invalid geometry immediately
+    clears both fields so an old task identity cannot survive a sensor fault.
     """
 
-    def __init__(
-        self,
-        confirmation_frames: int = 3,
-        clear_frames: int = 4,
-        initial: str = "感知数据无效",
-    ):
+    INVALID = ObstacleClassification("", "感知数据无效")
+
+    def __init__(self, confirmation_frames: int = 3, clear_frames: int = 4):
         self.confirmation_frames = max(1, int(confirmation_frames))
         self.clear_frames = max(1, int(clear_frames))
-        self.initial = str(initial)
-        self.current = self.initial
-        self.pending = ""
+        self.current = self.INVALID
+        self.pending = None
         self.pending_count = 0
 
-    def reset(self) -> str:
-        """清空语义票，使 rosbag 回拨或重连从“感知无效”重新确认。"""
-        self.current = self.initial
-        self.pending = ""
+    def reset(self) -> ObstacleClassification:
+        """Clear both the machine identity and its optional UI representation."""
+        self.current = self.INVALID
+        self.pending = None
         self.pending_count = 0
         return self.current
 
-    def update(self, candidate: str, perception_valid: bool) -> str:
-        """输入一帧候选并返回当前稳定名称；无效帧立即撤销旧名称。"""
-        value = str(candidate).strip() or "未知障碍"
+    def update(
+        self, candidate: ObstacleClassification, perception_valid: bool
+    ) -> ObstacleClassification:
+        """Return the stable atomic result; invalid input revokes it immediately."""
         if not perception_valid:
-            self.current = "感知数据无效"
-            self.pending = ""
-            self.pending_count = 0
-            return self.current
+            return self.reset()
+        value = ObstacleClassification(
+            str(candidate.semantic_id).strip(),
+            str(candidate.display_name).strip() or "未知障碍",
+        )
         if value == self.current:
-            self.pending = ""
+            self.pending = None
             self.pending_count = 0
             return self.current
         if value == self.pending:
@@ -243,10 +262,14 @@ class ObstacleNameStabilizer:
         else:
             self.pending = value
             self.pending_count = 1
-        required = self.clear_frames if value == "无障碍" else self.confirmation_frames
+        required = (
+            self.clear_frames
+            if not value.semantic_id and value.display_name == "无障碍"
+            else self.confirmation_frames
+        )
         if self.pending_count >= required:
             self.current = value
-            self.pending = ""
+            self.pending = None
             self.pending_count = 0
         return self.current
 
@@ -258,7 +281,7 @@ def validate_height_thresholds(
     values = (step, climb, stop)
     if all(isfinite(value) for value in values) and 0.0 <= step < climb < stop:
         return values
-    return 0.08, 0.18, 0.32
+    return 0.07, 0.18, 0.32
 
 
 def navigation_mode_code(mode: str) -> int:
@@ -283,19 +306,26 @@ def visual_obstacle_name_zh(data: Sequence[float], target_valid: bool) -> str:
     return VISION_NAMES_ZH.get(code, "")
 
 
-def front_obstacle_name_zh(
+def classify_front_obstacle(
     safety: NavigationSafety, visual_hint_name: str = ""
-) -> str:
-    """生成比赛现场使用的正前方名称，同时保持结论诚实可追溯。
+) -> ObstacleClassification:
+    """Classify one geometry snapshot into an atomic machine/UI result.
 
-    ``obstacle_type`` 是通用几何类别，不能完整表达规则中的八个专名。这里仅做不影响
-    控制的显示细分：杆、坑、限高杆和高墙可由几何直接对应；坡面利用点云实测坡角
-    区分规则中的 10° 主斜坡和 14° 木桥引坡。木桥 A/B 的桥面结构与普通台阶若只看到
-    一小块局部点云无法可靠区分，因此明确显示“待结构确认”，绝不读取 Gazebo pose
-    或把单帧橙色误当成确定类别。
+    Every geometry branch writes the stable English ``semantic_id`` and its Chinese
+    ``display_name`` together. Generic/ambiguous geometry deliberately gets an empty
+    ID. This function never derives control identity from display text and never reads
+    Gazebo names or poses.
+
+    The numeric envelopes below are initial recognition ranges derived from the 2026
+    V2.0 nominal geometry and deterministic Gazebo observations. They include partial
+    views, ground-fit bias and the current simulated sensor mounting, so they are not
+    immutable rule dimensions. Once real hardware exists, calibrate them from labelled
+    camera/depth rosbag data and move the resulting values into one versioned profile.
+    This function remains the single authority in the meantime; the mission layer must
+    re-use its result instead of maintaining another set of numeric limits.
     """
     if not obstacle_measurements_are_valid(safety):
-        return "感知数据无效"
+        return ObstacleClassification("", "感知数据无效")
 
     obstacle_type = int(safety.obstacle_type)
     measured = ObstacleMeasurements.from_safety(safety)
@@ -307,26 +337,9 @@ def front_obstacle_name_zh(
     width_m = measured.width_m
     clearance_m = measured.clearance_m
 
-    # 判定顺序很重要：先处理带尺度约束的视觉横杆辅助，再按点云粗类型进入互斥分支，
-    # 最后才返回通用名称。不要把“待确认”分支移到具体结构之后之外，否则近裁剪帧可能
-    # 直接覆盖已经稳定的比赛专名。
-
-    # 蓝白限高杆的视觉排列比近裁剪后的一小块橙色 STEP 更稳定，但 OpenCV 仍不能单独
-    # 决定结构。只有点云高度处于规则横杆邻域且横宽有限时才保留“限高杆”语义；超出
-    # 米制门限的颜色证据只用于显示/限速，不能参与 Action。
-    if (
-        visual_hint_name == "横杆"
-        and obstacle_type
-        in {
-            NavigationSafety.OBSTACLE_BAR,
-            NavigationSafety.OBSTACLE_POLE,
-            NavigationSafety.OBSTACLE_STEP,
-            NavigationSafety.OBSTACLE_WALL,
-        }
-        and 0.28 <= height_m <= 0.39
-        and width_m <= 1.25
-    ):
-        return "限高杆"
+    # 原始 OpenCV hint 没有经过几何尺度和跨类一致性确认，因此它不参与
+    # 下方机器语义分支。即使 raw hint 与 STEP/WALL 冲突，权威点云仍照常
+    # 确认 T 台/高墙；hint 只会在 ``format_front_obstacle_status`` 的 UI 辅助字段显示。
     if obstacle_type == NavigationSafety.OBSTACLE_POLE:
         # 限高杆的横梁很细，单帧深度云常先只看到一侧 0.32 m 支柱而归入 POLE；规则
         # 绕杆立柱高度不低于 0.50 m。用量测高度给出接近阶段名称，比直接误报绕杆可靠。
@@ -334,8 +347,8 @@ def front_obstacle_name_zh(
             0.25 <= height_m <= 0.42
             and width_m <= 0.22
         ):
-            return "限高杆（支柱结构）"
-        return "直角绕杆区（立柱）"
+            return ObstacleClassification("height_bar", "限高杆（支柱结构）")
+        return ObstacleClassification("right_angle_poles", "直角绕杆区（立柱）")
     if obstacle_type == NavigationSafety.OBSTACLE_PIT:
         # PIT 只说明 ROI 中存在真实低回波；桥板缝、台阶侧面、场地边缘和墙面遮挡都
         # 可能产生同一粗类型。以下规则从最具特征的轮廓到最保守回退依次判断。
@@ -350,7 +363,7 @@ def front_obstacle_name_zh(
             and 0.035 <= roughness_m <= 0.070
             and 0.80 <= width_m <= 1.20
         ):
-            return "高墙（遮挡轮廓）"
+            return ObstacleClassification("high_wall", "高墙（遮挡轮廓）")
         # 正对 T 字台阶的近场点云会用较高踏面拟合参考平面，较低踏面因此暂时落入
         # ``negative`` 区域并被粗分类为 PIT。它与真正坑洞的关键差异是 16～24° 的
         # 连续阶梯趋势、约 0.3 m 高差和接近 1 m 的规则宽度。先恢复为 T 台语义，
@@ -363,7 +376,7 @@ def front_obstacle_name_zh(
             and 0.025 <= roughness_m <= 0.065
             and 0.75 <= width_m <= 1.25
         ):
-            return "T 字形台阶"
+            return ObstacleClassification("t_shaped_stairs", "T 字形台阶")
         # 木桥 A 的 14° 入口坡只占深度 ROI 的一部分时，地面先验会把坡脚解释成浅坑，
         # 但坡向、低残差和约 1 m 通道宽仍然稳定。这里输出比赛语义而不读取 world pose。
         if (
@@ -373,7 +386,7 @@ def front_obstacle_name_zh(
             and roughness_m < 0.035
             and 0.75 <= width_m <= 1.25
         ):
-            return "木桥 A（14°入口坡）"
+            return ObstacleClassification("wooden_bridge_a", "木桥 A（14°入口坡）")
         # 障碍赛场地边缘后的低层支撑/地面，在深度云中同样会表现为约 0.10～0.13 m
         # 的负台阶。真正砂砾坑还有 0.15 m 护栏、碎石/木料起伏；若前缘几乎没有凸起、
         # 表面也很平整，就只能确认“场地边界”，不得把它计成砂砾坑并执行越障。
@@ -390,7 +403,7 @@ def front_obstacle_name_zh(
             and width_m >= 0.35
             and pitch_deg < 5.0
         ):
-            return "场地边界（禁止越界）"
+            return ObstacleClassification("arena_boundary", "场地边界（禁止越界）")
         # 若同一帧同时含有 0.30 m 以上的大块正凸起，它就不是规则中仅 0.15 m 护栏、
         # 0.10 m 深的砂砾坑。常见来源是从木桥/T 台侧面观察时，地面拟合跨过高平台，
         # 低处被粗分为 PIT。保持“待结构确认”可让机器人换角度继续观察，绝不能把桥
@@ -401,7 +414,7 @@ def front_obstacle_name_zh(
             height_m >= 0.22
             and width_m >= 0.55
         ):
-            return "台阶或木桥踏板（待结构确认）"
+            return ObstacleClassification("", "台阶或木桥踏板（待结构确认）")
         # 木桥 B 的 0.40 m 周期性板间隙也会形成真实负高度回波。若同时看到较宽、
         # 约 0.20 m 高且表面较平整的桥板，就不能把它叫作砂砾坑。阈值来自规则尺寸，
         # 并已用 Gazebo 点云联调；真机仍需用 rosbag 校准，而不是读取场地坐标。
@@ -412,7 +425,7 @@ def front_obstacle_name_zh(
             # （实测高度约 0、负落差约 0.15 m）误报成木桥 B。
             and height_m >= 0.12
         ):
-            return "木桥 B（桥板间隙）"
+            return ObstacleClassification("wooden_bridge_b", "木桥 B（桥板间隙）")
         # 不能把通用 PIT 粗分类直接等同于比赛中的砂砾/碎木坑。PIT 只说明 ROI 内存在
         # 负高度回波；桥板缝、台阶侧面、赛台边缘以及被高平台遮挡的地面都可能产生
         # 相同结果。比赛坑必须额外看到约 0.15 m 的入口护栏/碎料正凸起和粗糙表面。
@@ -428,8 +441,8 @@ def front_obstacle_name_zh(
             and 0.35 <= width_m <= 1.40
             and pitch_deg < 7.0
         ):
-            return "砂砾与碎木坑"
-        return "坑洞（结构待确认）"
+            return ObstacleClassification("gravel_wood_pit", "砂砾与碎木坑")
+        return ObstacleClassification("", "坑洞（结构待确认）")
     if obstacle_type == NavigationSafety.OBSTACLE_BAR:
         # 坑区 0.15 m 护栏在斜视点云中可能产生悬空外观；高度明显低于 0.30 m
         # 限高横杆时只标为坑区入口线索，等待后续负高度回波确认。
@@ -441,9 +454,11 @@ def front_obstacle_name_zh(
             # 顶边时也可能暂时具有“下方有空间”的 BAR 外观。横向连续宽度可在
             # 不依赖场地坐标的前提下区分二者。
             if width_m < 0.80:
-                return "坑区护栏（后方地形待确认）"
-            return "高墙（顶边轮廓）"
-        return "限高杆"
+                return ObstacleClassification(
+                    "gravel_wood_pit", "坑区护栏（后方地形待确认）"
+                )
+            return ObstacleClassification("high_wall", "高墙（顶边轮廓）")
+        return ObstacleClassification("height_bar", "限高杆")
     if obstacle_type == NavigationSafety.OBSTACLE_WALL:
         # 相机斜向看出黄色赛台时，会把台面到场外地面的落差重建成约 0.25 m 的平整
         # 立面。高墙规则高度约 0.30 m，且墙体边缘不会同时满足“低于 0.28 m、近水平、
@@ -454,7 +469,7 @@ def front_obstacle_name_zh(
             and roughness_m < 0.045
             and pitch_deg < 5.0
         ):
-            return "场地边界（禁止越界）"
+            return ObstacleClassification("arena_boundary", "场地边界（禁止越界）")
         # 砂砾坑 0.15 m 护栏在斜视时会与碎料合成约 0.25 m 的窄粗糙立面；高墙则有
         # 约 1 m 连续横宽。先保留坑区入口语义，等待后方负高度确认。
         if (
@@ -462,8 +477,10 @@ def front_obstacle_name_zh(
             and width_m < 0.80
             and roughness_m >= 0.045
         ):
-            return "坑区护栏（后方地形待确认）"
-        return "高墙"
+            return ObstacleClassification(
+                "gravel_wood_pit", "坑区护栏（后方地形待确认）"
+            )
+        return ObstacleClassification("high_wall", "高墙")
     if obstacle_type == NavigationSafety.OBSTACLE_STEP:
         # STEP 覆盖低台阶、桥板、平台和阶梯总体轮廓，是最容易混淆的粗类型。按
         # “周期桥板→坑区填料→平整桥台→T 台→通用待确认”的顺序匹配；前面的专用
@@ -473,7 +490,7 @@ def front_obstacle_name_zh(
         # 在通用“粗糙低台阶=坑区”规则之前确认，防止把桥板间隙误叫成砂砾坑。
         if (
             # 全场标定中，真实分段板的“高度/残差”为 0.20/0.080 m 或
-            # 0.261/0.093 m；曾误触发桥 B 的 10° 坡侧为 0.277/0.059 m，且没有
+            # 0.261/0.093 m；曾误触发桥 B 的 11.3° 主坡侧面为 0.277/0.059 m，且没有
             # 周期板缝。因此联合收紧高度和残差，无需读取 world 坐标。
             0.19 <= height_m <= 0.27
             # 真桥宽 1 m；机器人偏向通道一侧且 ROI 半宽 0.55 m 时，连通桥板只
@@ -486,7 +503,7 @@ def front_obstacle_name_zh(
             and roughness_m >= 0.078
             and pitch_deg < 5.0
         ):
-            return "木桥 B（分段桥板）"
+            return ObstacleClassification("wooden_bridge_b", "木桥 B（分段桥板）")
         # 进入砂砾/碎木区后，护栏与低洼填料会在单帧栅格中表现成约 0.15～0.25 m
         # 的低台阶，同时粗糙度显著升高。该组合接续上面的“坑区护栏”接近提示。
         if (
@@ -494,7 +511,9 @@ def front_obstacle_name_zh(
             and roughness_m >= 0.05
             and width_m >= 0.40
         ):
-            return "砂砾与碎木坑（入口/填料区）"
+            return ObstacleClassification(
+                "gravel_wood_pit", "砂砾与碎木坑（入口/填料区）"
+            )
         # 近场可能看不到填料后的 0.10 m 坑底，只剩 0.19～0.23 m 粗糙 STEP 和浅负
         # 残差；木桥 B 已由上方更强的周期残差门（>=0.078 m）提前分离。
         if (
@@ -503,7 +522,7 @@ def front_obstacle_name_zh(
             and 0.045 <= roughness_m < 0.078
             and 0.40 <= width_m <= 1.40
         ):
-            return "砂砾与碎木坑（填料区）"
+            return ObstacleClassification("gravel_wood_pit", "砂砾与碎木坑（填料区）")
         # 两座木桥的起终平台都是约 0.20 m 高、1 m 宽的平整结构。低残差可将它们与
         # T 台的多级踏面区分；A/B 在看见坡或板间隙前仍保持 unknown 语义。
         if (
@@ -511,7 +530,9 @@ def front_obstacle_name_zh(
             and roughness_m < 0.025
             and width_m >= 0.80
         ):
-            return "木桥平台（A/B 待结构确认）"
+            return ObstacleClassification(
+                "wooden_bridge_unknown", "木桥平台（A/B 待结构确认）"
+            )
         # 高墙已有独立 WALL 分支。正对 T 台时，近场平面会穿过多级踏面，使“相对平面
         # 高度”小于总高；但它仍表现为宽障碍、7～18° 的阶梯总体趋势和明显离散残差。
         # 同时支持直接看到 0.40 m 顶部与只看到多级踏面的两种距离，避免再误叫坑区。
@@ -540,31 +561,43 @@ def front_obstacle_name_zh(
             # 换视角看到真实多级踏面后再确认，不能用“表面平整”作为放宽理由。
             height_m <= 0.43
             # 主斜坡从长侧观察时会形成与高台阶相似的橘色立面，但坡面法向在机体
-            # 横向留下接近 10° 的 roll；真正从入口对准 T 台时 roll 应接近零。
+            # 横向留下接近 11.3° 的 roll；真正从入口对准 T 台时 roll 应接近零。
             # 这是坐标无关的几何校验，不读取 Gazebo 障碍名称或位置。
             and roll_deg <= 6.0
-            and ((width_m >= 0.60 and (
-                height_m >= 0.32 or stepped_profile
-            ))
-            or partial_t_stair)
+            and (
+                (
+                    width_m >= 0.60
+                    and (height_m >= 0.32 or stepped_profile)
+                )
+                or partial_t_stair
+            )
         ):
-            return "T 字形台阶"
-        return "台阶或木桥踏板（待结构确认）"
+            return ObstacleClassification("t_shaped_stairs", "T 字形台阶")
+        return ObstacleClassification("", "台阶或木桥踏板（待结构确认）")
 
     if obstacle_type == NavigationSafety.OBSTACLE_CLEAR:
         # 只在横滚较小时把前后坡度解释成赛道坡面；侧向倾斜仍保留通用地形名称。
         if roll_deg <= 6.0 and 7.0 <= pitch_deg <= 12.0:
-            return "主斜坡（10°坡面）"
+            return ObstacleClassification("main_slope", "主斜坡（11.3°坡面）")
         if roll_deg <= 6.0 and 12.0 < pitch_deg <= 17.0:
             # 规则中的连续 14° 入口坡属于木桥 A；木桥 B 由周期分段桥板识别。这里仍
             # 只使用坡角和横滚，不读取仿真名称或场地位置，因此可直接迁移到真机。
-            return "木桥 A（14°入口坡）"
+            return ObstacleClassification("wooden_bridge_a", "木桥 A（14°入口坡）")
         # 有色视觉候选没有尺度，不能改变速度或声称具体障碍；但 UI 也不能把它吞掉后
         # 错报“无障碍”。名称明确表达点云尚未完成结构分类。
         if visual_hint_name:
-            return f"视觉检测到{visual_hint_name}（点云待分类）"
-        return "无障碍"
-    return obstacle_name_zh(obstacle_type, True)
+            return ObstacleClassification(
+                "", f"视觉检测到{visual_hint_name}（点云待分类）"
+            )
+        return ObstacleClassification("", "无障碍")
+    return ObstacleClassification("", obstacle_name_zh(obstacle_type, True))
+
+
+def front_obstacle_name_zh(
+    safety: NavigationSafety, visual_hint_name: str = ""
+) -> str:
+    """Return only the optional Chinese UI label from the atomic classification."""
+    return classify_front_obstacle(safety, visual_hint_name).display_name
 
 
 def format_front_obstacle_status(
@@ -627,7 +660,11 @@ def observation_stamp_is_current(
     maximum_age: float,
     future_tolerance: float = 0.10,
 ) -> bool:
-    """拒绝零时间戳、陈旧重放帧和明显来自未来的观测。"""
+    """拒绝零时间戳、陈旧重放帧和超出跨设备容差的未来观测。
+
+    Header 是传感器采样时钟而非本节点接收时钟，允许已标定的微小时钟偏差。本机
+    receive-time 心跳仍严格要求非负年龄；模拟器/rosbag 回拨由节点的 epoch reset 处理。
+    """
     values = (now_seconds, stamp_seconds, maximum_age, future_tolerance)
     if not all(isfinite(float(value)) for value in values):
         return False
@@ -637,6 +674,37 @@ def observation_stamp_is_current(
         and maximum_age > 0.0
         and -max(0.0, future_tolerance) <= age <= maximum_age
     )
+
+
+def terrain_features_to_fused_observation(msg: TerrainFeatures) -> FusedObstacle:
+    """Losslessly adapt one typed terrain frame to the common safety snapshot.
+
+    No field is repaired or inferred here.  In particular, ``valid=false`` maps to
+    ``geometry_confirmed=false`` so the common validator returns STOP even if every
+    numeric field happens to look plausible.
+    """
+    observation = FusedObstacle()
+    observation.header = msg.header
+    observation.obstacle_type = int(msg.obstacle_type)
+    observation.confidence = float(msg.confidence)
+    observation.geometry_confirmed = bool(msg.valid)
+    observation.vision_confirmed = False
+    for field in (
+        "obstacle_height",
+        "pit_depth",
+        "slope_pitch",
+        "slope_roll",
+        "roughness",
+        "distance",
+        "lateral_offset",
+        "width",
+        "structure_heading",
+        "structure_heading_confidence",
+        "clearance_height",
+        "valid_points",
+    ):
+        setattr(observation, field, getattr(msg, field))
+    return observation
 
 
 def select_terrain_assessment(
@@ -898,7 +966,7 @@ class TerrainSafetyAssessor(Node):
         """
         super().__init__("terrain_safety_assessor", **node_kwargs)
         for name, default in (
-            ("step_threshold", 0.08),
+            ("step_threshold", 0.07),
             ("climb_threshold", 0.18),
             ("stop_threshold", 0.32),
             ("max_slope", 0.45),
@@ -926,6 +994,7 @@ class TerrainSafetyAssessor(Node):
         self.declare_parameter("name_clear_frames", 4)
         self.declare_parameter("vision_assist_enabled", True)
         self.declare_parameter("output_frame", "base_link")
+        self.declare_parameter("legacy_features_enabled", False)
 
         validate_safety_parameters(
             {name: self.get_parameter(name).value for name in SAFETY_PARAMETER_NAMES}
@@ -944,7 +1013,7 @@ class TerrainSafetyAssessor(Node):
             self.stop_threshold,
         ):
             self.get_logger().warning(
-                "Invalid height thresholds; restored 0.08/0.18/0.32 m"
+                "Invalid height thresholds; restored 0.07/0.18/0.32 m"
             )
         self.max_slope = self._positive_parameter("max_slope", 0.45)
         self.max_roughness = self._positive_parameter("max_roughness", 0.06)
@@ -979,13 +1048,16 @@ class TerrainSafetyAssessor(Node):
         self.output_frame = (
             str(self.get_parameter("output_frame").value) or "base_link"
         )
+        self.legacy_features_enabled = bool(
+            self.get_parameter("legacy_features_enabled").value
+        )
         self.status_log_period = self._positive_parameter("status_log_period", 1.0)
         self.assessment_filter = ConservativeAssessmentFilter(
             int(self.get_parameter("clear_confirmation_frames").value),
             ("STOP", 0.0),
             int(self.get_parameter("hazard_confirmation_frames").value),
         )
-        self.name_stabilizer = ObstacleNameStabilizer(
+        self.classification_stabilizer = ObstacleClassificationStabilizer(
             int(self.get_parameter("name_confirmation_frames").value),
             int(self.get_parameter("name_clear_frames").value),
         )
@@ -1005,9 +1077,18 @@ class TerrainSafetyAssessor(Node):
         self.front_obstacle_name_pub = self.create_publisher(
             String, "/perception/front_obstacle_name", 10
         )
+        # 无视觉模式也使用强类型、带 Header/valid 的在线合同。旧数组没有采样时刻、
+        # frame 或有效位，默认不能影响安全链；仅在回放无法迁移的历史 rosbag 时显式打开。
         self.create_subscription(
-            Float32MultiArray, "/terrain/features", self.features_callback, 10
+            TerrainFeatures,
+            "/terrain/features_stamped",
+            self.typed_features_callback,
+            10,
         )
+        if self.legacy_features_enabled:
+            self.create_subscription(
+                Float32MultiArray, "/terrain/features", self.features_callback, 10
+            )
         self.create_subscription(
             Float32MultiArray,
             "/vision/obstacle_evidence",
@@ -1020,9 +1101,9 @@ class TerrainSafetyAssessor(Node):
             self.fused_callback,
             10,
         )
-        self.last_features_time = self.get_clock().now()
+        self.last_features_time = None
         self.last_fused_stamp = None
-        self.last_fused_clock_seconds = None
+        self.last_typed_stamp = None
         self.last_vision_time = None
         self.visual_target = False
         self.visual_hint_name = ""
@@ -1032,6 +1113,7 @@ class TerrainSafetyAssessor(Node):
         self.last_assessment = None
         self.last_obstacle_status = None
         self.last_status_log_time = None
+        self.last_clock_time = self.get_clock().now()
         self.create_timer(0.1, self.timeout_callback)
         self.publish_assessment("STOP", 0.0)
         self.get_logger().info("Terrain navigation safety assessor ready")
@@ -1046,14 +1128,106 @@ class TerrainSafetyAssessor(Node):
         value = float(self.get_parameter(name).value)
         return max(0.0, min(1.0, value)) if isfinite(value) else 0.0
 
-    def features_callback(self, msg: Float32MultiArray) -> None:
-        """处理无相机模式下的旧数组特征，保留既有 rosbag 可回放性。"""
+    def _reset_temporal_state(self, now) -> None:
+        """Clear every observation, vote and heartbeat tied to an old ROS epoch."""
+        self.last_features_time = None
+        self.last_fused_stamp = None
+        self.last_typed_stamp = None
+        self.last_vision_time = None
+        self.visual_target = False
+        self.visual_hint_name = ""
+        self.visual_assist_active = False
+        self.perception_valid = False
+        self.latest_observation = None
+        self.assessment_filter.reset()
+        self.classification_stabilizer.reset()
+        self.last_assessment = None
+        self.last_obstacle_status = None
+        self.last_status_log_time = None
+        self.last_clock_time = now
+
+    def _handle_clock_rewind(self, now) -> bool:
+        """Fail closed once when ``/clock`` starts a new simulator/rosbag epoch."""
+        if not ros_clock_moved_backward(now, self.last_clock_time):
+            self.last_clock_time = now
+            return False
+        self._reset_temporal_state(now)
+        self.get_logger().warning(
+            "ROS clock moved backward; reset terrain observations and temporal votes"
+        )
+        return True
+
+    def _reject_metric_observation(self) -> None:
+        """Invalidate the current geometry immediately without refreshing its heartbeat."""
+        self.perception_valid = False
+        self.visual_assist_active = False
+        self.latest_observation = None
+        self._publish_candidate(("STOP", 0.0))
+
+    def _process_metric_observation(self, observation: FusedObstacle) -> None:
+        """Run fused or typed point-cloud geometry through one identical safety path."""
+        self.latest_observation = observation
+        self.perception_valid = fused_observation_valid(
+            observation, self.fused_min_confidence, self.min_points
+        )
+        assessment = select_fused_assessment(
+            observation,
+            self.fused_min_confidence,
+            self.min_points,
+            self.step_threshold,
+            self.climb_threshold,
+            self.stop_threshold,
+            self.max_slope,
+            self.max_roughness,
+            self.vision_speed_scale,
+            self.hard_stop_distance,
+            self.hazard_approach_speed,
+        )
+        assessment = self.assessment_filter.update(assessment)
+        visual_active = bool(observation.vision_confirmed) and assessment[0] == "WALK"
+        self.visual_active_pub.publish(Bool(data=visual_active))
+        self.visual_assist_active = visual_active
+        self.publish_assessment(*assessment)
+
+    def typed_features_callback(self, msg: TerrainFeatures) -> None:
+        """Use typed point-cloud geometry as the no-vision online authority.
+
+        The producer must supply a current, strictly advancing Header in ``output_frame``
+        and set ``valid`` only after TF/point-count/geometry checks.  A live ``valid=false``
+        frame refreshes the transport heartbeat but still produces STOP; a malformed,
+        stale, future, duplicate or wrong-frame message cannot refresh the heartbeat.
+        """
         if self.prefer_fused:
             return
-        if len(msg.data) < 4:
-            self._publish_candidate(("STOP", 0.0))
+        now = self.get_clock().now()
+        self._handle_clock_rewind(now)
+        stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        if (
+            str(msg.header.frame_id) != self.output_frame
+            or not observation_stamp_is_current(
+                now.nanoseconds * 1e-9,
+                stamp,
+                self.sensor_timeout,
+                self.future_stamp_tolerance,
+            )
+            or not observation_stamp_strictly_advances(self.last_typed_stamp, stamp)
+        ):
+            self._reject_metric_observation()
             return
-        self.last_features_time = self.get_clock().now()
+        self.last_typed_stamp = stamp
+        self.last_features_time = now
+        self._process_metric_observation(terrain_features_to_fused_observation(msg))
+
+    def features_callback(self, msg: Float32MultiArray) -> None:
+        """处理无相机模式下的旧数组特征，保留既有 rosbag 可回放性。"""
+        if self.prefer_fused or not self.legacy_features_enabled:
+            return
+        now = self.get_clock().now()
+        self._handle_clock_rewind(now)
+        if len(msg.data) < 4:
+            self._reject_metric_observation()
+            return
+        self.last_features_time = now
         height_index = (
             TERRAIN_FRONTAL_HEIGHT
             if len(msg.data) > TERRAIN_FRONTAL_HEIGHT
@@ -1068,7 +1242,7 @@ class TerrainSafetyAssessor(Node):
         # 兼容数组没有 Header；构造一条等价几何上下文，使下游仍只需订阅一个强类型接口。
         observation = FusedObstacle()
         observation.header = Header(
-            stamp=self.get_clock().now().to_msg(), frame_id=self.output_frame
+            stamp=now.to_msg(), frame_id=self.output_frame
         )
         observation.obstacle_type = obstacle_type
         observation.obstacle_height = float(msg.data[height_index])
@@ -1171,37 +1345,22 @@ class TerrainSafetyAssessor(Node):
         if not self.prefer_fused:
             return
         now = self.get_clock().now()
+        self._handle_clock_rewind(now)
         now_seconds = now.nanoseconds * 1e-9
         stamp = (
             float(msg.header.stamp.sec)
             + float(msg.header.stamp.nanosec) * 1e-9
         )
-        clock_rewound = (
-            self.last_fused_clock_seconds is not None
-            and now_seconds < self.last_fused_clock_seconds - 1e-9
-        )
-        self.last_fused_clock_seconds = now_seconds
-        if clock_rewound:
-            # rosbag/Gazebo 重启会创建新的时间戳纪元；旧风险票、名称票和时间水位
-            # 不能与新会话混用，否则新数据会被误判为乱序或继承上一场景的障碍。
-            self.last_fused_stamp = None
-            self.assessment_filter.reset()
-            self.name_stabilizer.reset()
-            self.latest_observation = None
-            self.perception_valid = False
-            self.get_logger().warning(
-                "ROS clock moved backward; reset fused perception history"
+        if (
+            str(msg.header.frame_id) != self.output_frame
+            or not observation_stamp_is_current(
+                now_seconds,
+                stamp,
+                self.sensor_timeout,
+                self.future_stamp_tolerance,
             )
-        if not observation_stamp_is_current(
-            now_seconds,
-            stamp,
-            self.sensor_timeout,
-            self.future_stamp_tolerance,
         ):
-            self.perception_valid = False
-            self.visual_assist_active = False
-            self.latest_observation = None
-            self._publish_candidate(("STOP", 0.0))
+            self._reject_metric_observation()
             return
         if not observation_stamp_strictly_advances(
             self.last_fused_stamp, stamp
@@ -1215,32 +1374,13 @@ class TerrainSafetyAssessor(Node):
             return
         self.last_fused_stamp = stamp
         self.last_features_time = now
-        self.latest_observation = msg
-        self.perception_valid = fused_observation_valid(
-            msg, self.fused_min_confidence, self.min_points
-        )
-        assessment = select_fused_assessment(
-            msg,
-            self.fused_min_confidence,
-            self.min_points,
-            self.step_threshold,
-            self.climb_threshold,
-            self.stop_threshold,
-            self.max_slope,
-            self.max_roughness,
-            self.vision_speed_scale,
-            self.hard_stop_distance,
-            self.hazard_approach_speed,
-        )
-        assessment = self.assessment_filter.update(assessment)
-        visual_active = bool(msg.vision_confirmed) and assessment[0] == "WALK"
-        self.visual_active_pub.publish(Bool(data=visual_active))
-        self.visual_assist_active = visual_active
-        self.publish_assessment(*assessment)
+        self._process_metric_observation(msg)
 
     def vision_callback(self, msg: Float32MultiArray) -> None:
         """缓存视觉辅助证据；超时后自动失效，不能持续限制新场景。"""
-        self.last_vision_time = self.get_clock().now()
+        now = self.get_clock().now()
+        self._handle_clock_rewind(now)
+        self.last_vision_time = now
         self.visual_target = visual_evidence_in_path(
             msg.data, self.vision_min_confidence, self.vision_center_margin
         )
@@ -1252,8 +1392,13 @@ class TerrainSafetyAssessor(Node):
         """仅在视觉启用、证据有效且接收时间新鲜时返回真。"""
         if not self.vision_enabled or self.last_vision_time is None:
             return False
-        age = (self.get_clock().now() - self.last_vision_time).nanoseconds / 1e9
-        return age <= self.vision_timeout and self.visual_target
+        now = self.get_clock().now()
+        if not ros_age_is_fresh(now, self.last_vision_time, self.vision_timeout):
+            self.last_vision_time = None
+            self.visual_target = False
+            self.visual_hint_name = ""
+            return False
+        return self.visual_target
 
     def _fresh_visual_hint_name(self) -> str:
         """仅返回仍在超时窗口内的视觉名称，防止终端残留上一处障碍。"""
@@ -1261,8 +1406,11 @@ class TerrainSafetyAssessor(Node):
 
     def timeout_callback(self) -> None:
         """独立检查感知心跳；断流时持续发布零速度上限。"""
-        age = (self.get_clock().now() - self.last_features_time).nanoseconds / 1e9
-        if age > self.sensor_timeout:
+        now = self.get_clock().now()
+        if self._handle_clock_rewind(now):
+            self._publish_candidate(("STOP", 0.0))
+            return
+        if not ros_age_is_fresh(now, self.last_features_time, self.sensor_timeout):
             self.perception_valid = False
             self.visual_assist_active = False
             self.latest_observation = None
@@ -1327,10 +1475,9 @@ class TerrainSafetyAssessor(Node):
             safety.valid_points = nonnegative_integer_or_zero(
                 observation.valid_points
             )
-        self.navigation_safety_pub.publish(safety)
         visual_hint_name = self._fresh_visual_hint_name()
         geometry_valid = obstacle_measurements_are_valid(safety)
-        obstacle_name = front_obstacle_name_zh(safety, visual_hint_name)
+        classification = classify_front_obstacle(safety, visual_hint_name)
         # 该文本话题面向终端/UI；明确区分“点云几何确认”和“视觉疑似”，避免把
         # OpenCV 单目分类误当成已量测高度的安全结论。几何字段非法时不能进入这个
         # 覆盖分支，否则一帧 NaN 点云可能被视觉文本包装成有效目标并继续累计语义票。
@@ -1340,34 +1487,49 @@ class TerrainSafetyAssessor(Node):
             and visual_hint_name
             and int(safety.obstacle_type) == NavigationSafety.OBSTACLE_CLEAR
         ):
-            obstacle_name = f"视觉疑似{visual_hint_name}（点云未确认）"
-        obstacle_name = self.name_stabilizer.update(
-            obstacle_name, geometry_valid
+            classification = ObstacleClassification(
+                "", f"视觉疑似{visual_hint_name}（点云未确认）"
+            )
+        classification = self.classification_stabilizer.update(
+            classification, geometry_valid
         )
-        self.front_obstacle_name_pub.publish(String(data=obstacle_name))
+        # Publish the ID and display name from the same stabilized classification.  The
+        # Header and all metric fields therefore remain one atomic observation; a DDS
+        # scheduling difference between this message and the optional UI String can no
+        # longer attach the previous obstacle's name to new geometry.
+        safety.semantic_id = classification.semantic_id
+        self.navigation_safety_pub.publish(safety)
+        self.front_obstacle_name_pub.publish(
+            String(data=classification.display_name)
+        )
 
         # 类别/模式变化立即打印；稳定状态每秒刷新一次。这样终端始终能看到当前结果，
         # 又不会按 10 Hz 感知帧率刷屏。数值不参与变化签名，由周期日志展示最新测量。
         status_signature = (
             bool(safety.perception_valid),
-            obstacle_name,
+            classification.display_name,
+            safety.semantic_id,
             int(safety.mode),
             bool(safety.visual_assist_active),
             visual_hint_name,
         )
         now = self.get_clock().now()
-        log_age = (
-            float("inf")
-            if self.last_status_log_time is None
-            else (now - self.last_status_log_time).nanoseconds / 1e9
-        )
+        log_age = ros_age_seconds(now, self.last_status_log_time)
+        if log_age < 0.0:
+            # This path is defensive for direct publish calls outside the normal callbacks;
+            # a negative logging age must not suppress status indefinitely after /clock reset.
+            self.last_status_log_time = None
+            self.last_obstacle_status = None
+            log_age = float("inf")
         if (
             status_signature != self.last_obstacle_status
             or log_age >= self.status_log_period
         ):
             self.get_logger().info(
                 format_front_obstacle_status(
-                    safety, visual_hint_name, resolved_name=obstacle_name
+                    safety,
+                    visual_hint_name,
+                    resolved_name=classification.display_name,
                 )
             )
             self.last_obstacle_status = status_signature

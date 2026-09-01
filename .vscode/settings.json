@@ -7,7 +7,6 @@
   },
   "terminal.integrated.env.linux": {
     "ROS_DISTRO": "jazzy",
-    "TURTLEBOT3_MODEL": "burger",
     "LD_LIBRARY_PATH": null,
     "SNAP": null,
     "SNAP_ARCH": null,

@@ -26,7 +26,8 @@
 # 8. 探索漏区域：减小 frontier_minimum_cells/coverage_goal_spacing 或增加 search turns；代价是
 #    目标更多、任务更慢。frontier/coverage 参数只基于在线地图，不应加入正式场地坐标。
 # 9. 无目标太早回起点：增大 maximum_search_turns/empty_frontier_confirmations；任务总时长
-#    仍受 mission_timeout 限制。return_time_reserve 是其中只留给返程的窗口，不能大于总时长。
+#    仍受 mission_timeout 硬截止限制。return_time_reserve 是只留给返程的窗口，不能大于
+#    总时长；工作窗口结束会取消未完成动作并开始返程，硬截止后不再产生任何自动目标。
 # 10. 名称正确但 Action 一直不交接：先检查 NavigationSafety 的时间戳/频率和
 #    perception_valid，再调整 safety_geometry_stale_seconds。低频传感器可小步增大；过严会
 #    漏交接，过松会在断流后沿用旧几何，不能超过底层感知/停车看门狗的安全窗口。
@@ -35,6 +36,10 @@
 #    TraverseObstacle 控制器；归属不明时两者都处理。单独重启自主进程或只重启核心栈不安全。
 #    仅当 rosbag/网络证明确有正常响应超过默认 2 s，才小步增大 action_response_timeout 或
 #    action_cancel_timeout；增大只延后故障判定，不能修复 DDS 断连或控制器不返回 result。
+# 12. Action 有反馈但身体长期不动：先查控制器是否按 PREPARING -> TRAVERSING ->
+#    STABILIZING 顺序发布全局 progress，再调整 traversal_progress_timeout。减小可更快取消
+#    卡住的步态，但会误伤真机上合法的长时间静态重心转移；增大会延后故障恢复。重复发布
+#    完全相同的 state/progress 不会刷新看门狗，不能用“心跳还在”掩盖无实际进展。
 #
 # 调参顺序：5 秒进展判据 -> 入口空间/航向 -> Action 成功后验 -> 冷却 -> 探索覆盖。
 autonomous_mission:
@@ -93,11 +98,19 @@ autonomous_mission:
     # 严格 READY 被点云前缘抖动漏掉时的三重守卫：Nav2 已到入口、最新障碍仍是同一
     # map 位置、且距离/横偏均受限。不是“看见障碍就越”的宽松触发器。
     handoff_fallback_max_distance: 1.45
-    handoff_fallback_max_lateral: 0.50
+    handoff_fallback_max_lateral: 0.35
     # 多帧专名、米制几何、横偏和严格约 7° 航向均已通过时，允许真实越障控制器从
     # 1.45 m 内接管最后低速接近，避免 Nav2 在障碍膨胀层前额外等待一个停滞周期。
     # 真机控制器无法可靠闭环接近这么远时减小；不要通过放宽航向或语义条件补偿。
     direct_handoff_max_distance: 1.45
+    # TraversalGuidance 的 READY 表示“任务层可以交给 Action”，不等于已经进入真机
+    # 抬腿窗口。只有距离/横偏/航向同时落入下面更小的窗口才发送 ENTRY_READY；否则
+    # 发送 ENTRY_PREPARING，要求控制器先闭环低速接近。默认值与独立仿真控制器一致。
+    # 真机须以最大外形、制动误差和落足范围标定；放宽会让控制器过早抬腿，缩小只会
+    # 增加 PREPARING 时间。三项都必须小于对应的通用 Action 入口包络。
+    traversal_ready_max_distance: 0.45
+    traversal_ready_max_lateral: 0.10
+    traversal_ready_max_heading_error: 0.08
     handoff_fallback_spatial_tolerance: 0.90
     # 长桥/台阶最近前缘漂移超过 0.90 m 时，仅在机器人回到原确认观察位 0.60 m 内、
     # 航向相差不超过 0.70 rad 且粗类型兼容时恢复待办 ID。相邻障碍误关联时先减小这两项。
@@ -113,7 +126,7 @@ autonomous_mission:
     # 2.35 m 仍位于当前 2.5 m 地形 ROI 内，并要求横偏/航向/语义/空间锁全部通过；
     # 这允许真实越障控制器接管最后一段低速接近，避免 Nav2 膨胀层停在 1.9~2.0 m 时循环。
     approach_stall_handoff_max_distance: 2.35
-    approach_stall_handoff_max_lateral: 0.75
+    approach_stall_handoff_max_lateral: 0.35
     # 停滞交接允许约 12.6°，由 Action 在 PREPARING 阶段完成最后闭环对正；真正开始
     # 抬腿仍应使用 handoff_alignment_tolerance 的严格约 7° 门限。
     approach_stall_handoff_max_heading_error: 0.22
@@ -140,18 +153,34 @@ autonomous_mission:
     # need more time than a single step.  Keep this above the longest adapter
     # duration so a valid traverse is not cancelled halfway across.
     traversal_timeout: 45.0
+    # Action 必须在 5 秒内推进反馈状态或全局进度；无反馈、非法/倒序反馈或进度不变会请求
+    # cancel，但仍等待 result 证明远端释放控制权。真机先测最长合法重心转移再小步增大。
+    traversal_progress_timeout: 5.0
     # 到达入口后越障 Action 服务仍未就绪，最多原地等待 5 秒；随后保留为未完成并换目标。
     controller_wait_timeout: 5.0
     # Action 最终几何只接受 0.35 s 内的新鲜 NavigationSafety。真机若点云稳定低于 5 Hz，
     # 先修复驱动时间戳/频率，再按实测最大帧间隔小步增大；过大会让断流后的旧尺寸继续存活。
     safety_geometry_stale_seconds: 0.35
+    # Safety 与 Guidance 必须来自完全相同的 base_link 采样：frame_id/sec/nanosec
+    # 逐字段一致。仓库节点会原样转发 Header；外部实现也必须如此，不允许用
+    # “小时差”拼接前后两帧。frame_id 不得带前/尾斜杠或空白。
+    observation_frame: base_link
+    # 同 Header 的 Guidance 与 Safety 还必须把障碍投影到几乎相同的 map 位置。
+    # 0.12 m 覆盖正常点云/TF 噪声；若同一自产节点仍超限，应修复同步或坐标变换，
+    # 不能放宽到可混入相邻障碍。外部实现需用 rosbag 测量同步样本的 P99 空间误差。
+    safety_guidance_spatial_tolerance: 0.12
+    # /navigation/healthy 是带时限许可：false 或 0.8 s 断流立即锁 Nav2、取消当前目标但
+    # 不记失败；恢复后连续稳定 1 s 才继续，避免生命周期/TF 反复上下线造成启停抖动。
+    navigation_health_timeout: 0.80
+    navigation_health_recovery_duration: 1.00
     minimum_obstacle_confidence: 0.55
     obstacle_confirmation_frames: 3
     # 2.5 m 内先累计同一 map 入口的语义历史，避免坡面接近后因局部裁剪误变为台阶；
     # 只有进入 1.2 m 近场且距离/横偏/航向均通过时才能真正触发 Action。
     semantic_observation_distance: 2.50
     semantic_confirmation_distance: 1.20
-    # /front_obstacle_name 已经过感知层多帧稳定与几何一致性检查，任务层再要求最近 6 帧中
+    # NavigationSafety/TraversalGuidance.semantic_id 已由感知层多帧稳定与几何一致性检查，
+    # 任务层再要求最近 6 帧中
     # 3 票才可锁定。若真机类别偶发串扰，先提高感知层 name_confirmation_frames；只有
     # 稳定名称仍误锁时才继续提高这里，避免在同一桥面白白等待几十秒。
     # 两票仅约 0.2～0.4 s，曾把坡侧的短暂 WALL 轮廓锁成高墙；三票仍足够快，且允许
@@ -210,12 +239,13 @@ autonomous_mission:
     nav_progress_rotation: 0.06
     # 自主导航终端每 5 秒显示一次已越过/未越过清单，清单变化时立即显示。
     inventory_log_period: 5.0
-    # 总预算 300 秒，从捕获启动位姿开始计时。前 240 秒探索/越障，最后 60 秒开始返程；
-    # 正在执行的越障不会被强制中断，返程遇阻也会继续安全重试而不是到点原地停车。
+    # 总预算 300 秒，从捕获启动位姿开始计时。前 240 秒用于工作；到 work deadline 后
+    # 取消非返程 Nav2/Traverse 并返航。300 秒 hard deadline 到达时锁住自主 Twist、取消
+    # 仍在运行的 Action，并以 INCOMPLETE_STOP 结束；绝不伪报回到终点或继续无限重试。
+    # 人工键盘/手柄是独立仲裁分支，仍可在确认外部越障控制器已停止后接管。
     mission_timeout: 300.0
     return_time_reserve: 60.0
     return_home_tolerance: 0.40
-    front_name_timeout: 1.2
     expected_obstacle_ids:
       - right_angle_poles
       - gravel_wood_pit

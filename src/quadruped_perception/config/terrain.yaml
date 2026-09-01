@@ -68,6 +68,20 @@ terrain_analyzer:
     max_roughness: 0.06
     min_valid_points: 30
     source_switch_timeout: 2.0
+    # 某候选点云能发布消息但无法解码 XYZ 或缺少 TF 时，将该话题暂时隔离，让健康备用源
+    # 接管；只有一个传感器时冷却结束会自动重试。过短会在故障源间抖动，过长会延迟恢复。
+    source_failure_cooldown: 2.0
+    # XYZ/TF 正常但前向 ROI 点数不足或几何仍为 UNKNOWN 时，连续多少个已处理帧后才把
+    # 当前源隔离。5 帧在 5 Hz 下约为 1 s：调小可更快切备用源，但机身俯仰/短时遮挡更易
+    # 误切；调大可容忍更长遮挡，但故障相机/雷达会更久压住健康备用源。禁止设为 1，避免
+    # 单帧无回波造成来源抖动。
+    source_geometry_failure_frames: 5
+    # 地面高度先验只用于短时遮挡。超过年龄或连续发现“整片可见平面与先验整体平移”时，
+    # 先输出 UNKNOWN，再丢弃先验重新获取，避免调节机身高度后永久误报 PIT。max_height_shift
+    # 应高于平地外参/步态抖动的 99% 分位；调小会频繁重取地面，调大会延长错误先验寿命。
+    ground_prior_max_age: 3.0
+    ground_prior_max_consecutive_conflicts: 3
+    ground_prior_max_height_shift: 0.10
 
     # ---------- 高度图地面分割与障碍分类 ----------
     # 不同深度相机/3D 雷达优先使用 rosbag 调整这组参数。
@@ -83,3 +97,15 @@ terrain_analyzer:
     min_connected_region_cells: 4
     # 连通块还必须有足够原始回波，防止一小团聚集飞点被误认为真实障碍。
     min_connected_region_points: 16
+
+    # ---------- CLEAR 连续可见地面合同（防止把无回波坑/场地边缘当平地） ----------
+    # 只有机器人中央通道从 front_x_min 到 required_distance 都获得足够横向地面回波，且
+    # 任一连续缺带不超过 max_gap，才允许发布 CLEAR。缺带只表示 UNKNOWN/停车，不凭空判 PIT。
+    # 真机先按机身最宽处（含定位/摆动余量）设置 half_width，再用平地与黑色/反光无回波 bag
+    # 调整 required_distance/max_gap。减小 max_gap 更安全但会增加弱纹理地面误停；不得为了
+    # 消除误停把它增大到足以跨过比赛坑洞或场地边缘。
+    clear_ground_corridor_half_width: 0.25
+    clear_ground_required_distance: 0.80
+    clear_ground_max_gap: 0.15
+    # 每个纵向栅格至少要覆盖中央通道横向栅格数的该比例，避免一条侧边回波冒充整条地面。
+    clear_ground_min_lateral_fraction: 0.25

@@ -56,6 +56,7 @@ VISION_PARAMETER_NAMES = (
     "min_temporal_iou",
     "history_reset_timeout",
     "source_switch_timeout",
+    "source_failure_cooldown",
     "orange_hsv_lower",
     "orange_hsv_upper",
     "blue_hsv_lower",
@@ -84,6 +85,11 @@ TERRAIN_PARAMETER_NAMES = (
     "max_roughness",
     "min_valid_points",
     "source_switch_timeout",
+    "source_failure_cooldown",
+    "source_geometry_failure_frames",
+    "ground_prior_max_age",
+    "ground_prior_max_consecutive_conflicts",
+    "ground_prior_max_height_shift",
     "grid_cell_size",
     "ground_height_bin",
     "pit_depth_threshold",
@@ -91,6 +97,10 @@ TERRAIN_PARAMETER_NAMES = (
     "bar_min_clearance",
     "min_connected_region_cells",
     "min_connected_region_points",
+    "clear_ground_corridor_half_width",
+    "clear_ground_required_distance",
+    "clear_ground_max_gap",
+    "clear_ground_min_lateral_fraction",
 )
 
 FUSION_PARAMETER_NAMES = (
@@ -288,6 +298,7 @@ def validate_vision_parameters(values: Mapping[str, object]) -> None:
     for name in ("history_reset_timeout", "source_switch_timeout"):
         if _number(values, name, errors) < 0.10:
             errors.append(f"{name} must be >= 0.10")
+    _range(values, "source_failure_cooldown", 0.10, 30.0, errors)
     for prefix in ("orange", "blue"):
         lower = _hsv_triplet(values, f"{prefix}_hsv_lower", errors)
         upper = _hsv_triplet(values, f"{prefix}_hsv_upper", errors)
@@ -308,28 +319,51 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
     if (
         not isinstance(target_frame, str)
         or not target_frame
+        or target_frame.startswith("/")
+        or target_frame.endswith("/")
+        or "//" in target_frame
         or any(c.isspace() for c in target_frame)
     ):
-        errors.append("target_frame must be a non-empty frame without whitespace")
+        errors.append(
+            "target_frame must be a non-empty TF frame without slashes at its boundaries "
+            "or whitespace"
+        )
     _range(values, "processing_hz", 0.5, 30.0, errors)
     if _number(values, "transform_timeout", errors) < 0.0:
         errors.append("transform_timeout must be >= 0")
-    if _integer(values, "transform_max_points", errors) < 0:
+    transform_max_points = _integer(values, "transform_max_points", errors)
+    if transform_max_points < 0:
         errors.append("transform_max_points must be >= 0 (0 disables the limit)")
-    for name in ("max_points", "nav2_cloud_max_points", "min_valid_points"):
-        if _integer(values, name, errors) < 1:
+    point_limits = {
+        name: _integer(values, name, errors)
+        for name in ("max_points", "nav2_cloud_max_points", "min_valid_points")
+    }
+    for name, value in point_limits.items():
+        if value < 1:
             errors.append(f"{name} must be >= 1")
-    if _number(values, "nav2_obstacle_min_height_above_ground", errors) < 0.0:
+    if point_limits["min_valid_points"] > point_limits["max_points"]:
+        errors.append("min_valid_points must not exceed max_points")
+    if (
+        transform_max_points > 0
+        and transform_max_points < point_limits["min_valid_points"]
+    ):
+        errors.append(
+            "transform_max_points must be 0 or at least min_valid_points"
+        )
+    nav2_obstacle_height = _number(
+        values, "nav2_obstacle_min_height_above_ground", errors
+    )
+    if nav2_obstacle_height < 0.0:
         errors.append("nav2_obstacle_min_height_above_ground must be >= 0")
     x_min = _number(values, "front_x_min", errors)
     x_max = _number(values, "front_x_max", errors)
     if x_min < 0.0 or x_max <= x_min:
         errors.append("front ROI must satisfy 0 <= front_x_min < front_x_max")
-    # TerrainAnalyzer applies ``max(0.0, value)``.  Zero is therefore the exact supported
-    # lower boundary (a centre-line-only diagnostic ROI); negative YAML must fail instead
-    # of being silently clipped to that boundary.
-    if _number(values, "lateral_half_width", errors) < 0.0:
-        errors.append("lateral_half_width must be >= 0")
+    # Navigation CLEAR requires a physical-width corridor.  A centre-line-only ROI cannot establish
+    # whether both sides of the quadruped footprint are supported and is therefore rejected below.
+    lateral_half_width = _number(values, "lateral_half_width", errors)
+    if lateral_half_width <= 0.0:
+        errors.append("lateral_half_width must be > 0")
     z_min = _number(values, "front_z_min", errors)
     z_max = _number(values, "front_z_max", errors)
     if z_max <= z_min:
@@ -341,10 +375,21 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
     critical = _positive(values, "critical_height", errors)
     if critical <= warning:
         errors.append("critical_height must exceed warning_height")
+    if nav2_obstacle_height > warning:
+        errors.append(
+            "nav2_obstacle_min_height_above_ground must not exceed warning_height"
+        )
     for name in ("max_slope", "max_roughness"):
         _positive(values, name, errors)
+    grid_cell_size = _number(values, "grid_cell_size", errors)
+    _range(values, "source_switch_timeout", 0.10, 30.0, errors)
+    _range(values, "source_failure_cooldown", 0.10, 30.0, errors)
+    # A single sparse frame is common while the body pitches or a depth camera changes exposure.
+    # Requiring at least two consecutive failures prevents source flapping by construction; the
+    # upper bound limits how long a geometrically useless preferred source may suppress a backup.
+    _integer_range(values, "source_geometry_failure_frames", 2, 30, errors)
+    _range(values, "ground_prior_max_age", 0.20, 30.0, errors)
     for name, minimum in (
-        ("source_switch_timeout", 0.10),
         ("grid_cell_size", 0.02),
         ("ground_height_bin", 0.01),
         ("pit_depth_threshold", 0.03),
@@ -356,22 +401,61 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
         errors.append("bar_min_clearance must be >= warning_height")
     if _integer(values, "min_connected_region_cells", errors) < 2:
         errors.append("min_connected_region_cells must be >= 2")
-    if _integer(values, "min_connected_region_points", errors) < 4:
+    region_points = _integer(values, "min_connected_region_points", errors)
+    if region_points < 4:
         errors.append("min_connected_region_points must be >= 4")
+    if region_points > point_limits["max_points"]:
+        errors.append("min_connected_region_points must not exceed max_points")
+    _integer_range(
+        values,
+        "ground_prior_max_consecutive_conflicts",
+        1,
+        30,
+        errors,
+    )
+    ground_bin_size = _number(values, "ground_height_bin", errors)
+    ground_prior_shift = _number(values, "ground_prior_max_height_shift", errors)
+    if not max(0.03, ground_bin_size) <= ground_prior_shift <= 1.0:
+        errors.append(
+            "ground_prior_max_height_shift must be in "
+            "[max(0.03, ground_height_bin), 1.0]"
+        )
+    corridor_half_width = _positive(
+        values, "clear_ground_corridor_half_width", errors
+    )
+    if corridor_half_width > lateral_half_width:
+        errors.append(
+            "clear_ground_corridor_half_width must not exceed lateral_half_width"
+        )
+    required_distance = _number(
+        values, "clear_ground_required_distance", errors
+    )
+    if not x_min < required_distance <= x_max:
+        errors.append(
+            "clear_ground_required_distance must be in (front_x_min, front_x_max]"
+        )
+    maximum_gap = _positive(values, "clear_ground_max_gap", errors)
+    if maximum_gap < max(0.02, grid_cell_size):
+        errors.append("clear_ground_max_gap must be at least grid_cell_size")
+    if required_distance > x_min and maximum_gap >= required_distance - x_min:
+        errors.append(
+            "clear_ground_max_gap must be smaller than the required clear-ground span"
+        )
+    _range(values, "clear_ground_min_lateral_fraction", 0.05, 1.0, errors)
     _raise("terrain", errors)
 
 
 def validate_fusion_parameters(values: Mapping[str, object]) -> None:
     """Validate bounded time synchronization and visual association settings."""
     errors: list[str] = []
-    sync_slop = _number(values, "sync_slop", errors)
-    if sync_slop < 0.001:
-        errors.append("sync_slop must be >= 0.001")
-    if _integer(values, "queue_size", errors) < 2:
-        errors.append("queue_size must be >= 2")
+    # A window above 0.5 s can associate different obstacles while the robot is moving.  The queue
+    # is searched quadratically, so cap it as an explicit RK3588 resource contract rather than
+    # allowing a YAML typo to allocate an unbounded history and comparison loop.
+    sync_slop = _range(values, "sync_slop", 0.001, 0.50, errors)
+    _integer_range(values, "queue_size", 2, 100, errors)
     _range(values, "vision_min_confidence", 0.0, 1.0, errors)
     _range(values, "vision_center_margin", 0.0, 0.49, errors)
-    fallback = _positive(values, "terrain_only_timeout", errors)
+    fallback = _range(values, "terrain_only_timeout", 0.001, 5.0, errors)
     if fallback < sync_slop:
         errors.append("terrain_only_timeout must be >= sync_slop")
     _raise("fusion", errors)

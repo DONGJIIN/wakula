@@ -9,6 +9,7 @@ import time
 
 import pytest
 import rclpy
+from rclpy.duration import Duration
 from sensor_msgs.msg import Image
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
@@ -19,6 +20,7 @@ from rclpy.parameter import Parameter
 from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObstacle
 from quadruped_perception.perception_fusion import PerceptionFusion
 from quadruped_perception.terrain_analyzer import TerrainAnalyzer
+from quadruped_perception.terrain_geometry import CLEAR, GeometryEstimate
 from quadruped_perception.vision_obstacle_detector import VisionObstacleDetector
 
 
@@ -65,6 +67,39 @@ def _vision(stamp):
     message.center_y = 0.45
     message.width = 0.6
     message.height = 0.15
+    return message
+
+
+def _flat_ground_points():
+    """Return dense base_link ground echoes that satisfy the online CLEAR coverage contract."""
+    # Geometry cells require at least two raw echoes.  A 2.5 cm lattice supplies four samples per
+    # 5 cm cell and continuously covers x=0.10..0.80 m across the configured body corridor.
+    return [
+        (0.101 + x_index * 0.025, -0.249 + y_index * 0.025, -0.30)
+        for x_index in range(30)
+        for y_index in range(20)
+    ]
+
+
+def _cloud(node, points, frame_id="base_link"):
+    """Build a structurally valid PointCloud2 with the node's current nonzero ROS stamp."""
+    return point_cloud2.create_cloud_xyz32(
+        Header(stamp=node.get_clock().now().to_msg(), frame_id=frame_id),
+        points,
+    )
+
+
+def _image(node, encoding="bgr8"):
+    """Build a tiny metadata-valid image; 32FC3 intentionally fails conversion to bgr8."""
+    message = Image()
+    message.header.stamp = node.get_clock().now().to_msg()
+    message.header.frame_id = "camera_link"
+    message.width = 2
+    message.height = 2
+    message.encoding = encoding
+    bytes_per_pixel = 12 if encoding == "32FC3" else 3
+    message.step = message.width * bytes_per_pixel
+    message.data = bytes(message.step * message.height)
     return message
 
 
@@ -228,3 +263,281 @@ def test_invalid_preferred_sensors_do_not_block_healthy_fallbacks(ros_context):
     finally:
         terrain.destroy_node()
         vision.destroy_node()
+
+
+def test_point_cloud_decode_or_tf_failure_releases_source_for_healthy_backup(ros_context):
+    """通过结构初检但缺 TF 的首选源必须冷却，不能继续压住可直接变换的备用源。"""
+    terrain = TerrainAnalyzer()
+    try:
+        bad = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="missing_tf_frame"),
+            [(1.0, 0.0, -0.3)],
+        )
+        terrain.cloud_callback(bad, "/camera/depth/points")
+        assert terrain.active_topic == "/camera/depth/points"
+        terrain.processing_callback()
+        assert terrain.active_topic is None
+        assert "/camera/depth/points" in terrain.source_cooldown_until
+
+        good = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="base_link"),
+            _flat_ground_points(),
+        )
+        terrain.cloud_callback(good, "/camera/depth/color/points")
+        assert terrain.active_topic == "/camera/depth/color/points"
+        terrain.processing_callback()
+        assert terrain.last_active_cloud_time is not None
+
+        # The quarantined high-rate topic cannot immediately reacquire ownership.
+        retry = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="missing_tf_frame"),
+            [(1.0, 0.0, -0.3)],
+        )
+        terrain.cloud_callback(retry, "/camera/depth/points")
+        assert terrain.active_topic == "/camera/depth/color/points"
+
+        # A driver can change layout after initially working, for example after reconnecting.
+        # The active source must be released immediately rather than holding ownership for 2 s.
+        corrupt_active = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="base_link"),
+            [(1.0, 0.0, -0.3)],
+        )
+        corrupt_active.fields = corrupt_active.fields[:2]
+        terrain.cloud_callback(corrupt_active, "/camera/depth/color/points")
+        assert terrain.active_topic is None
+        assert "/camera/depth/color/points" in terrain.source_cooldown_until
+
+        replacement = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="base_link"),
+            [(1.0, 0.0, -0.3)],
+        )
+        terrain.cloud_callback(replacement, "/camera/points")
+        assert terrain.active_topic == "/camera/points"
+    finally:
+        terrain.destroy_node()
+
+
+def test_ground_prior_expires_and_requires_consecutive_translation_conflicts(ros_context):
+    """地面先验既不能永久存在，也不能因单帧机身抖动立即被清除。"""
+    terrain = TerrainAnalyzer(
+        parameter_overrides=[
+            Parameter("ground_prior_max_age", value=0.20),
+            Parameter("ground_prior_max_consecutive_conflicts", value=2),
+        ]
+    )
+    try:
+        observed_at = terrain.get_clock().now()
+        clear = GeometryEstimate(
+            valid=True,
+            obstacle_type=CLEAR,
+            ground_height=-0.42,
+        )
+        terrain._update_ground_prior(clear, observed_at)
+        assert terrain.ground_height_prior == pytest.approx(-0.42)
+
+        conflict = GeometryEstimate(ground_reference_conflict=True)
+        terrain._update_ground_prior(conflict, observed_at)
+        assert terrain.ground_height_prior == pytest.approx(-0.42)
+        assert terrain.ground_prior_conflict_count == 1
+        terrain._update_ground_prior(conflict, observed_at)
+        assert terrain.ground_height_prior is None
+
+        terrain._update_ground_prior(clear, observed_at)
+        terrain._expire_ground_prior(observed_at + Duration(seconds=0.21))
+        assert terrain.ground_height_prior is None
+        assert terrain.ground_height_prior_time is None
+    finally:
+        terrain.destroy_node()
+
+
+def test_point_cloud_with_only_nonfinite_returns_cannot_hold_source_health(ros_context):
+    """结构合法但全为 NaN 的深度流没有几何信息，必须让有限点备用源接管。"""
+    terrain = TerrainAnalyzer()
+    try:
+        empty_depth = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="base_link"),
+            [(float("nan"), float("nan"), float("nan"))],
+        )
+        terrain.cloud_callback(empty_depth, "/camera/depth/points")
+        terrain.processing_callback()
+        assert terrain.active_topic is None
+        assert "/camera/depth/points" in terrain.source_cooldown_until
+
+        finite_backup = point_cloud2.create_cloud_xyz32(
+            Header(stamp=terrain.get_clock().now().to_msg(), frame_id="base_link"),
+            _flat_ground_points(),
+        )
+        terrain.cloud_callback(finite_backup, "/camera/depth/color/points")
+        terrain.processing_callback()
+        assert terrain.active_topic == "/camera/depth/color/points"
+        assert terrain.last_active_cloud_time is not None
+    finally:
+        terrain.destroy_node()
+
+
+def test_sensor_nodes_reset_source_state_before_arbitrating_after_clock_rewind(
+    ros_context,
+):
+    """旧 epoch 的 owner、watermark、pending、prior 和 cooldown 不能拒绝新首帧。"""
+    terrain = TerrainAnalyzer()
+    vision = VisionObstacleDetector()
+    try:
+        terrain_now = terrain.get_clock().now()
+        terrain.last_ros_time_ns = terrain_now.nanoseconds + 10_000_000_000
+        terrain.active_topic = "/old/cloud"
+        terrain.last_active_cloud_time = terrain_now
+        terrain.last_candidate_cloud_time = terrain_now
+        terrain.last_processed_stamp = ("old", 9, 0)
+        terrain.last_received_source_stamp = 9.0
+        terrain.latest_cloud = (object(), "/old/cloud")
+        terrain.source_cooldown_until["/camera/depth/color/points"] = (
+            terrain_now.nanoseconds * 1e-9 + 20.0
+        )
+        terrain.consecutive_geometry_failures = 4
+        terrain.ground_height_prior = -0.30
+        terrain.ground_height_prior_time = terrain_now
+        terrain.ground_prior_conflict_count = 2
+
+        new_cloud = _cloud(terrain, [(1.0, 0.0, -0.30)])
+        terrain.cloud_callback(new_cloud, "/camera/depth/color/points")
+        assert terrain.active_topic == "/camera/depth/color/points"
+        assert terrain.latest_cloud == (new_cloud, "/camera/depth/color/points")
+        assert not terrain.source_cooldown_until
+        assert terrain.consecutive_geometry_failures == 0
+        assert terrain.ground_height_prior is None
+        assert terrain.last_active_cloud_time is None
+
+        vision_now = vision.get_clock().now()
+        vision.last_ros_time_ns = vision_now.nanoseconds + 10_000_000_000
+        vision.active_topic = "/old/image"
+        vision.last_active_image_time = vision_now
+        vision.last_processed_stamp = ("/old/image", 9, 0)
+        vision.last_received_source_stamp = 9.0
+        vision.latest_frame = (object(), "/old/image")
+        vision.evidence_history.append(object())
+        vision.geometry_label = "OLD DEPTH LABEL"
+        vision.last_geometry_time = vision_now
+        vision.source_cooldown_until["/camera/color/image_raw"] = (
+            vision_now.nanoseconds * 1e-9 + 20.0
+        )
+
+        new_image = _image(vision)
+        vision.image_callback(new_image, "/camera/color/image_raw")
+        assert vision.active_topic == "/camera/color/image_raw"
+        assert vision.latest_frame == (new_image, "/camera/color/image_raw")
+        assert not vision.source_cooldown_until
+        assert not vision.evidence_history
+        assert vision.geometry_label == "WAITING FOR DEPTH"
+        assert vision.last_active_image_time is not None
+    finally:
+        vision.destroy_node()
+        terrain.destroy_node()
+
+
+def test_image_conversion_failure_cools_source_and_allows_backup_or_retry(ros_context):
+    """坏像素编码不能高频重抢；冷却后单相机可重试，期间健康备用源可接管。"""
+    vision = VisionObstacleDetector(
+        parameter_overrides=[Parameter("source_failure_cooldown", value=0.10)]
+    )
+    bad_source = "/camera/image_raw"
+    backup_source = "/camera/color/image_raw"
+    try:
+        bad = _image(vision, "32FC3")
+        vision.image_callback(bad, bad_source)
+        assert vision.active_topic == bad_source
+        vision.processing_callback()
+        assert vision.active_topic is None
+        assert bad_source in vision.source_cooldown_until
+
+        # The same high-rate broken topic remains quarantined instead of reacquiring immediately.
+        vision.image_callback(_image(vision, "32FC3"), bad_source)
+        assert vision.active_topic is None
+
+        # A one-camera installation retries after cooldown; a second failure starts a new cooldown.
+        vision.source_cooldown_until[bad_source] = (
+            vision.get_clock().now().nanoseconds * 1e-9 - 0.01
+        )
+        vision.image_callback(_image(vision, "32FC3"), bad_source)
+        assert vision.active_topic == bad_source
+        vision.processing_callback()
+        assert vision.active_topic is None
+
+        vision.image_callback(_image(vision), backup_source)
+        assert vision.active_topic == backup_source
+        vision.processing_callback()
+        assert vision.last_processed_stamp is not None
+    finally:
+        vision.destroy_node()
+
+
+def test_consecutive_unusable_cloud_geometry_releases_source_without_single_frame_flap(
+    ros_context,
+):
+    """有限 XYZ/TF 仍须看见前向几何；单帧抖动不切源，连续失败才让备用源接管。"""
+    terrain = TerrainAnalyzer(
+        parameter_overrides=[Parameter("source_geometry_failure_frames", value=2)]
+    )
+    preferred = "/camera/depth/points"
+    backup = "/camera/depth/color/points"
+    outside_roi = [(10.0, 0.0, -0.30)] * 40
+    try:
+        terrain.cloud_callback(_cloud(terrain, outside_roi), preferred)
+        terrain.processing_callback()
+        assert terrain.active_topic == preferred
+        assert terrain.consecutive_geometry_failures == 1
+
+        # One usable frame breaks the sequence, proving a single dropout cannot trigger failover.
+        terrain.cloud_callback(_cloud(terrain, _flat_ground_points()), preferred)
+        terrain.processing_callback()
+        assert terrain.active_topic == preferred
+        assert terrain.consecutive_geometry_failures == 0
+        assert terrain.last_active_cloud_time is not None
+
+        terrain.cloud_callback(_cloud(terrain, outside_roi), preferred)
+        terrain.processing_callback()
+        assert terrain.active_topic == preferred
+        assert terrain.consecutive_geometry_failures == 1
+        terrain.cloud_callback(_cloud(terrain, outside_roi), preferred)
+        terrain.processing_callback()
+        assert terrain.active_topic is None
+        assert preferred in terrain.source_cooldown_until
+
+        terrain.cloud_callback(_cloud(terrain, _flat_ground_points()), backup)
+        terrain.processing_callback()
+        assert terrain.active_topic == backup
+        assert terrain.last_active_cloud_time is not None
+        assert terrain.consecutive_geometry_failures == 0
+    finally:
+        terrain.destroy_node()
+
+
+def test_fusion_clock_rewind_clears_both_sensor_epochs(ros_context):
+    """回拨后旧图像、旧点云和接收时间都不能与新 epoch 的首帧配对。"""
+    fusion = PerceptionFusion()
+    try:
+        cloud = TerrainFeatures()
+        camera = VisionObstacle()
+        fusion.terrain_queue.append(cloud)
+        fusion.vision_queue.append(camera)
+        fusion.terrain_receive_times[id(cloud)] = 10.0
+        fusion.last_clock_seconds = 10.0
+
+        assert fusion._observe_ros_clock(9.0) == 9.0
+        assert not fusion.terrain_queue
+        assert not fusion.vision_queue
+        assert not fusion.terrain_receive_times
+    finally:
+        fusion.destroy_node()
+
+
+def test_fusion_rejects_zero_stamped_typed_inputs_before_queueing(ros_context):
+    """外部替换感知节点时，零时间戳数据不能进入同步或纯点云 fallback 队列。"""
+    fusion = PerceptionFusion()
+    try:
+        fusion.terrain_callback(TerrainFeatures())
+        fusion.vision_callback(VisionObstacle())
+        assert not fusion.terrain_queue
+        assert not fusion.vision_queue
+        assert not fusion.terrain_receive_times
+    finally:
+        fusion.destroy_node()

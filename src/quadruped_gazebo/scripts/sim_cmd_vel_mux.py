@@ -4,10 +4,14 @@
 核心算法继续把最终安全速度发布到标准 ``/cmd_vel``；键盘测试单独发布到
 ``/cmd_vel_teleop``，Xbox 节点发布到 ``/cmd_vel_joy``。收到手动命令后的短时间内，最新的
 人工输入拥有最高优先级，随后才恢复算法输入。最终命令写入仅供 Gazebo bridge 使用的
-``/cmd_vel_gazebo``，从而避免 Collision Monitor 的周期零速度覆盖键盘的单次 j/l 指令。
+``/cmd_vel_gazebo``，从而避免人工候选与导航速度门同时竞争 Gazebo 的单一速度入口。
 
 ``/navigation/autonomy_stop`` 只锁住自动导航分支。结束自主 launch 后，若没有人工输入，
 最终输出立即归零；键盘或手柄继续发布时仍可人工接管，不需要重新启动自主功能。
+
+``/teleop/emergency_stop`` 是 Xbox B 键锁存的仿真全局软件停车请求：为 true 时人工和自主
+候选都被清空并持续输出零；Start 安全解锁后仍须收到一条新命令才会再次运动。它仅用于验证
+ROS 仲裁合同，不能替代真机的实体急停、驱动失能或底层看门狗。
 
 该节点只安装在 quadruped_gazebo，不属于真机速度仲裁或运动控制实现。
 """
@@ -37,8 +41,11 @@ def select_command(
     manual_timeout: float,
     autonomous_timeout: float,
     autonomy_stop: bool = False,
+    emergency_stop: bool = False,
 ) -> Twist:
-    """按“新鲜人工 > 自动导航锁 > 新鲜自动导航 > 零速度”选择输出。"""
+    """按“全局软件停车 > 新鲜人工 > 自主锁 > 新鲜自主 > 零”选择输出。"""
+    if emergency_stop:
+        return Twist()
     if manual_stamp is not None and 0.0 <= now - manual_stamp <= manual_timeout:
         return manual
     if autonomy_stop:
@@ -55,11 +62,20 @@ class SimCmdVelMux(Node):
     """使用单调墙钟实现仿真速度优先级和断流停车。"""
 
     def __init__(self) -> None:
+        """Create the sole Gazebo Twist output and its independent safety gates.
+
+        ``autonomy_stop`` suppresses only the autonomous candidate so an operator can
+        take over.  The transient-local Xbox software stop is different: it clears and
+        blocks every Twist candidate until explicitly released.  Pose-based traversal
+        is guarded separately by the simulation Action server because it bypasses this
+        velocity mux entirely.
+        """
         super().__init__("sim_cmd_vel_mux")
         self.declare_parameter("autonomous_topic", "/cmd_vel")
         self.declare_parameter("manual_topic", "/cmd_vel_teleop")
         self.declare_parameter("joystick_topic", "/cmd_vel_joy")
         self.declare_parameter("joystick_active_topic", "/teleop/active")
+        self.declare_parameter("emergency_stop_topic", "/teleop/emergency_stop")
         self.declare_parameter("output_topic", "/cmd_vel_gazebo")
         self.declare_parameter("manual_timeout", 0.7)
         self.declare_parameter("autonomous_timeout", 0.5)
@@ -81,6 +97,7 @@ class SimCmdVelMux(Node):
         self.joystick_active = False
         self.autonomous_stamp = None
         self.autonomy_stop = False
+        self.emergency_stop = False
         output_topic = str(self.get_parameter("output_topic").value)
         self.publisher = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(
@@ -102,6 +119,12 @@ class SimCmdVelMux(Node):
             Bool,
             str(self.get_parameter("joystick_active_topic").value),
             self._joystick_active_callback,
+            state_qos,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("emergency_stop_topic").value),
+            self._emergency_stop_callback,
             state_qos,
         )
         self.create_subscription(
@@ -158,6 +181,20 @@ class SimCmdVelMux(Node):
             self.autonomous_stamp = None
             self.publisher.publish(Twist())
 
+    def _emergency_stop_callback(self, msg: Bool) -> None:
+        """锁存仿真全局软件停车，并在触发边沿原子清除全部旧速度候选。"""
+        self.emergency_stop = bool(msg.data)
+        if not self.emergency_stop:
+            return
+        # 清缓存保证 Start 解锁后不会复用急停前仍处于 timeout 窗口内的非零 Twist。
+        self.manual = Twist()
+        self.joystick = Twist()
+        self.autonomous = Twist()
+        self.manual_stamp = None
+        self.joystick_stamp = None
+        self.autonomous_stamp = None
+        self.publisher.publish(Twist())
+
     def _publish(self) -> None:
         """按优先级发布一个唯一 Gazebo 速度源，输入断流则持续输出零速度。"""
         # 键盘与手柄都是人工候选，采用最后收到的一路。人工候选位于自动导航锁之前，
@@ -180,6 +217,7 @@ class SimCmdVelMux(Node):
                 self.manual_timeout,
                 self.autonomous_timeout,
                 self.autonomy_stop,
+                self.emergency_stop,
             )
         )
 

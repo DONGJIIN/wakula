@@ -8,6 +8,7 @@ from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObsta
 from quadruped_perception.perception_fusion import (
     find_synchronized_pair,
     fuse_observations,
+    ros_clock_moved_backward,
     terrain_fallback_ready,
     terrain_observation_valid,
     vision_observation_valid,
@@ -56,16 +57,16 @@ def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
     assert result.lateral_offset == cloud.lateral_offset
 
 
-def test_visual_bar_or_pole_only_refines_compatible_positive_geometry():
-    """横杆需点云净空，立柱需点云窄宽度，二者都不能仅靠视觉细分。"""
-    camera = vision(VisionObstacle.HEIGHT_BAR, 0.9)
-    compatible = terrain()
-    compatible.clearance_height = 0.12
-    result = fuse_observations(compatible, camera, 0.02, 0.55)
-    assert result.obstacle_type == FusedObstacle.BAR
-    assert result.vision_confirmed
+def test_uncalibrated_visual_bar_or_pole_cannot_refine_step_geometry():
+    """No CameraInfo/projection means BAR/POLE pixels cannot rewrite a STEP.
 
+    Clearance and width checks alone are deliberately insufficient: a synchronized frame may
+    contain a forward step plus a different bar/pole inside the broad 2-D corridor. Metric
+    terrain classification remains authoritative until calibrated point projection exists.
+    """
+    camera = vision(VisionObstacle.HEIGHT_BAR, 0.9)
     ordinary_step = terrain()
+    ordinary_step.clearance_height = 0.20
     result = fuse_observations(ordinary_step, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.STEP
     assert result.confidence == ordinary_step.confidence
@@ -73,18 +74,32 @@ def test_visual_bar_or_pole_only_refines_compatible_positive_geometry():
 
     pole_camera = vision(VisionObstacle.POLES, 0.9)
     narrow_step = terrain()
-    narrow_step.width = 0.20
+    narrow_step.width = 0.10
     result = fuse_observations(narrow_step, pole_camera, 0.02, 0.55)
-    assert result.obstacle_type == FusedObstacle.POLE
-    assert result.vision_confirmed
-
-    wide_step = terrain()
-    wide_step.width = 0.26
-    result = fuse_observations(wide_step, pole_camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.STEP
-    assert result.confidence == wide_step.confidence
+    assert result.confidence == narrow_step.confidence
     assert not result.vision_confirmed
 
+
+def test_same_class_bar_and_pole_visual_evidence_is_confirmed_normally():
+    """Exact class agreement boosts confidence without changing metric geometry."""
+    for terrain_type, vision_type, fused_type in (
+        (TerrainFeatures.BAR, VisionObstacle.HEIGHT_BAR, FusedObstacle.BAR),
+        (TerrainFeatures.POLE, VisionObstacle.POLES, FusedObstacle.POLE),
+    ):
+        cloud = terrain(terrain_type)
+        result = fuse_observations(
+            cloud, vision(vision_type, 0.9), 0.02, 0.55
+        )
+        assert result.obstacle_type == fused_type
+        assert result.geometry_confirmed
+        assert result.vision_confirmed
+        assert result.confidence > cloud.confidence
+
+
+def test_invalid_geometry_cannot_be_replaced_by_visual_classification():
+    """Even a strong visual candidate cannot provide missing authoritative geometry."""
+    camera = vision(VisionObstacle.HEIGHT_BAR, 0.9)
     invalid = TerrainFeatures(valid=False, obstacle_type=TerrainFeatures.UNKNOWN)
     result = fuse_observations(invalid, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.UNKNOWN
@@ -143,6 +158,15 @@ def test_pairing_rejects_zero_or_out_of_window_timestamps():
     cloud = _stamp(terrain(), 20)
     image = _stamp(VisionObstacle(), 21)
     assert find_synchronized_pair([cloud], [image], 0.10) is None
+
+
+def test_ros_clock_rewind_detection_is_epoch_based_and_finite():
+    """bag/Gazebo 回拨必须开始新融合 epoch，正常停钟或前进不应误清队列。"""
+    assert not ros_clock_moved_backward(None, 10.0)
+    assert not ros_clock_moved_backward(10.0, 10.0)
+    assert not ros_clock_moved_backward(10.0, 10.1)
+    assert ros_clock_moved_backward(10.0, 9.9)
+    assert ros_clock_moved_backward(10.0, float("nan"))
 
 
 def test_fusion_rejects_invalid_numeric_fields_and_visual_boxes():

@@ -19,11 +19,20 @@ from quadruped_planning.parameter_validation import (
     SPEED_GATE_PARAMETER_NAMES,
     validate_speed_gate_parameters,
 )
+from quadruped_planning.time_utils import (
+    ros_age_is_fresh,
+    ros_clock_moved_backward,
+)
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32
+
+
+DIFFERENTIAL_UNUSED_AXIS_TOLERANCE = 1e-6
+DEFAULT_SCAN_MIN_VALID_RATIO = 0.80
+DEFAULT_SCAN_MAX_INVALID_GAP_ANGLE = 0.20
 
 
 def twist_components_are_finite(command: Twist) -> bool:
@@ -47,6 +56,36 @@ def twist_components_are_finite(command: Twist) -> bool:
     )
 
 
+def twist_matches_differential_drive(
+    command: Twist,
+    unused_axis_tolerance: float = DIFFERENTIAL_UNUSED_AXIS_TOLERANCE,
+) -> bool:
+    """Accept only the planar differential-drive contract used by this stack.
+
+    Nav2 is configured with ``linear.y == 0`` and the hardware adapter consumes only
+    forward velocity plus yaw.  Passing a lateral, vertical, roll or pitch component
+    through a front/rear laser sector would check the wrong direction.  Tiny serializer
+    noise is tolerated but sanitized to zero by :func:`gated_twist`; any material value
+    rejects the complete command.
+    """
+    if (
+        not twist_components_are_finite(command)
+        or not isfinite(float(unused_axis_tolerance))
+        or float(unused_axis_tolerance) < 0.0
+    ):
+        return False
+    tolerance = float(unused_axis_tolerance)
+    return all(
+        abs(float(value)) <= tolerance
+        for value in (
+            command.linear.y,
+            command.linear.z,
+            command.angular.x,
+            command.angular.y,
+        )
+    )
+
+
 def gated_twist(
     source: Twist,
     limit: float,
@@ -55,6 +94,7 @@ def gated_twist(
     navigation_healthy: bool = True,
     health_fresh: bool = True,
     external_stop: bool = False,
+    autonomy_authorized: bool = True,
 ) -> Twist:
     """仅在命令、地形评估和导航健康状态均有效时缩放 Twist。"""
     output = Twist()
@@ -65,17 +105,14 @@ def gated_twist(
         or not navigation_healthy
         or not health_fresh
         or external_stop
-        or not twist_components_are_finite(source)
+        or not autonomy_authorized
+        or not twist_matches_differential_drive(source)
         or not isfinite(limit)
         or limit <= 0.0
     ):
         return output
     safe_limit = min(1.0, limit)
     output.linear.x = source.linear.x * safe_limit
-    output.linear.y = source.linear.y * safe_limit
-    output.linear.z = source.linear.z * safe_limit
-    output.angular.x = source.angular.x * safe_limit
-    output.angular.y = source.angular.y * safe_limit
     output.angular.z = source.angular.z * safe_limit
     return output
 
@@ -89,7 +126,7 @@ def alignment_twist(source: Twist, angular_limit: float) -> Twist:
     """
     output = Twist()
     if (
-        not twist_components_are_finite(source)
+        not twist_matches_differential_drive(source)
         or not isfinite(angular_limit)
         or angular_limit <= 0.0
     ):
@@ -110,7 +147,7 @@ def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.12) -> b
     ``alignment_twist``，但输出会强制丢弃全部平移，只保留有界 yaw。后续仍经过导航
     健康、超时、外部停车和 360° 雷达急停，绝不允许借此继续靠近障碍。
     """
-    if not twist_components_are_finite(source) or not isfinite(linear_tolerance):
+    if not twist_matches_differential_drive(source) or not isfinite(linear_tolerance):
         return False
     tolerance = max(0.0, float(linear_tolerance))
     return bool(
@@ -129,7 +166,7 @@ def has_finite_yaw_request(source: Twist, minimum_magnitude: float = 1e-3) -> bo
     清空所有平移分量，仅输出受限的原地转向，避免借恢复状态继续向障碍推进。
     """
     if (
-        not twist_components_are_finite(source)
+        not twist_matches_differential_drive(source)
         or not isfinite(minimum_magnitude)
     ):
         return False
@@ -142,36 +179,152 @@ def scan_allows_command(
     command: Twist,
     stop_distance: float,
     sector_half_angle: float,
+    minimum_valid_ratio: float = DEFAULT_SCAN_MIN_VALID_RATIO,
+    maximum_invalid_gap_angle: float = DEFAULT_SCAN_MAX_INVALID_GAP_ANGLE,
 ) -> bool:
-    """判断命令方向的极近距离扇区是否仍有制动空间。
+    """Fail closed unless the complete swept sector has trustworthy ranges.
 
-    前进只检查正前方、后退只检查正后方；原地旋转检查整圈，因为任意方向过近的物体都
-    可能被机身扫到。无效量程被忽略，但一个有效样本低于阈值就立即拒绝命令。这里使用
-    ``LaserScan`` 自带角度定义，不假设固定 720 点或固定雷达型号。
+    A pure straight command checks its front or rear sector.  Any material yaw request,
+    including a forward arc, checks the whole body sweep and therefore requires almost
+    360-degree scan coverage.  A finite range is valid only inside the advertised
+    ``[range_min, range_max]`` interval; standard positive ``Inf`` is also valid
+    LaserScan evidence for "no return within range".  NaN, negative Inf and finite
+    values above range_max remain invalid, so one far ray cannot hide a broken sector.
+    Coverage, valid ratio and the longest angular hole are all checked before clearance.
     """
-    if scan is None or not scan.ranges or not twist_components_are_finite(command):
+    if not twist_matches_differential_drive(command):
         return False
     linear = float(command.linear.x)
     angular = float(command.angular.z)
     if abs(linear) < 1e-6 and abs(angular) < 1e-6:
         return True
-    threshold = max(0.05, float(stop_distance))
-    half_angle = min(pi, max(0.05, float(sector_half_angle)))
-    check_all = abs(linear) < 1e-6 and abs(angular) >= 1e-6
+    if scan is None or not scan.ranges:
+        return False
+    metadata = (
+        scan.angle_min,
+        scan.angle_max,
+        scan.angle_increment,
+        scan.range_min,
+        scan.range_max,
+        stop_distance,
+        sector_half_angle,
+        minimum_valid_ratio,
+        maximum_invalid_gap_angle,
+    )
+    if not all(isfinite(float(value)) for value in metadata):
+        return False
+    increment = float(scan.angle_increment)
+    range_min = float(scan.range_min)
+    range_max = float(scan.range_max)
+    threshold = float(stop_distance)
+    half_angle = float(sector_half_angle)
+    minimum_ratio = float(minimum_valid_ratio)
+    maximum_gap = float(maximum_invalid_gap_angle)
+    if (
+        increment <= 0.0
+        or range_min < 0.0
+        or range_max <= range_min
+        or threshold <= 0.0
+        or not 0.0 < half_angle <= pi
+        or not 0.0 < minimum_ratio <= 1.0
+        or not 0.0 < maximum_gap <= 0.35
+        # Even nominally valid adjacent rays leave an unobserved angular interval.
+        # A scan coarser than the permitted hole cannot prove continuous clearance.
+        or increment > maximum_gap
+    ):
+        return False
+
+    sample_count = len(scan.ranges)
+    measured_last_angle = float(scan.angle_min) + (sample_count - 1) * increment
+    declared_span = float(scan.angle_max) - float(scan.angle_min)
+    metadata_tolerance = max(1e-6, 0.51 * increment)
+    if (
+        declared_span < 0.0
+        or abs(measured_last_angle - float(scan.angle_max)) > metadata_tolerance
+        or declared_span > 2.0 * pi + metadata_tolerance
+    ):
+        return False
+
+    # Any yaw sweeps the body sideways.  Until footprint-aware arc clearance exists,
+    # conservatively use the full scan instead of checking only the translation sector.
+    check_all = abs(angular) >= 1e-4
     target_angle = 0.0 if linear >= 0.0 else pi
-    valid_samples = 0
+    selected = []
     for index, measured_range in enumerate(scan.ranges):
         distance = float(measured_range)
-        if not isfinite(distance) or distance < float(scan.range_min):
-            continue
         angle = float(scan.angle_min) + index * float(scan.angle_increment)
-        # 把相对目标方向的角差折叠到 [-pi, pi]，正确处理后方跨越 ±pi 的扇区。
         angle_error = (angle - target_angle + pi) % (2.0 * pi) - pi
         if check_all or abs(angle_error) <= half_angle:
-            valid_samples += 1
-            if distance <= threshold:
-                return False
-    return valid_samples > 0
+            valid = bool(
+                (isfinite(distance) and range_min <= distance <= range_max)
+                or (distance == float("inf"))
+            )
+            selected.append((angle_error, valid, distance))
+
+    if check_all:
+        # A 270-degree scanner cannot prove that rotating the body is clear.  The blind
+        # arc itself counts as an invalid angular gap and must fit the same conservative
+        # bound as a run of invalid rays.
+        uncovered_angle = max(0.0, 2.0 * pi - declared_span)
+        if uncovered_angle > maximum_gap:
+            return False
+        # A scan that includes both -pi and +pi duplicates one direction; remove one
+        # endpoint before ratio/circular-run accounting.
+        if declared_span >= 2.0 * pi - metadata_tolerance and len(selected) > 1:
+            selected = selected[:-1]
+        ordered = selected
+    else:
+        # Sort wrapped rear-sector samples into continuous [-half_angle, +half_angle]
+        # order, then require both sector edges to be represented by scan metadata.
+        ordered = sorted(selected, key=lambda sample: sample[0])
+        if (
+            not ordered
+            or ordered[0][0] > -half_angle + increment
+            or ordered[-1][0] < half_angle - increment
+        ):
+            return False
+
+    if not ordered:
+        return False
+    validity = [sample[1] for sample in ordered]
+    valid_count = sum(validity)
+    if valid_count / len(validity) < minimum_ratio:
+        return False
+
+    def longest_invalid_run(values, circular=False):
+        run = longest = 0
+        sequence = values + values if circular else values
+        for valid in sequence:
+            run = 0 if valid else run + 1
+            longest = max(longest, run)
+            if circular and longest >= len(values):
+                return len(values)
+        return min(longest, len(values))
+
+    invalid_gap = longest_invalid_run(validity, circular=check_all) * increment
+    if check_all:
+        uncovered_angle = max(0.0, 2.0 * pi - declared_span)
+        leading_invalid = 0
+        for valid in validity:
+            if valid:
+                break
+            leading_invalid += 1
+        trailing_invalid = 0
+        for valid in reversed(validity):
+            if valid:
+                break
+            trailing_invalid += 1
+        # End and start rays border the physical blind arc.  Their invalid runs and the
+        # unobserved angle form one continuous hole, not three independent smaller gaps.
+        boundary_gap = (
+            leading_invalid + trailing_invalid
+        ) * increment + uncovered_angle
+        invalid_gap = max(invalid_gap, uncovered_angle, boundary_gap)
+    if invalid_gap > maximum_gap:
+        return False
+    return not any(
+        valid and distance <= threshold for _angle, valid, distance in ordered
+    )
 
 
 class NavigationSpeedGate(Node):
@@ -195,6 +348,13 @@ class NavigationSpeedGate(Node):
         self.declare_parameter("scan_timeout", 0.5)
         self.declare_parameter("emergency_stop_distance", 0.22)
         self.declare_parameter("emergency_sector_half_angle", 0.60)
+        self.declare_parameter(
+            "emergency_scan_min_valid_ratio", DEFAULT_SCAN_MIN_VALID_RATIO
+        )
+        self.declare_parameter(
+            "emergency_scan_max_invalid_gap_angle",
+            DEFAULT_SCAN_MAX_INVALID_GAP_ANGLE,
+        )
         self.declare_parameter("require_emergency_scan", True)
         self.declare_parameter("alignment_guidance_timeout", 0.8)
         self.declare_parameter("alignment_max_angular_speed", 0.30)
@@ -202,6 +362,9 @@ class NavigationSpeedGate(Node):
         # /navigation/rotation_recovery 由独立自主任务以 4 Hz 刷新；若进程崩溃，
         # 0.8 秒后许可自动失效，不能留下永久旋转旁路。
         self.declare_parameter("rotation_recovery_timeout", 0.8)
+        # 独立自主任务只发布许可心跳，不发送速度。任务进程崩溃、卡死或 Ctrl-C 后，
+        # 最终速度门在该窗口内自动失效；手柄/键盘使用独立候选话题，不经过此自主门。
+        self.declare_parameter("autonomy_lease_timeout", 0.8)
 
         validate_speed_gate_parameters(
             {name: self.get_parameter(name).value for name in SPEED_GATE_PARAMETER_NAMES}
@@ -251,8 +414,17 @@ class NavigationSpeedGate(Node):
                 float(self.get_parameter("emergency_sector_half_angle").value),
             ),
         )
+        self.emergency_scan_min_valid_ratio = float(
+            self.get_parameter("emergency_scan_min_valid_ratio").value
+        )
+        self.emergency_scan_max_invalid_gap_angle = float(
+            self.get_parameter("emergency_scan_max_invalid_gap_angle").value
+        )
         self.require_emergency_scan = bool(
             self.get_parameter("require_emergency_scan").value
+        )
+        self.autonomy_lease_timeout = float(
+            self.get_parameter("autonomy_lease_timeout").value
         )
         configured_limit = float(self.get_parameter("default_speed_limit").value)
         self.speed_limit = (
@@ -262,8 +434,10 @@ class NavigationSpeedGate(Node):
         )
         self.latest_cmd = Twist()
         self.external_stop = False
-        self.last_cmd_time = self.get_clock().now()
-        self.last_assessment_time = self.get_clock().now()
+        # 启动阶段没有任何输入可被视为新鲜。使用 None 而不是构造时刻，避免在首个
+        # command/assessment 到来前出现一个仅由默认值决定的伪心跳窗口。
+        self.last_cmd_time = None
+        self.last_assessment_time = None
         self.navigation_healthy = not self.require_navigation_health
         self.last_health_time = None
         self.latest_scan = None
@@ -272,6 +446,13 @@ class NavigationSpeedGate(Node):
         self.last_guidance_time = None
         self.rotation_recovery_requested = False
         self.last_rotation_recovery_time = None
+        # UNOWNED: 自主任务从未取得或已明确释放，普通 RViz/Nav2 Goal 可以工作。
+        # ACTIVE: 自主任务拥有 Nav2，必须持续刷新 true。
+        # EXPIRED: owner 消失，锁存停车。Bool 没有 session/generation，因此迟到
+        # true/false 都无法证明旧 owner 已停止；只有重启本速度门/核心栈才回到 UNOWNED。
+        self.autonomy_lease_state = "UNOWNED"
+        self.last_autonomy_lease_time = None
+        self.last_clock_time = self.get_clock().now()
 
         self.pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, input_topic, self.cmd_callback, 10)
@@ -297,6 +478,14 @@ class NavigationSpeedGate(Node):
             "/navigation/autonomy_stop",
             self.autonomy_stop_callback,
             stop_qos,
+        )
+        # Lease 必须是 volatile 心跳：不能让前一次已退出任务的 transient-local true
+        # 在下一次 SLAM 启动后继续授权。只有新进程持续刷新 true 才能放行 Nav2 分支。
+        self.create_subscription(
+            Bool,
+            "/navigation/autonomy_lease",
+            self.autonomy_lease_callback,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
         )
         self.create_subscription(
             TraversalGuidance,
@@ -330,8 +519,51 @@ class NavigationSpeedGate(Node):
         self.last_health_time = self.get_clock().now()
 
     def autonomy_stop_callback(self, msg: Bool) -> None:
-        """只锁止 Nav2 自主速度链；人工分支由独立所有权与硬件安全门管理。"""
-        self.external_stop = bool(msg.data)
+        """锁止/解锁 Nav2 自主速度链，并在所有权边界清除旧 Twist。
+
+        ``true`` 到达时旧 Nav2 目标可能还在 cancel；``true -> false`` 只表示任务即将
+        提交一个新目标。两种边界都清掉缓存，确保解锁后必须收到新目标产生的新 Twist，
+        不能重放交接前的最后一条速度。人工话题不经过本节点，因此不受此锁影响。
+        """
+        requested_stop = bool(msg.data)
+        if requested_stop or requested_stop != self.external_stop:
+            self._clear_motion_intent()
+        self.external_stop = requested_stop
+
+    def autonomy_lease_callback(self, msg: Bool) -> None:
+        """接收自主任务所有权心跳，区分普通 Nav2 与失联任务。
+
+        没有任务 owner 时无需心跳，因此核心 SLAM 单独启动仍可执行 RViz/Nav2 Goal。
+        ``true`` 首次取得 owner。只有 ACTIVE 且心跳仍新鲜时收到的
+        ``false`` 才是可信的清洁释放（正常 Ctrl-C 路径）。owner 过期后 Bool 中没有
+        session/generation 可供区分迟到数据，所以 EXPIRED 中的 true/false 都必须忽略，
+        锁存直到 ``navigation_speed_gate``/核心栈重启。
+        """
+        active = bool(msg.data)
+        previous = self.autonomy_lease_state
+        now = self.get_clock().now()
+        if not active:
+            if previous == "EXPIRED":
+                return
+            if previous == "ACTIVE" and not ros_age_is_fresh(
+                now, self.last_autonomy_lease_time, self.autonomy_lease_timeout
+            ):
+                self.autonomy_lease_state = "EXPIRED"
+                self._clear_motion_intent()
+                self.last_autonomy_lease_time = None
+                return
+            if previous == "ACTIVE":
+                self._clear_motion_intent()
+            self.autonomy_lease_state = "UNOWNED"
+            self.last_autonomy_lease_time = None
+            return
+        if previous == "UNOWNED":
+            self._clear_motion_intent()
+            self.autonomy_lease_state = "ACTIVE"
+        elif previous == "EXPIRED":
+            # Delayed packets from the failed owner are not a recovery handshake.
+            return
+        self.last_autonomy_lease_time = now
 
     def scan_callback(self, msg: LaserScan) -> None:
         """保存最新扫描和接收时刻；具体扇区由当前运动方向决定。"""
@@ -358,55 +590,82 @@ class NavigationSpeedGate(Node):
         self.rotation_recovery_requested = bool(msg.data)
         self.last_rotation_recovery_time = self.get_clock().now()
 
+    def _clear_motion_intent(self) -> None:
+        """Drop every cached Nav2 intent that could produce motion after re-authorization."""
+        self.latest_cmd = Twist()
+        self.last_cmd_time = None
+        self.alignment_requested = False
+        self.last_guidance_time = None
+        self.rotation_recovery_requested = False
+        self.last_rotation_recovery_time = None
+
+    def _reset_after_clock_rewind(self, now) -> None:
+        """Invalidate all state whose freshness belonged to the previous ROS epoch."""
+        self._clear_motion_intent()
+        self.last_assessment_time = None
+        self.navigation_healthy = not self.require_navigation_health
+        self.last_health_time = None
+        self.latest_scan = None
+        self.last_scan_time = None
+        if self.autonomy_lease_state != "UNOWNED":
+            self.autonomy_lease_state = "EXPIRED"
+        else:
+            self.autonomy_lease_state = "UNOWNED"
+        self.last_autonomy_lease_time = None
+        self.last_clock_time = now
+        self.get_logger().warning(
+            "ROS clock moved backward; cleared velocity-gate heartbeats and cached Twist"
+        )
+
     def publish_safe_command(self) -> None:
         """依据本机 ROS 时钟计算心跳年龄并始终发布一条明确命令。"""
         now = self.get_clock().now()
-        command_age = (now - self.last_cmd_time).nanoseconds / 1e9
-        assessment_age = (now - self.last_assessment_time).nanoseconds / 1e9
-        health_age = (
-            float("inf")
-            if self.last_health_time is None
-            else (now - self.last_health_time).nanoseconds / 1e9
+        if ros_clock_moved_backward(now, self.last_clock_time):
+            self._reset_after_clock_rewind(now)
+            self.pub.publish(Twist())
+            return
+        self.last_clock_time = now
+        command_fresh = ros_age_is_fresh(now, self.last_cmd_time, self.command_timeout)
+        assessment_fresh = ros_age_is_fresh(
+            now, self.last_assessment_time, self.assessment_timeout
         )
-        scan_age = (
-            float("inf")
-            if self.last_scan_time is None
-            else (now - self.last_scan_time).nanoseconds / 1e9
+        health_fresh = ros_age_is_fresh(now, self.last_health_time, self.health_timeout)
+        scan_fresh = ros_age_is_fresh(now, self.last_scan_time, self.scan_timeout)
+        alignment_fresh = ros_age_is_fresh(
+            now,
+            self.last_guidance_time,
+            max(0.1, float(self.get_parameter("alignment_guidance_timeout").value)),
         )
-        guidance_age = (
-            float("inf")
-            if self.last_guidance_time is None
-            else (now - self.last_guidance_time).nanoseconds / 1e9
+        rotation_recovery_fresh = ros_age_is_fresh(
+            now,
+            self.last_rotation_recovery_time,
+            max(0.1, float(self.get_parameter("rotation_recovery_timeout").value)),
         )
-        rotation_recovery_age = (
-            float("inf")
-            if self.last_rotation_recovery_time is None
-            else (now - self.last_rotation_recovery_time).nanoseconds / 1e9
+        lease_fresh = ros_age_is_fresh(
+            now, self.last_autonomy_lease_time, self.autonomy_lease_timeout
         )
+        if self.autonomy_lease_state == "ACTIVE" and not lease_fresh:
+            self.autonomy_lease_state = "EXPIRED"
+            self._clear_motion_intent()
+        autonomy_authorized = self.autonomy_lease_state in ("UNOWNED", "ACTIVE")
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
             self.latest_cmd,
             self.speed_limit,
-            command_age <= self.command_timeout,
-            assessment_age <= self.assessment_timeout,
+            command_fresh,
+            assessment_fresh,
             self.navigation_healthy,
             not self.require_navigation_health
-            or health_age <= self.health_timeout,
+            or health_fresh,
             self.external_stop,
+            autonomy_authorized,
         )
         # 硬停车只负责禁止继续接近障碍；明确 ALIGN 或 Nav2 的纯原地转向仍保留一个
         # 有界 yaw。后者用于从“未知但很近的轮廓”转身换视角，否则分类不稳定时会形成
         # STOP→无法旋转→永远无法重新分类的闭环。健康、超时、外部停车仍具有否决权。
-        alignment_fresh = guidance_age <= max(
-            0.1, float(self.get_parameter("alignment_guidance_timeout").value)
-        )
         safe_rotation_requested = is_pure_rotation_request(
             self.latest_cmd,
             float(self.get_parameter("stopped_rotation_linear_tolerance").value),
-        )
-        rotation_recovery_fresh = rotation_recovery_age <= max(
-            0.1,
-            float(self.get_parameter("rotation_recovery_timeout").value),
         )
         rotation_recovery_requested = bool(
             self.rotation_recovery_requested
@@ -420,11 +679,12 @@ class NavigationSpeedGate(Node):
                 or safe_rotation_requested
                 or rotation_recovery_requested
             )
-            and command_age <= self.command_timeout
-            and assessment_age <= self.assessment_timeout
+            and command_fresh
+            and assessment_fresh
             and self.navigation_healthy
-            and (not self.require_navigation_health or health_age <= self.health_timeout)
+            and (not self.require_navigation_health or health_fresh)
             and not self.external_stop
+            and autonomy_authorized
         ):
             output = alignment_twist(
                 self.latest_cmd,
@@ -433,12 +693,14 @@ class NavigationSpeedGate(Node):
         # 导航健康监控负责完整的 scan/odom/TF 校验；这里再保留一个局部、可解释的最终
         # 防撞条件。扫描断流或命令方向 22 cm 内有物体时，只把本周期输出置零。
         if self.require_emergency_scan and (
-            scan_age > self.scan_timeout
+            not scan_fresh
             or not scan_allows_command(
                 self.latest_scan,
                 output,
                 self.emergency_stop_distance,
                 self.emergency_sector_half_angle,
+                self.emergency_scan_min_valid_ratio,
+                self.emergency_scan_max_invalid_gap_angle,
             )
         ):
             output = Twist()

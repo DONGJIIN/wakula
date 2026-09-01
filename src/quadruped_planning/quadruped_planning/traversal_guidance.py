@@ -21,10 +21,11 @@ from geometry_msgs.msg import PoseStamped
 from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
 
 from quadruped_planning.parameter_validation import validate_guidance_parameters
+from quadruped_planning.time_utils import ros_age_is_fresh, ros_clock_moved_backward
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Header, String
 
 
 TRAVERSAL_TYPES = {
@@ -78,6 +79,7 @@ class GuidanceDecision:
 
     phase: int = TraversalGuidance.PHASE_INVALID
     obstacle_type: int = TraversalGuidance.OBSTACLE_UNKNOWN
+    semantic_id: str = ""
     perception_valid: bool = False
     traversal_required: bool = False
     ready_for_handoff: bool = False
@@ -113,6 +115,7 @@ class GuidanceStabilizer:
         approach_speed_limit: float,
         alignment_speed_limit: float,
     ):
+        """冻结米制入口阈值，并以 fail-safe 边界初始化无历史状态。"""
         self.handoff_distance = max(0.01, float(handoff_distance))
         self.alignment_tolerance = max(0.001, float(alignment_tolerance))
         self.approach_start_distance = max(
@@ -151,6 +154,10 @@ class GuidanceStabilizer:
         same_target = (
             self.current.perception_valid
             and self.current.traversal_required
+            # A confirmed English ID is an atomic identity boundary.  Never smooth two
+            # interleaved structures merely because their coarse geometry and range are
+            # similar; an empty/unconfirmed ID also cannot inherit a previous one.
+            and self.current.semantic_id == candidate.semantic_id
             # 同一入口的点云可能在台阶、坑沿、墙面之间抖动。距离/横偏连续时先保持
             # 当前类别，只有新类别连续出现才切换，避免 READY 计数被每帧清零。
             and abs(self.current.distance - candidate.distance) <= 0.65
@@ -319,6 +326,7 @@ def compute_guidance(
         return GuidanceDecision(
             phase=TraversalGuidance.PHASE_CLEAR,
             obstacle_type=obstacle_type,
+            semantic_id=str(safety.semantic_id),
             perception_valid=True,
             confidence=float(safety.confidence),
             distance=float(safety.distance),
@@ -367,6 +375,7 @@ def compute_guidance(
     return GuidanceDecision(
         phase=phase,
         obstacle_type=obstacle_type,
+        semantic_id=str(safety.semantic_id),
         perception_valid=True,
         traversal_required=True,
         ready_for_handoff=phase == TraversalGuidance.PHASE_READY,
@@ -385,6 +394,7 @@ class TraversalGuidanceNode(Node):
     """发布越障入口建议，不取得 Nav2 或运动控制权。"""
 
     def __init__(self, **node_kwargs):
+        """校验唯一 YAML 参数源并建立 Safety 输入和 Guidance 原子输出。"""
         super().__init__("traversal_guidance", **node_kwargs)
         defaults = (
             ("input_timeout", 0.8),
@@ -440,6 +450,7 @@ class TraversalGuidanceNode(Node):
         self.last_header = None
         self.last_phase_signature = None
         self.timeout_published = False
+        self.last_clock_time = self.get_clock().now()
         self.create_timer(0.1, self.timeout_callback)
         self.get_logger().info(
             "Traversal guidance ready: Nav2 approach/alignment only; "
@@ -448,7 +459,9 @@ class TraversalGuidanceNode(Node):
 
     def safety_callback(self, safety: NavigationSafety) -> None:
         """把一帧原子安全状态转换为同时间戳的入口建议。"""
-        self.last_receive_time = self.get_clock().now()
+        now = self.get_clock().now()
+        self._handle_clock_rewind(now)
+        self.last_receive_time = now
         self.last_header = safety.header
         self.timeout_published = False
         decision = compute_guidance(
@@ -467,24 +480,49 @@ class TraversalGuidanceNode(Node):
         decision = self.stabilizer.update(decision)
         self.publish_decision(decision, safety.header)
 
+    def _handle_clock_rewind(self, now) -> bool:
+        """Discard READY/filter state retained from an earlier ROS-clock epoch."""
+        if not ros_clock_moved_backward(now, self.last_clock_time):
+            self.last_clock_time = now
+            return False
+        self.last_receive_time = None
+        self.last_header = None
+        self.last_phase_signature = None
+        self.timeout_published = False
+        self.stabilizer.reset(GuidanceDecision())
+        self.last_clock_time = now
+        self.get_logger().warning(
+            "ROS clock moved backward; cleared traversal guidance history"
+        )
+        return True
+
+    def _publish_invalid(self, now, frame_id: str = "") -> None:
+        """Publish a new Header and clear READY without mutating a cached input message."""
+        header = Header(stamp=now.to_msg(), frame_id=str(frame_id))
+        invalid = self.stabilizer.reset(GuidanceDecision())
+        self.publish_decision(invalid, header)
+        self.timeout_published = True
+
     def timeout_callback(self) -> None:
         """输入断流后发布一次 INVALID，避免 READY 状态永久粘住。"""
+        now = self.get_clock().now()
+        old_frame = "" if self.last_header is None else self.last_header.frame_id
+        if self._handle_clock_rewind(now):
+            self._publish_invalid(now, old_frame)
+            return
         if self.last_receive_time is None:
             return
-        age = (
-            self.get_clock().now() - self.last_receive_time
-        ).nanoseconds * 1e-9
         if (
-            age > max(0.1, self.parameters["input_timeout"])
+            not ros_age_is_fresh(
+                now,
+                self.last_receive_time,
+                max(0.1, self.parameters["input_timeout"]),
+            )
             and not self.timeout_published
         ):
-            header = self.last_header
-            header.stamp = self.get_clock().now().to_msg()
             # timeout 既要对外撤销 READY，也必须清空内部平滑历史。否则输入恢复后，
             # 第一帧可能与断流前的旧障碍做低通，造成虚假的入口位置。
-            invalid = self.stabilizer.reset(GuidanceDecision())
-            self.publish_decision(invalid, header)
-            self.timeout_published = True
+            self._publish_invalid(now, old_frame)
 
     def publish_decision(self, decision: GuidanceDecision, header) -> None:
         """原子发布强类型状态、可读阶段及 RViz 可视化入口位姿。"""
@@ -510,6 +548,7 @@ class TraversalGuidanceNode(Node):
         signature = (
             decision.phase,
             decision.obstacle_type,
+            decision.semantic_id,
             decision.ready_for_handoff,
         )
         if signature != self.last_phase_signature:
@@ -517,6 +556,7 @@ class TraversalGuidanceNode(Node):
             self.get_logger().info(
                 f"Traversal guidance: {phase_name}, "
                 f"obstacle={decision.obstacle_type}, "
+                f"semantic={decision.semantic_id or 'unconfirmed'}, "
                 f"distance={decision.distance:.2f} m, "
                 f"lateral={decision.lateral_offset:.2f} m, handoff="
                 f"{'READY' if decision.ready_for_handoff else 'not ready'}"

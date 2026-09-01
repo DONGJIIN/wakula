@@ -74,6 +74,8 @@ def test_vision_validation_reports_all_related_mistakes_at_once():
         ("max_temporal_size_jitter", 1.001),
         ("history_reset_timeout", 0.09),
         ("source_switch_timeout", 0.09),
+        ("source_failure_cooldown", 0.09),
+        ("source_failure_cooldown", 30.01),
     ),
 )
 def test_vision_validation_rejects_values_the_node_would_silently_clip(
@@ -197,6 +199,12 @@ def test_terrain_validation_rejects_inverted_roi_and_thresholds():
         ("ground_percentile", 0.01),
         ("ground_percentile", 0.41),
         ("source_switch_timeout", 0.09),
+        ("source_failure_cooldown", 0.09),
+        ("source_geometry_failure_frames", 1),
+        ("source_geometry_failure_frames", 31),
+        ("ground_prior_max_age", 0.19),
+        ("ground_prior_max_consecutive_conflicts", 0),
+        ("ground_prior_max_height_shift", 0.02),
         ("grid_cell_size", 0.019),
         ("ground_height_bin", 0.009),
         ("pit_depth_threshold", 0.029),
@@ -215,11 +223,30 @@ def test_terrain_validation_rejects_values_the_node_would_silently_clip(
         validate_terrain_parameters(values)
 
 
-def test_terrain_validation_accepts_zero_lateral_half_width_runtime_boundary():
-    """零宽中心线 ROI 是 TerrainAnalyzer 的明确运行下边界，不应被校验器拒绝。"""
+def test_terrain_validation_rejects_roi_narrower_than_clear_ground_corridor():
+    """实时 CLEAR 合同必须看到有物理宽度的落脚通道，零宽诊断 ROI 不可用于导航。"""
     values = deepcopy(_parameters("terrain.yaml", "terrain_analyzer"))
     values["lateral_half_width"] = 0.0
-    validate_terrain_parameters(values)
+    with pytest.raises(ValueError, match="clear_ground_corridor_half_width"):
+        validate_terrain_parameters(values)
+
+
+def test_terrain_validation_rejects_nonportable_frame_and_impossible_point_gates():
+    """TF frame syntax and point-count gates must describe an executable sensor pipeline."""
+    values = deepcopy(_parameters("terrain.yaml", "terrain_analyzer"))
+    values["target_frame"] = "/base_link"
+    values["transform_max_points"] = 20
+    values["min_valid_points"] = 30
+    values["max_points"] = 40
+    values["min_connected_region_points"] = 50
+    values["nav2_obstacle_min_height_above_ground"] = 0.08
+    with pytest.raises(ValueError) as error:
+        validate_terrain_parameters(values)
+    message = str(error.value)
+    assert "target_frame" in message
+    assert "transform_max_points" in message
+    assert "min_connected_region_points" in message
+    assert "nav2_obstacle_min_height_above_ground" in message
 
 
 def test_fusion_validation_preserves_synchronization_window_contract():
@@ -240,4 +267,16 @@ def test_fusion_validation_rejects_sync_window_below_runtime_minimum():
     values = deepcopy(_parameters("vision.yaml", "perception_fusion"))
     values["sync_slop"] = 0.0005
     with pytest.raises(ValueError, match="sync_slop"):
+        validate_fusion_parameters(values)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (("sync_slop", 0.501), ("queue_size", 101), ("terrain_only_timeout", 5.01)),
+)
+def test_fusion_validation_enforces_latency_and_memory_upper_bounds(name, value):
+    """融合窗口和二次队列搜索必须保持适合运动机器人及 RK3588 的有界成本。"""
+    values = deepcopy(_parameters("vision.yaml", "perception_fusion"))
+    values[name] = value
+    with pytest.raises(ValueError, match=name):
         validate_fusion_parameters(values)

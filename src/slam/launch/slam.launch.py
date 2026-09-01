@@ -8,9 +8,6 @@ Nav2 是否真正激活则由 readiness monitor 根据 /scan、/odom 和 TF 决�
 不要为了适配某个驱动在此写死设备名，也不要在 launch 中复制算法阈值。
 """
 
-import subprocess
-import time
-
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -26,6 +23,7 @@ from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 
 from slam.sensor_profiles import load_sensor_profiles, resolve_sensor_topics
+from slam.runtime_detection import clock_publisher_is_available
 
 
 def package_file(package: str, folder: str, filename: str):
@@ -34,32 +32,8 @@ def package_file(package: str, folder: str, filename: str):
 
 
 def _robocon_simulation_is_running() -> bool:
-    """重复查询当前 ROS 域的 /clock 发布者，避免 DDS 冷启动时漏判 Gazebo。
-
-    ROS 2 CLI 每次使用 ``--no-daemon`` 都会创建临时 DDS participant。直接检查话题列表
-    比等待 ``topic info`` 统计发布者更快；Gazebo 刚启动或同机负载较高时，单次查询仍
-    可能尚未发现桥接器并把仿真误判为真机，造成传感器时间戳
-    与算法时钟完全不一致。这里做 2 次短探测；Gazebo 按推荐顺序先启动时通常首轮命中，
-    真机无 /clock 时也不会再被旧版 4×2 秒查询拖慢十余秒。
-    显式传入 true/false 时完全跳过探测。
-    """
-    for attempt in range(2):
-        try:
-            result = subprocess.run(
-                ["ros2", "topic", "list", "--no-daemon", "--spin-time", "0.50"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=1.2,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            result = None
-        if result is not None:
-            if "/clock" in result.stdout.splitlines():
-                return True
-        if attempt < 1:
-            time.sleep(0.10)
-    return False
+    """确认当前 ROS 域有 ``/clock`` 发布者；名称保留以兼容已有启动测试。"""
+    return clock_publisher_is_available()
 
 
 def _resolve_runtime_mode(context) -> bool:
@@ -207,7 +181,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "use_sim_time",
                 default_value="auto",
-                description="auto 自动检测 /clock；也可显式设为 true/false",
+                description="auto 检测 /clock 发布者；也可显式设为 true/false",
             ),
             DeclareLaunchArgument(
                 "slam_enabled", default_value="true", description="是否启动在线 SLAM Toolbox"

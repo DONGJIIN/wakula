@@ -16,7 +16,9 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from slam.navigation_health_monitor import (
+    OdometryJumpFilter,
     odometry_is_valid,
+    odometry_yaw,
     scan_contract_is_valid,
     scan_is_valid,
     source_stamp_is_current,
@@ -61,6 +63,10 @@ class Nav2ReadinessMonitor(Node):
         self.declare_parameter("minimum_scan_samples", 90)
         self.declare_parameter("minimum_scan_field_of_view", 3.14)
         self.declare_parameter("max_xy_covariance", 1.0)
+        self.declare_parameter("max_yaw_covariance", 1.0)
+        self.declare_parameter("max_odom_jump", 0.75)
+        self.declare_parameter("max_odom_yaw_jump", 0.75)
+        self.declare_parameter("odom_jump_recovery_samples", 3)
         self.declare_parameter("expected_odom_frame", "odom")
         self.declare_parameter(
             "lifecycle_service",
@@ -111,6 +117,9 @@ class Nav2ReadinessMonitor(Node):
         self.max_xy_covariance = max(
             0.0, float(self.get_parameter("max_xy_covariance").value)
         )
+        self.max_yaw_covariance = max(
+            0.0, float(self.get_parameter("max_yaw_covariance").value)
+        )
         self.expected_odom_frame = str(
             self.get_parameter("expected_odom_frame").value
         )
@@ -119,6 +128,12 @@ class Nav2ReadinessMonitor(Node):
         self.odom_received = False
         self.scan_valid = False
         self.odom_valid = False
+        self.odom_jump_filter = OdometryJumpFilter(
+            float(self.get_parameter("max_odom_jump").value),
+            int(self.get_parameter("odom_jump_recovery_samples").value),
+            float(self.get_parameter("max_odom_yaw_jump").value),
+        )
+        self.odom_jump = False
         self.last_scan_time = None
         self.last_odom_time = None
         self.startup_requested = False
@@ -202,6 +217,13 @@ class Nav2ReadinessMonitor(Node):
             self.max_xy_covariance,
             self.expected_odom_frame,
             self.base_frame,
+            self.max_yaw_covariance,
+        )
+        self.odom_jump = self.odom_jump_filter.update(
+            float(msg.pose.pose.position.x),
+            float(msg.pose.pose.position.y),
+            self.odom_valid,
+            odometry_yaw(msg),
         )
 
     def _sensor_is_fresh(self, stamp) -> bool:
@@ -217,7 +239,11 @@ class Nav2ReadinessMonitor(Node):
             return
         # 不只检查“曾经收到”，还检查传感器正在持续更新。
         scan_ready = self.scan_valid and self._sensor_is_fresh(self.last_scan_time)
-        odom_ready = self.odom_valid and self._sensor_is_fresh(self.last_odom_time)
+        odom_ready = (
+            self.odom_valid
+            and not self.odom_jump
+            and self._sensor_is_fresh(self.last_odom_time)
+        )
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.global_frame,

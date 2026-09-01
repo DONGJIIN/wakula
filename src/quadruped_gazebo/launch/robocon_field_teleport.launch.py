@@ -18,6 +18,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     """Keep every simulation-only process under one Gazebo-owned launch."""
     world = LaunchConfiguration("world")
+    world_name = LaunchConfiguration("world_name")
     gui = LaunchConfiguration("gui")
     keyboard_teleop = LaunchConfiguration("keyboard_teleop")
     spawn_robot = LaunchConfiguration("spawn_test_robot")
@@ -39,6 +40,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             "world": world,
+            "world_name": world_name,
             "gui": gui,
             "keyboard_teleop": keyboard_teleop,
             "spawn_test_robot": spawn_robot,
@@ -74,6 +76,7 @@ def generate_launch_description():
             # Read the same world layout that Gazebo starts.  Observation stations
             # therefore follow official coordinates when only the world is updated.
             "benchmark_world_path": world,
+            "world_name": world_name,
         }],
     )
 
@@ -84,6 +87,11 @@ def generate_launch_description():
             default_value=PathJoinSubstitution([
                 package_share, "worlds", "robocon_obstacle_field.sdf"
             ]),
+        ),
+        DeclareLaunchArgument(
+            "world_name",
+            default_value="robocon_obstacle_field",
+            description="必须与 world 文件中的 <world name> 完全一致",
         ),
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("keyboard_teleop", default_value="true"),
@@ -109,10 +117,11 @@ def generate_launch_description():
         DeclareLaunchArgument("robot_yaw", default_value="3.141593"),
         DeclareLaunchArgument(
             "maximum_alignment_error",
-            # Core stall handoff is bounded to 0.22 rad.  Keep a small transport/
-            # sampling margin so the simulator does not reject a request that passed
-            # the stricter algorithm gate one sensor frame earlier.
-            default_value="0.24",
+            # Goal fields are one immutable snapshot, so there is no transport-time
+            # heading drift to hide here.  Match the mission PREPARING envelope exactly;
+            # a wider launch override would make the combined simulator less strict
+            # than the standalone Action server and the future controller contract.
+            default_value="0.22",
             description=(
                 "Maximum absolute Action heading error accepted before teleport [rad]"
             ),

@@ -54,6 +54,10 @@ class GeometryEstimate:
     structure_heading_confidence: float = 0.0
     clearance_height: float = 0.0
     valid_points: int = 0
+    # Internal state hint for TerrainAnalyzer; not published as a ROS measurement.  True means a
+    # broad, well-observed surface moved as a whole relative to the stored ground-height prior, so
+    # the frame must be UNKNOWN while the stateful node decides whether to discard that prior.
+    ground_reference_conflict: bool = False
 
 
 def navigation_obstacle_points(
@@ -66,7 +70,7 @@ def navigation_obstacle_points(
     """从前向点云中只保留真正高于局部地面的 Nav2 标障点。
 
     Nav2 的 PointCloud2 obstacle layer 按消息坐标系中的绝对 z 过滤点；它并不知道
-    当前地面是平地还是坡面。如果直接发布原始 ROI，10°/14° 合法坡面会随着 x 增大而
+    当前地面是平地还是坡面。如果直接发布原始 ROI，11.3°/14° 合法坡面会随着 x 增大而
     高于固定 z 阈值，最终被代价地图错误封死。本函数用本帧稳健地面平面
     ``z = tan(pitch)*x + tan(roll)*y + ground_height`` 计算残差，只发布比地面高出
     指定阈值的点。几何估计无效时返回空集，让上层安全评估负责停车，而不是用未经
@@ -214,6 +218,92 @@ def _fit_plane(samples: np.ndarray) -> Tuple[float, float, float, float]:
     center = float(np.median(residual[active]))
     mad = float(np.median(np.abs(residual[active] - center)) * 1.4826)
     return float(coefficients[0]), float(coefficients[1]), float(coefficients[2]), mad
+
+
+def _clear_corridor_coverage(
+    cells: np.ndarray,
+    support_mask: np.ndarray,
+    *,
+    cell_size: float,
+    corridor_half_width: float,
+    start_x: float,
+    required_distance: float,
+    maximum_gap: float,
+    minimum_lateral_fraction: float,
+) -> tuple[bool, float]:
+    """Verify that CLEAR means a continuously observed central ground corridor.
+
+    A depth camera or 3-D lidar cannot distinguish a deep/absorptive pit from an ordinary
+    no-return pixel using XYZ values alone.  Missing returns must therefore never be invented as
+    ``PIT``; however, treating them as ``CLEAR`` is equally unsafe.  This guard collapses supported
+    ground cells into longitudinal bins inside the robot's physical body corridor and requires a
+    sufficiently wide, nearly continuous strip up to ``required_distance``.
+
+    ``maximum_gap`` is the largest tolerated *unobserved* longitudinal run in metres.  Decrease it
+    when a real pit or field edge is missed; increase it only enough to cover measured speckle
+    dropout on labelled flat-ground bags.  ``minimum_lateral_fraction`` prevents a narrow line of
+    edge returns from claiming that the whole walking corridor was observed.
+
+    Returns:
+        ``(valid, score)`` where score is the supported longitudinal-bin fraction.  The caller
+        folds this score into CLEAR confidence; a failed guard publishes UNKNOWN/invalid, not PIT.
+    """
+    size = max(0.02, float(cell_size))
+    half_width = max(size * 0.5, float(corridor_half_width))
+    # Decimal YAML values such as 0.15/0.05 may evaluate to 2.999999999... in binary floating
+    # point.  The small dimensionless epsilon keeps exact physical grid boundaries inclusive while
+    # remaining many orders below any sensor resolution.
+    first_bin = int(math.floor(float(start_x) / size + 1e-9))
+    last_bin = int(math.floor(float(required_distance) / size + 1e-9))
+    if last_bin <= first_bin or len(cells) != len(support_mask):
+        return False, 0.0
+
+    supported = cells[
+        np.asarray(support_mask, dtype=bool)
+        & (np.abs(cells[:, 1]) <= half_width)
+    ]
+    total_bins = last_bin - first_bin + 1
+    if not len(supported):
+        return False, 0.0
+
+    coordinates = np.floor(supported[:, :2] / size).astype(np.int32)
+    # At least this many distinct lateral cells must support each x slice.  Requiring a fraction of
+    # the physical corridor keeps the rule invariant when grid_cell_size changes during tuning.
+    expected_lateral_bins = max(1, int(math.floor(2.0 * half_width / size)) + 1)
+    minimum_lateral_bins = max(
+        1,
+        int(
+            math.ceil(
+                expected_lateral_bins
+                * float(np.clip(minimum_lateral_fraction, 0.05, 1.0))
+            )
+        ),
+    )
+    occupied = np.zeros(total_bins, dtype=bool)
+    for x_index in np.unique(coordinates[:, 0]):
+        relative_index = int(x_index) - first_bin
+        if not 0 <= relative_index < total_bins:
+            continue
+        lateral_count = len(
+            np.unique(coordinates[coordinates[:, 0] == x_index, 1])
+        )
+        occupied[relative_index] = lateral_count >= minimum_lateral_bins
+
+    coverage_score = float(np.count_nonzero(occupied)) / float(total_bins)
+    # Include leading/trailing gaps: seeing only the toes, or ground beyond a large missing strip,
+    # must not approve the unknown region in between.
+    padded = np.r_[True, occupied, True]
+    transitions = np.flatnonzero(padded[1:] != padded[:-1])
+    missing_runs = transitions.reshape(-1, 2) if len(transitions) else np.empty((0, 2))
+    largest_missing_bins = (
+        int(np.max(missing_runs[:, 1] - missing_runs[:, 0]))
+        if len(missing_runs)
+        else 0
+    )
+    tolerated_missing_bins = max(
+        0, int(math.floor(float(maximum_gap) / size + 1e-9))
+    )
+    return largest_missing_bins <= tolerated_missing_bins, coverage_score
 
 
 def _connected_regions(
@@ -467,6 +557,12 @@ def analyze_terrain_geometry(
     min_region_cells: int = 3,
     min_region_points: int = 12,
     ground_height_prior: float | None = None,
+    ground_prior_max_height_shift: float = 0.10,
+    clear_ground_corridor_half_width: float = 0.25,
+    clear_ground_start_x: float = 0.10,
+    clear_ground_required_distance: float = 0.80,
+    clear_ground_max_gap: float = 0.15,
+    clear_ground_min_lateral_fraction: float = 0.25,
 ) -> GeometryEstimate:
     """分割地面并识别台阶、坑洞、墙面、横杆和立柱。
 
@@ -493,7 +589,7 @@ def analyze_terrain_geometry(
         and math.isfinite(float(ground_height_prior))
     )
     if prior_is_valid and abs(c - float(ground_height_prior)) > max(
-        0.10, 3.0 * ground_bin_size
+        float(ground_prior_max_height_shift), 3.0 * ground_bin_size
     ):
         prior_mask = np.abs(cells[:, 3] - float(ground_height_prior)) <= max(
             0.04, 2.0 * ground_bin_size
@@ -502,8 +598,29 @@ def analyze_terrain_geometry(
             ground_mask = prior_mask
             a, b, c, roughness = _fit_plane(cells[ground_mask])
         else:
-            # 地面被完全遮挡时不能拟合坡度；保留先验高度并把坡度置零是比虚构深坑更
-            # 保守且可解释的选择，随后正障碍仍需连通格/原始点数门限才能成立。
+            # A body-height change moves a broad floor as one piece in base_link.  Pinning that
+            # surface to the old height produces a full-width false PIT that can never recover,
+            # because the stateful prior is only refreshed by CLEAR frames.  If the newly fitted
+            # surface gives continuous corridor support, mark this frame UNKNOWN and let the node
+            # count conflicts before discarding the prior.  A thin wall/platform top normally fails
+            # coverage and still uses the old height to expose the real
+            # positive obstacle.  Missing returns are never converted into a pit here.
+            current_coverage_valid, _ = _clear_corridor_coverage(
+                cells,
+                ground_mask,
+                cell_size=cell_size,
+                corridor_half_width=clear_ground_corridor_half_width,
+                start_x=clear_ground_start_x,
+                required_distance=clear_ground_required_distance,
+                maximum_gap=clear_ground_max_gap,
+                minimum_lateral_fraction=clear_ground_min_lateral_fraction,
+            )
+            if current_coverage_valid:
+                return GeometryEstimate(
+                    valid_points=len(points), ground_reference_conflict=True
+                )
+            # 地面被完全遮挡时不能拟合坡度；保留先验高度并把坡度置零，随后正障碍仍需
+            # 连通格/原始点数门限才能成立。先验还受在线节点年龄上限约束，不会永久存在。
             a, b, c, roughness = 0.0, 0.0, float(ground_height_prior), 0.0
     # 当相机贴近墙面启动、地面完全不可见时，高度栅格可能把近乎竖直的墙面错拟合成
     # “地面”，从而在 2.5 m ROI 内外推出几十米相对高度。比赛坡面远低于 45°；超过
@@ -711,12 +828,37 @@ def analyze_terrain_geometry(
                 and surface_y_span >= 0.40
                 and surface_roughness <= 0.015
             ):
+                surface_plane = (
+                    surface_a * cells[:, 0]
+                    + surface_b * cells[:, 1]
+                    + surface_c
+                )
+                slope_support = ground_mask | (
+                    np.abs(cells[:, 3] - surface_plane)
+                    <= max(0.04, 2.0 * ground_bin_size)
+                )
+                coverage_valid, coverage_score = _clear_corridor_coverage(
+                    cells,
+                    slope_support,
+                    cell_size=cell_size,
+                    corridor_half_width=clear_ground_corridor_half_width,
+                    start_x=clear_ground_start_x,
+                    required_distance=clear_ground_required_distance,
+                    maximum_gap=clear_ground_max_gap,
+                    minimum_lateral_fraction=clear_ground_min_lateral_fraction,
+                )
+                if not coverage_valid:
+                    return GeometryEstimate(valid_points=len(points))
                 return GeometryEstimate(
                     valid=True,
                     obstacle_type=CLEAR,
-                    confidence=min(
-                        0.96,
-                        0.62 + 0.02 * len(surface_cells),
+                    confidence=float(
+                        np.clip(
+                            min(0.96, 0.62 + 0.02 * len(surface_cells))
+                            * coverage_score,
+                            0.0,
+                            1.0,
+                        )
                     ),
                     ground_height=float(surface_c),
                     obstacle_height=0.0,
@@ -914,6 +1056,23 @@ def analyze_terrain_geometry(
                 1.0,
                 np.count_nonzero(ground_mask) / max(1.0, min_cells * 2.0),
             )
+
+    if obstacle_type == CLEAR:
+        coverage_valid, coverage_score = _clear_corridor_coverage(
+            cells,
+            ground_mask,
+            cell_size=cell_size,
+            corridor_half_width=clear_ground_corridor_half_width,
+            start_x=clear_ground_start_x,
+            required_distance=clear_ground_required_distance,
+            maximum_gap=clear_ground_max_gap,
+            minimum_lateral_fraction=clear_ground_min_lateral_fraction,
+        )
+        if not coverage_valid:
+            return GeometryEstimate(valid_points=len(points))
+        # CLEAR confidence now expresses both plane support and verified path coverage.  A dense
+        # side wall can no longer compensate for a missing strip directly in front of the body.
+        confidence *= coverage_score
 
     return GeometryEstimate(
         valid=True,

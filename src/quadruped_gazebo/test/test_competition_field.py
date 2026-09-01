@@ -1,16 +1,19 @@
 """对比赛场地的关键尺寸、颜色和算法隔离做静态回归检查。
 
-这些测试刻意只锁定规则 V1.0 已经公布的数据。障碍的全局 pose 仍是参考布局，
+这些测试刻意只锁定 2026 官方 V2.0 已经公布的数据。障碍的全局 pose 仍是参考布局，
 正式坐标公布后允许修改，不应因此修改 SLAM、Nav2 或 OpenCV 源码。
 """
 
 import importlib.util
 import math
 from pathlib import Path
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 from geometry_msgs.msg import Twist
 import pytest
+from std_msgs.msg import Bool
+import yaml
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +73,7 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     assert 'package_file("slam"' not in launch
     assert "autonomous_navigation.launch.py" not in launch
     assert "autonomous_mission" not in launch
+    assert "quadruped_teleop" not in launch
     assert '"enable_point_cloud_bridge"' in launch
     assert 'default_value="true"' in launch
     timed_launch = (
@@ -78,6 +82,7 @@ def test_gazebo_field_does_not_load_algorithms_or_traversal_controller():
     assert '"benchmark_raw_point_cloud"' in timed_launch
     assert '"benchmark_staging"' in timed_launch
     assert '"benchmark_semantic_hint"' in timed_launch
+    assert "xbox_teleop.launch.py" not in timed_launch
     mux = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(encoding="utf-8")
     assert '"/navigation/autonomy_stop"' in mux
     assert "if autonomy_stop:" in mux
@@ -90,9 +95,8 @@ def test_sim_traversal_backend_is_one_shot_and_yields_cpu():
     )
     assert "executor.spin_once(timeout_sec=0.05)" in backend
     assert "time.sleep(0.020)" in backend
-    # A/B 尚未由局部视角分清时仍使用统一 STEP 合同；落点长度保留，但所有基于
-    # 时长的逐帧运动参数必须删除，避免重新引入“穿模轨迹”模拟。
-    assert '"wooden_bridge_unknown_span", 5.00' in backend
+    # A/B 尚未分清时不能调用 Action；服务器不保留任何 unknown 桥的隐式落点。
+    assert "wooden_bridge_unknown_span" not in backend
     assert '"wooden_bridge_b_span", 5.20' in backend
     assert '"wooden_bridge_exit_clearance", 0.35' in backend
     assert '"long_structure_exit_clearance", 0.75' in backend
@@ -120,6 +124,438 @@ def test_sim_traversal_backend_is_one_shot_and_yields_cpu():
     # The Gazebo helper may emulate a standard fused sensor contract. Completion remains
     # exclusively owned by the autonomous mission after Action/posterior checks.
     assert 'create_publisher(\n            String, "/autonomy/completed_obstacles"' not in backend
+
+
+def _load_sim_traverse_module(name="sim_traverse_contract"):
+    """Load the installed-interface-aware simulator helper for pure contract tests."""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _valid_traversal_goal(module, stamp_seconds=100):
+    """Create one coherent PREPARING snapshot without starting an Action server."""
+    goal = module.TraverseObstacle.Goal()
+    goal.header.stamp.sec = int(stamp_seconds)
+    goal.header.frame_id = "base_link"
+    goal.obstacle_type = goal.OBSTACLE_STEP
+    goal.obstacle_id = "t_shaped_stairs"
+    goal.entry_stage = goal.ENTRY_PREPARING
+    goal.confidence = 0.90
+    goal.distance = 1.00
+    goal.lateral_offset = 0.10
+    goal.heading_error = 0.10
+    goal.obstacle_height = 0.18
+    goal.pit_depth = 0.0
+    goal.slope_pitch = 0.0
+    goal.slope_roll = 0.0
+    goal.roughness = 0.01
+    goal.width = 1.0
+    goal.structure_heading = 0.0
+    goal.structure_heading_confidence = 0.80
+    goal.clearance_height = 0.0
+    goal.valid_points = 500
+    return goal
+
+
+def _validate_goal(module, goal, now_seconds=100.25):
+    return module.validate_traversal_goal(
+        goal,
+        now_seconds=now_seconds,
+        required_frame="base_link",
+        maximum_snapshot_age=0.75,
+        maximum_future_skew=0.05,
+        maximum_entry_distance=2.50,
+        maximum_lateral_offset=0.35,
+        maximum_alignment_error=0.22,
+        ready_entry_distance=0.45,
+        ready_lateral_offset=0.10,
+        ready_alignment_error=0.08,
+    )
+
+
+def test_traverse_action_goal_is_one_timestamped_geometry_snapshot():
+    """Action Goal must carry every controller input under one Header."""
+    action = (
+        PACKAGE_ROOT.parent / "quadruped_interfaces" / "action" / "TraverseObstacle.action"
+    ).read_text(encoding="utf-8")
+    required_fields = (
+        "std_msgs/Header header",
+        "uint8 entry_stage",
+        "float32 obstacle_height",
+        "float32 pit_depth",
+        "float32 slope_pitch",
+        "float32 slope_roll",
+        "float32 roughness",
+        "float32 width",
+        "float32 structure_heading",
+        "float32 structure_heading_confidence",
+        "float32 clearance_height",
+        "uint32 valid_points",
+    )
+    for field in required_fields:
+        assert field in action
+    assert "uint8 ENTRY_READY=1" in action
+    assert "uint8 ENTRY_PREPARING=2" in action
+    assert "不得立即抬腿" in action
+
+
+def test_sim_traverse_accepts_one_fresh_finite_preparing_snapshot():
+    module = _load_sim_traverse_module()
+    assert _validate_goal(module, _valid_traversal_goal(module)) == ""
+
+
+def test_sim_traverse_capability_table_requires_actionable_canonical_pairs():
+    """The controller must not infer a route from an unknown or coarse final type."""
+    module = _load_sim_traverse_module("sim_traverse_capabilities")
+    expected = {
+        "right_angle_poles": module.TraverseObstacle.Goal.OBSTACLE_POLE,
+        "gravel_wood_pit": module.TraverseObstacle.Goal.OBSTACLE_PIT,
+        "height_bar": module.TraverseObstacle.Goal.OBSTACLE_BAR,
+        "main_slope": module.TraverseObstacle.Goal.OBSTACLE_SLOPE,
+        "wooden_bridge_a": module.TraverseObstacle.Goal.OBSTACLE_STEP,
+        "wooden_bridge_b": module.TraverseObstacle.Goal.OBSTACLE_STEP,
+        "t_shaped_stairs": module.TraverseObstacle.Goal.OBSTACLE_STEP,
+        "high_wall": module.TraverseObstacle.Goal.OBSTACLE_WALL,
+    }
+    assert module.SIM_TRAVERSAL_CAPABILITIES == expected
+    for semantic_id, canonical_type in expected.items():
+        goal = _valid_traversal_goal(module)
+        goal.obstacle_id = semantic_id
+        goal.obstacle_type = canonical_type
+        assert _validate_goal(module, goal) == ""
+
+    for semantic_id in ("", "test_step", "wooden_bridge_unknown"):
+        goal = _valid_traversal_goal(module)
+        goal.obstacle_id = semantic_id
+        assert "unknown or not actionable" in _validate_goal(module, goal)
+
+    # Near-field classifiers may temporarily call the bar a pole/step and the high
+    # wall a bar/step.  The mission must canonicalize those final Action types; the
+    # controller rejects the coarse alternatives instead of selecting another motion.
+    for semantic_id, coarse_type in (
+        ("height_bar", module.TraverseObstacle.Goal.OBSTACLE_POLE),
+        ("height_bar", module.TraverseObstacle.Goal.OBSTACLE_STEP),
+        ("high_wall", module.TraverseObstacle.Goal.OBSTACLE_BAR),
+        ("high_wall", module.TraverseObstacle.Goal.OBSTACLE_STEP),
+    ):
+        goal = _valid_traversal_goal(module)
+        goal.obstacle_id = semantic_id
+        goal.obstacle_type = coarse_type
+        assert "requires canonical obstacle_type" in _validate_goal(module, goal)
+
+
+def test_sim_traverse_validates_raw_header_fields_before_float_conversion():
+    """Malformed builtin Time fields may not normalize into a different timestamp."""
+    module = _load_sim_traverse_module("sim_traverse_raw_stamp")
+    negative_seconds = _valid_traversal_goal(module)
+    negative_seconds.header.stamp.sec = -1
+    assert "sec must be non-negative" in _validate_goal(module, negative_seconds)
+
+    overflowing_nanoseconds = _valid_traversal_goal(module)
+    overflowing_nanoseconds.header.stamp.nanosec = 1_000_000_000
+    assert "nanosec must be" in _validate_goal(module, overflowing_nanoseconds)
+
+
+def test_goal_time_odometry_freezes_entry_despite_execution_pose_motion():
+    """A delayed execute callback cannot translate Goal.distance from current odom."""
+    module = _load_sim_traverse_module("sim_traverse_frozen_entry")
+    goal = _valid_traversal_goal(module)
+    history = (
+        module.PlanarPoseSample(stamp=100.0, x=0.0, y=0.0, yaw=0.0),
+        module.PlanarPoseSample(stamp=100.2, x=0.2, y=0.0, yaw=0.0),
+    )
+    frozen, reason = module.frozen_entry_from_history(
+        goal, history, maximum_gap=0.15, standoff=0.20
+    )
+    assert reason == ""
+    assert frozen.snapshot_x == pytest.approx(0.0)
+    assert frozen.target_x == pytest.approx(0.80)
+    assert frozen.target_y == pytest.approx(0.10)
+    assert frozen.remaining_distance == pytest.approx(0.20)
+
+    # By execution time the robot may already report x=0.30.  The frozen target is
+    # still x=0.80, not the erroneous current_x + (distance-standoff) = 1.10.
+    execution_pose_x = 0.30
+    assert frozen.target_x != pytest.approx(execution_pose_x + 0.80)
+
+    interpolated_goal = _valid_traversal_goal(module)
+    interpolated_goal.header.stamp.nanosec = 100_000_000
+    interpolated, reason = module.frozen_entry_from_history(
+        interpolated_goal, history, maximum_gap=0.15, standoff=0.20
+    )
+    assert reason == ""
+    assert interpolated.snapshot_x == pytest.approx(0.10)
+    assert interpolated.target_x == pytest.approx(0.90)
+
+
+def test_goal_time_odometry_rejects_missing_or_distant_history():
+    """No pose near header.stamp means no safe frame in which to execute the Goal."""
+    module = _load_sim_traverse_module("sim_traverse_missing_history")
+    goal = _valid_traversal_goal(module)
+    frozen, reason = module.frozen_entry_from_history(
+        goal, (), maximum_gap=0.15, standoff=0.20
+    )
+    assert frozen is None
+    assert "odometry history unavailable" in reason
+
+    # Exercise the real admission callback as well: syntactically valid geometry is
+    # still rejected before reservation when no odometry can anchor header.stamp.
+    node = module.SimTraverseObstacle.__new__(module.SimTraverseObstacle)
+    node.odom_history_lock = module.Lock()
+    node.odom_history = module.deque(maxlen=16)
+    node.busy = False
+    node.emergency_stop = False
+    node.active_action_stop_latched = False
+    node.active_entry_snapshot = None
+    parameter_values = {
+        "goal_frame_id": "base_link",
+        "maximum_snapshot_age": 0.75,
+        "maximum_future_skew": 0.05,
+        "maximum_entry_distance": 2.50,
+        "maximum_lateral_offset": 0.35,
+        "maximum_alignment_error": 0.22,
+        "ready_entry_distance": 0.45,
+        "ready_lateral_offset": 0.10,
+        "ready_alignment_error": 0.08,
+        "odometry_snapshot_max_gap": 0.15,
+        "preparation_standoff": 0.20,
+    }
+    node.get_parameter = lambda name: SimpleNamespace(value=parameter_values[name])
+    now = SimpleNamespace(nanoseconds=100_250_000_000)
+    node.get_clock = lambda: SimpleNamespace(now=lambda: now)
+    warnings = []
+    node.get_logger = lambda: SimpleNamespace(
+        warning=lambda message: warnings.append(message)
+    )
+    assert node.goal_callback(goal) == module.GoalResponse.REJECT
+    assert not node.busy
+    assert warnings and "odometry history unavailable" in warnings[-1]
+
+    distant = (module.PlanarPoseSample(stamp=99.0, x=0.0, y=0.0, yaw=0.0),)
+    frozen, reason = module.frozen_entry_from_history(
+        goal, distant, maximum_gap=0.15, standoff=0.20
+    )
+    assert frozen is None
+    assert "odometry history unavailable" in reason
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    (
+        (lambda goal: setattr(goal.header.stamp, "sec", 0), "header.stamp"),
+        (lambda goal: setattr(goal.header, "frame_id", "odom"), "frame_id"),
+        (lambda goal: setattr(goal, "entry_stage", 0), "entry_stage"),
+        (lambda goal: setattr(goal, "obstacle_height", math.nan), "not finite"),
+        (lambda goal: setattr(goal, "width", -0.01), "width"),
+        (lambda goal: setattr(goal, "valid_points", 0), "valid_points"),
+        (lambda goal: setattr(goal, "confidence", 0.0), "confidence"),
+    ),
+)
+def test_sim_traverse_rejects_incomplete_or_corrupted_snapshots(mutation, reason):
+    module = _load_sim_traverse_module(f"sim_traverse_invalid_{reason}")
+    goal = _valid_traversal_goal(module)
+    mutation(goal)
+    assert reason in _validate_goal(module, goal)
+
+
+def test_sim_traverse_rejects_stale_future_and_false_ready_snapshots():
+    module = _load_sim_traverse_module("sim_traverse_snapshot_time")
+    stale = _valid_traversal_goal(module, stamp_seconds=98)
+    assert "stale" in _validate_goal(module, stale)
+    future = _valid_traversal_goal(module, stamp_seconds=101)
+    assert "future" in _validate_goal(module, future)
+
+    false_ready = _valid_traversal_goal(module)
+    false_ready.entry_stage = false_ready.ENTRY_READY
+    assert "ENTRY_READY distance" in _validate_goal(module, false_ready)
+    false_ready.distance = 0.30
+    false_ready.heading_error = 0.04
+    assert _validate_goal(module, false_ready) == ""
+
+
+def test_sim_preparing_envelope_covers_the_mission_handoff_contract():
+    """Mission may never authorize a PREPARING Goal that this server rejects."""
+    module = _load_sim_traverse_module("sim_traverse_cross_package_envelope")
+    config_path = (
+        PACKAGE_ROOT.parent
+        / "quadruped_planning"
+        / "config"
+        / "autonomous_mission.yaml"
+    )
+    mission = yaml.safe_load(config_path.read_text(encoding="utf-8"))[
+        "autonomous_mission"
+    ]["ros__parameters"]
+
+    assert mission["approach_stall_handoff_max_distance"] <= (
+        module.DEFAULT_MAXIMUM_ENTRY_DISTANCE
+    )
+    assert mission["direct_handoff_max_distance"] <= (
+        module.DEFAULT_MAXIMUM_ENTRY_DISTANCE
+    )
+    assert mission["handoff_fallback_max_distance"] <= (
+        module.DEFAULT_MAXIMUM_ENTRY_DISTANCE
+    )
+    assert mission["approach_stall_handoff_max_lateral"] <= (
+        module.DEFAULT_MAXIMUM_LATERAL_OFFSET
+    )
+    assert mission["handoff_fallback_max_lateral"] <= (
+        module.DEFAULT_MAXIMUM_LATERAL_OFFSET
+    )
+    assert mission["approach_stall_handoff_max_heading_error"] <= (
+        module.DEFAULT_MAXIMUM_ALIGNMENT_ERROR
+    )
+
+    # Exercise the exact widest mission boundary through the server's real validator.
+    boundary = _valid_traversal_goal(module)
+    boundary.distance = mission["approach_stall_handoff_max_distance"]
+    boundary.lateral_offset = mission["approach_stall_handoff_max_lateral"]
+    boundary.heading_error = mission["approach_stall_handoff_max_heading_error"]
+    assert _validate_goal(module, boundary) == ""
+
+    # READY deliberately remains much tighter even though PREPARING is compatible.
+    boundary.entry_stage = boundary.ENTRY_READY
+    assert "ENTRY_READY" in _validate_goal(module, boundary)
+
+    # The combined Gazebo launch must not silently widen the same server contract.
+    combined_launch = (
+        PACKAGE_ROOT / "launch" / "robocon_field_teleport.launch.py"
+    ).read_text(encoding="utf-8")
+    alignment_start = combined_launch.index('"maximum_alignment_error"')
+    alignment_argument = combined_launch[alignment_start:]
+    assert 'default_value="0.22"' in alignment_argument
+    assert 'default_value="0.24"' not in alignment_argument
+
+
+def test_sim_preparation_timeout_has_margin_for_the_full_server_envelope():
+    """The old 15 s timeout was below a conservative max-speed motion budget."""
+    module = _load_sim_traverse_module("sim_traverse_preparation_budget")
+    maximum_translation = math.hypot(
+        module.DEFAULT_MAXIMUM_ENTRY_DISTANCE
+        - module.DEFAULT_PREPARATION_STANDOFF,
+        module.DEFAULT_MAXIMUM_LATERAL_OFFSET,
+    )
+    # Budget independent worst axes: full planar approach plus a quarter turn and
+    # the accepted final alignment.  Proportional slowdown/ROS scheduling need the
+    # remaining margin rather than being hidden by a nominal 15 s value.
+    conservative_motion_budget = (
+        maximum_translation / module.DEFAULT_PREPARATION_LINEAR_SPEED
+        + (math.pi / 2.0 + module.DEFAULT_MAXIMUM_ALIGNMENT_ERROR)
+        / module.DEFAULT_PREPARATION_ANGULAR_SPEED
+    )
+    assert conservative_motion_budget > 15.0
+    assert module.DEFAULT_PREPARATION_TIMEOUT >= conservative_motion_budget + 4.0
+
+
+def test_sim_software_stop_poison_survives_clear_until_a_new_goal():
+    """A short B-key stop may not let the interrupted Action resume after Start."""
+    module = _load_sim_traverse_module("sim_traverse_stop_latch")
+    node = module.SimTraverseObstacle.__new__(module.SimTraverseObstacle)
+    node.stop_state_lock = module.Lock()
+    node.emergency_stop = False
+    node.active_action_stop_latched = False
+    node.busy = True
+    stop_calls = []
+    node._stop = lambda: stop_calls.append(True)
+
+    node._emergency_stop_callback(Bool(data=True))
+    assert node.emergency_stop
+    assert node.active_action_stop_latched
+    assert node._software_stop_blocks_motion()
+    assert stop_calls
+
+    node._emergency_stop_callback(Bool(data=False))
+    assert not node.emergency_stop
+    assert node.active_action_stop_latched
+    assert node._software_stop_blocks_motion()
+
+    node._release_action_reservation()
+    assert not node.busy
+    assert not node._software_stop_blocks_motion()
+    assert node._reserve_action_if_safe() == ""
+    node._release_action_reservation()
+
+
+def test_sim_software_stop_rejects_new_goal_and_blocks_pose_dispatch():
+    """A latched stop covers SetEntityPose, not only the final Twist mux."""
+    module = _load_sim_traverse_module("sim_traverse_stop_pose_boundary")
+    node = module.SimTraverseObstacle.__new__(module.SimTraverseObstacle)
+    node.stop_state_lock = module.Lock()
+    node.emergency_stop = True
+    node.active_action_stop_latched = False
+    node.busy = False
+    assert "emergency stop" in node._reserve_action_if_safe()
+
+    class FakePoseClient:
+        calls = 0
+
+        def call_async(self, _request):
+            self.calls += 1
+            raise AssertionError("SetEntityPose must not be dispatched while stopped")
+
+    node.pose_client = FakePoseClient()
+    node.get_parameter = lambda _name: SimpleNamespace(value="generic_quadruped")
+    assert not node._set_model_pose(1.0, 2.0, 0.0)
+    assert node.pose_client.calls == 0
+
+    source = (
+        PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    ).read_text(encoding="utf-8")
+    prepare = source[
+        source.index("    def _prepare_entry") : source.index("    def _set_model_pose")
+    ]
+    execute = source[source.index("    def execute") : source.index("\ndef main")]
+    assert "_software_stop_blocks_motion" in prepare
+    assert execute.index("_software_stop_blocks_motion") < execute.index(
+        "self._set_model_pose"
+    )
+    assert "interrupted stabilization" in execute
+
+
+def test_sim_traverse_feedback_is_canonical_and_monotonic():
+    module = _load_sim_traverse_module("sim_traverse_feedback")
+
+    class FakeHandle:
+        def __init__(self):
+            self.feedback = []
+
+        def publish_feedback(self, message):
+            self.feedback.append(message)
+
+    handle = FakeHandle()
+    publisher = module.MonotonicFeedback(handle)
+    publisher.publish(module.TraverseObstacle.Feedback.STATE_PREPARING, 0.0, "prepare")
+    publisher.publish(module.TraverseObstacle.Feedback.STATE_PREPARING, 0.2, "align")
+    publisher.publish(module.TraverseObstacle.Feedback.STATE_TRAVERSING, 0.5, "traverse")
+    publisher.publish(module.TraverseObstacle.Feedback.STATE_STABILIZING, 0.8, "settle")
+    publisher.publish(module.TraverseObstacle.Feedback.STATE_STABILIZING, 1.0, "done")
+    assert [item.state for item in handle.feedback] == [1, 1, 2, 3, 3]
+    assert [item.progress for item in handle.feedback] == sorted(
+        item.progress for item in handle.feedback
+    )
+    with pytest.raises(RuntimeError):
+        publisher.publish(module.TraverseObstacle.Feedback.STATE_TRAVERSING, 1.0, "regress")
+
+
+def test_preparing_goal_finishes_low_speed_alignment_before_teleport():
+    """PREPARING may not jump directly from Goal acceptance to SetEntityPose."""
+    backend = (PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py").read_text(
+        encoding="utf-8"
+    )
+    execute = backend[backend.index("    def execute(self, handle):") :]
+    assert execute.index(
+        "self._prepare_entry(handle, feedback, entry_snapshot)"
+    ) < execute.index("STATE_TRAVERSING")
+    prepare = backend[
+        backend.index(
+            "    def _prepare_entry(self, handle, feedback, entry_snapshot):"
+        ) : backend.index("    def _set_model_pose", backend.index("    def _prepare_entry"))
+    ]
+    assert "preparation_linear_speed" in prepare
+    assert "preparation_stall_timeout" in prepare
+    assert "_set_model_pose" not in prepare
 
 
 def test_benchmark_stations_follow_central_world_layout():
@@ -208,8 +644,19 @@ def test_rule_dimensions_are_locked():
     # 高墙 1000 × 50 × 300 mm；T 台阶中心台 1000 × 1000 × 400 mm。
     assert_close(collision_box("high_wall", "wall"), [0.05, 1.0, 0.30])
     assert_close(collision_box("t_shaped_stairs", "platform"), [1.0, 1.0, 0.40])
-    # 大斜坡 3000 × 2000 mm；桥 A 长条 1500 × 100 mm。
-    assert_close(collision_box("main_slope", "ramp"), [3.0, 2.0, 0.08])
+    # V2.0 大斜坡的水平投影为 3000 mm，坡角 11.3°；SDF box
+    # 长度是斜边而不是水平投影。桥 A 长条仍为 1500 × 100 mm。
+    ramp = model("main_slope").find(".//collision[@name='ramp']")
+    assert ramp is not None
+    ramp_size = collision_box("main_slope", "ramp")
+    ramp_pose = [float(value) for value in ramp.findtext("pose").split()]
+    ramp_pitch = abs(ramp_pose[4])
+    assert math.degrees(ramp_pitch) == pytest.approx(11.3, abs=1e-4)
+    assert ramp_size[0] * math.cos(ramp_pitch) == pytest.approx(3.0, abs=2e-6)
+    rise = ramp_size[0] * math.sin(ramp_pitch)
+    assert rise == pytest.approx(3.0 * math.tan(math.radians(11.3)), abs=2e-6)
+    assert ramp_pose[2] == pytest.approx(rise / 2.0, abs=2e-6)
+    assert_close(ramp_size[1:], [2.0, 0.08])
     assert_close(collision_box("wooden_bridge_a", "beam_1"), [1.5, 0.1, 0.1])
     # 桥 B：六块 150 mm 踏板加五个 400 mm 净间隔，正好覆盖 2900 mm。
     assert_close(collision_box("wooden_bridge_b", "plank_1"), [0.15, 1.0, 0.1])
@@ -272,6 +719,64 @@ def test_published_colors_are_present_exactly():
         [float(x) for x in blue.text.split()],
         [31.0 / 255.0, 65.0 / 255.0, 159.0 / 255.0, 1.0],
     )
+
+
+def test_v2_reach_zones_are_red_dashed_visuals_on_yellow_floor():
+    """V2.0 必达区不得再画成遮住黄地的实心红圆。"""
+    pole_model = model("right_angle_poles")
+    zone_centers = {
+        "start": (-0.40, 0.00),
+        "corner": (1.00, -0.40),
+        "finish": (1.00, 1.40),
+    }
+    for zone, center in zone_centers.items():
+        dashes = pole_model.findall(f".//visual[@name='zone_{zone}_dash_01']/..")
+        assert dashes
+        named = [
+            item
+            for item in pole_model.findall(".//visual")
+            if item.attrib.get("name", "").startswith(f"zone_{zone}_dash_")
+        ]
+        assert len(named) == 8
+        for dash in named:
+            assert dash.find("geometry/box") is not None
+            pose = [float(value) for value in dash.findtext("pose").split()]
+            assert math.hypot(pose[0] - center[0], pose[1] - center[1]) == pytest.approx(
+                0.175, abs=1e-6
+            )
+            assert_close(
+                [float(value) for value in dash.findtext("geometry/box/size").split()],
+                [0.070, 0.020, 0.006],
+            )
+            diffuse = [float(value) for value in dash.findtext("material/diffuse").split()]
+            assert_close(diffuse, [1.0, 0.0, 0.0, 1.0])
+    assert pole_model.find(".//visual[@name='zone_start']") is None
+    assert not any(
+        collision.attrib.get("name", "").startswith("zone_")
+        for collision in pole_model.findall(".//collision")
+    )
+
+
+def test_v2_main_slope_simulator_truth_matches_world():
+    """Gazebo-only fused truth must not retain the obsolete 10-degree baseline."""
+    module = _load_sim_traverse_module("sim_traverse_v2_slope_truth")
+    fused = module.benchmark_fused_obstacle("main_slope")
+    assert fused is not None
+    assert math.degrees(fused.slope_pitch) == pytest.approx(11.3, abs=1e-6)
+
+
+def test_height_bar_simulator_truth_matches_rule_and_world_clearance():
+    """Deterministic hints must preserve the published 300 mm lower clearance."""
+    module = _load_sim_traverse_module("sim_traverse_height_bar_truth")
+    fused = module.benchmark_fused_obstacle("height_bar")
+    assert fused is not None
+    crossbar = model("height_bar").find(".//collision[@name='crossbar']")
+    assert crossbar is not None
+    radius = float(crossbar.findtext("geometry/cylinder/radius"))
+    centre_z = float(crossbar.findtext("pose").split()[2])
+    world_clearance = centre_z - radius
+    assert world_clearance == pytest.approx(0.30, abs=1e-6)
+    assert fused.clearance_height == pytest.approx(world_clearance, abs=1e-6)
 
 
 def test_obstacle_poses_are_centralized_in_layout_frames():
@@ -393,6 +898,55 @@ def test_simulation_velocity_mux_autonomy_stop_keeps_manual_takeover():
     selected = module.select_command(12.0, manual, 9.8, autonomous, 10.4, 0.7, 0.5)
     assert selected.linear.x == 0.0 and selected.angular.z == 0.0
 
+    # Xbox B 的软件停车由最终仿真仲裁器消费，必须覆盖仍新鲜的人工与自主候选。
+    selected = module.select_command(
+        10.0,
+        manual,
+        9.8,
+        autonomous,
+        9.9,
+        0.7,
+        0.5,
+        emergency_stop=True,
+    )
+    assert selected.linear.x == 0.0 and selected.angular.z == 0.0
+
+
+def test_simulation_velocity_mux_emergency_stop_clears_cached_commands():
+    """解除 B 键锁存后不得复用急停前仍新鲜的任一非零 Twist。"""
+    path = PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
+    spec = importlib.util.spec_from_file_location("sim_cmd_vel_mux_estop", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    published = []
+    node = module.SimCmdVelMux.__new__(module.SimCmdVelMux)
+    node.manual = Twist()
+    node.manual.linear.x = 0.2
+    node.joystick = Twist()
+    node.joystick.angular.z = 0.4
+    node.autonomous = Twist()
+    node.autonomous.linear.x = 0.3
+    node.manual_stamp = 1.0
+    node.joystick_stamp = 1.1
+    node.autonomous_stamp = 1.2
+    node.publisher = type(
+        "Publisher", (), {"publish": lambda _self, message: published.append(message)}
+    )()
+
+    node._emergency_stop_callback(Bool(data=True))
+    assert node.emergency_stop
+    assert node.manual_stamp is None
+    assert node.joystick_stamp is None
+    assert node.autonomous_stamp is None
+    assert published and published[-1].linear.x == 0.0
+
+    node._emergency_stop_callback(Bool(data=False))
+    assert not node.emergency_stop
+    assert node.manual_stamp is None
+    assert node.joystick_stamp is None
+    assert node.autonomous_stamp is None
+
 
 def test_simulation_velocity_mux_handles_only_shutdown_runtime_error():
     """The launch-wide SIGINT DDS teardown race must not print a false crash."""
@@ -404,7 +958,7 @@ def test_simulation_velocity_mux_handles_only_shutdown_runtime_error():
 
 
 def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
-    """Gazebo bridge 只能接收 mux 输出，避免键盘和 Collision Monitor 相互覆盖。"""
+    """Gazebo bridge 只能接收 mux 输出，避免人工和导航速度源相互覆盖。"""
     launch_source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text(
         encoding="utf-8"
     )
@@ -419,6 +973,9 @@ def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     assert "/teleop/active" in (
         PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
     ).read_text(encoding="utf-8")
+    assert "/teleop/emergency_stop" in (
+        PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py"
+    ).read_text(encoding="utf-8")
     mux_source = (PACKAGE_ROOT / "scripts" / "sim_cmd_vel_mux.py").read_text(
         encoding="utf-8"
     )
@@ -426,7 +983,8 @@ def test_field_launch_routes_one_arbitrated_velocity_to_gazebo():
     assert "self.publisher.publish(Twist())" in mux_source
     # 测试狗没有腿部动力学，第三条自主任务中的仿真 Action 只可通过这一标准
     # Gazebo 服务跨越实体碰撞；场地 launch 本身仍不启动任何越障节点。
-    assert "/world/robocon_obstacle_field/set_pose@" in launch_source
+    assert 'world_name = LaunchConfiguration("world_name")' in launch_source
+    assert '"/set_pose@ros_gz_interfaces/srv/SetEntityPose"' in launch_source
     assert "ros_gz_interfaces/srv/SetEntityPose" in launch_source
 
 
@@ -475,6 +1033,20 @@ def test_simulated_teleport_landing_is_layout_independent_and_aligned():
     assert "+ semantic_span" in source
 
 
+def test_simulated_traversal_pose_service_follows_world_name():
+    """独立 Action 替身也使用公开 world_name，而不是隐藏的默认服务路径。"""
+    path = PACKAGE_ROOT / "scripts" / "sim_traverse_obstacle.py"
+    spec = importlib.util.spec_from_file_location("sim_traverse_world", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.gazebo_pose_service("field_v2") == "/world/field_v2/set_pose"
+    assert module.gazebo_pose_service("ignored", "/custom/set_pose") == (
+        "/custom/set_pose"
+    )
+    with pytest.raises(ValueError):
+        module.gazebo_pose_service("../field")
+
+
 def test_teleport_field_launch_owns_backend_without_algorithms():
     """组合入口属于 Gazebo，只组合场地和传送服务，绝不加载核心算法。"""
     source = (
@@ -483,6 +1055,7 @@ def test_teleport_field_launch_owns_backend_without_algorithms():
     assert "robocon_field.launch.py" in source
     assert 'package="quadruped_gazebo"' in source
     assert 'executable="sim_traverse_obstacle"' in source
+    assert '"world_name": world_name' in source
     for forbidden in ("slam.launch.py", "autonomous_mission", "Nav2"):
         # Nav2 may be mentioned in the module documentation only; executable launch
         # content must not reference a package or node from the algorithm stack.
@@ -502,6 +1075,8 @@ def test_gui_field_opens_remapped_keyboard_without_loading_algorithms():
     assert '("cmd_vel", "/cmd_vel_teleop")' in launch_source
     assert '"keyboard_teleop"' in launch_source
     assert "gnome-terminal --wait" in launch_source
+    assert "repeat_rate" not in launch_source
+    assert "key_timeout" not in launch_source
 
 
 def test_field_launch_rejects_a_duplicate_named_gazebo_world():
@@ -510,8 +1085,21 @@ def test_field_launch_rejects_a_duplicate_named_gazebo_world():
         encoding="utf-8"
     )
     assert "def _reject_duplicate_world" in launch_source
-    assert "/world/robocon_obstacle_field/scene/info" in launch_source
+    assert 'scene_service = f"/world/{world_name}/scene/info"' in launch_source
+    assert "def _validated_world_name" in launch_source
     assert "OpaqueFunction(function=_reject_duplicate_world)" in launch_source
+
+
+def test_world_name_is_a_single_safe_gazebo_service_segment():
+    """自定义 world 文件只能把受校验的名称拼入 Gazebo 服务路径。"""
+    path = PACKAGE_ROOT / "launch" / "robocon_field.launch.py"
+    spec = importlib.util.spec_from_file_location("robocon_field_launch", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._validated_world_name("field_v2") == "field_v2"
+    for invalid in ("", "two worlds", "../field", "/field"):
+        with pytest.raises(RuntimeError):
+            module._validated_world_name(invalid)
 
 
 def test_generic_rgbd_resolution_is_bounded_for_realtime_integration():
@@ -566,10 +1154,16 @@ def test_generic_quadruped_is_planar_and_has_no_fake_leg_controller():
 def test_launch_exposes_one_step_robot_replacement_contract():
     """真实 SDF 到位后只换 launch 参数，不允许改 SLAM/Nav2/OpenCV。"""
     source = (PACKAGE_ROOT / "launch" / "robocon_field.launch.py").read_text()
-    for argument in ("robot_sdf", "robot_name", "publish_test_sensor_tf"):
+    for argument in ("world_name", "robot_sdf", "robot_name", "publish_test_sensor_tf"):
         assert "DeclareLaunchArgument" in source
         assert f'"{argument}"' in source
     assert 'models" / "generic_quadruped"' in source
+
+
+def test_gazebo_manifest_declares_python_script_message_dependencies():
+    """仿真 Python 节点的直接消息依赖不能只由其他包传递安装。"""
+    manifest = (PACKAGE_ROOT / "package.xml").read_text(encoding="utf-8")
+    assert "<exec_depend>std_msgs</exec_depend>" in manifest
 
 
 def test_rgbd_point_cloud_bridge_corrects_gazebo_numeric_frame():

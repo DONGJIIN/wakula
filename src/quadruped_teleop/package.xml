@@ -3,7 +3,7 @@
   <name>quadruped_teleop</name>
   <version>0.1.0</version>
   <description>Fail-safe Xbox Twist adapter with an isolated autonomy process switch.</description>
-  <maintainer email="developer@example.com">Quadruped Developer</maintainer>
+  <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>geometry_msgs</exec_depend>
@@ -11,7 +11,11 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <!-- 十字键上会按运行合同创建独立的 slam launch 子进程。它不是 launch
+       include 关系，但仍是该可选运行功能的直接依赖。 -->
+  <exec_depend>ros2launch</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>slam</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

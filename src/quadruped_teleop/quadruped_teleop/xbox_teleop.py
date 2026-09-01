@@ -11,7 +11,7 @@
 * RB、Back、Guide、左右摇杆按下、LT/RT：当前预留，不产生动作。
 
 节点只生成机身期望速度，不包含步态、关节或越障控制。默认输出 ``/cmd_vel_joy``，避免
-与 Nav2/Collision Monitor 同时发布 ``/cmd_vel``；真机应使用速度仲裁器选择手柄或自主导航。
+与 Nav2 最终速度门同时发布 ``/cmd_vel``；真机应使用速度仲裁器选择手柄或自主导航。
 十字键只是一个可选的外部进程开关：Xbox launch 不 include 自主任务、SLAM 或 Gazebo，
 停止时也只处理它自己启动的自主任务进程，不改变核心算法和仿真进程的生命周期。
 软件急停只是 ROS 层保护，不能替代实体急停、驱动失能和底层通信看门狗。
@@ -149,6 +149,7 @@ class AutonomyProcessManager:
         kill_group=os.killpg,
         monotonic=time.monotonic,
     ):
+        """注入进程/信号/时钟依赖，使启动与分级停止可做无 ROS 行为测试。"""
         self.command = tuple(str(part) for part in command)
         self.stop_timeout = max(0.1, float(stop_timeout))
         self.term_timeout = max(0.1, float(term_timeout))
