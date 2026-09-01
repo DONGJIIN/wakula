@@ -155,10 +155,17 @@ def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
         assert mission.params["nav_progress_translation"] == 0.04
         assert mission.params["nav_progress_rotation"] == 0.06
         assert mission.params["controller_wait_timeout"] == 5.0
+        assert mission.params["safety_geometry_stale_seconds"] == 0.35
         assert mission.params["approach_stall_handoff_count"] == 1
         assert mission.params["maximum_search_turns"] == 8
     finally:
         mission.destroy_node()
+    with pytest.raises(ValueError, match="safety_geometry_stale_seconds"):
+        AutonomousMission(
+            parameter_overrides=[
+                Parameter("safety_geometry_stale_seconds", value=0.0),
+            ]
+        )
 
 
 def test_missing_traversal_controller_keeps_task_pending_and_changes_action(ros_context):

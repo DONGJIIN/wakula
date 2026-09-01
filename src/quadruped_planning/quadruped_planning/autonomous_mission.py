@@ -1422,12 +1422,11 @@ def obstacle_geometry_fits_candidate(
     obstacle_id: str,
     safety: Optional[NavigationSafety],
 ) -> bool:
-    """Return whether NavigationSafety geometry is consistent with a stable candidate.
+    """判断新鲜的点云几何是否与稳定障碍名称一致。
 
-    The helper is intentionally conservative: if key fields are missing or the
-    geometry is noisy, it returns False and keeps the task in "verify" mode.
-    This avoids pushing the dog into TraverseObstacle on transient terrain
-    artifacts, especially at the slope-bridge or bridge-step transitions.
+    这是进入 ``TraverseObstacle`` 前最后一道、故意偏保守的米制几何闸门。字段缺失、
+    感知无效或几何超出比赛物体轮廓时一律返回 ``False``，让任务继续留在观察/验证
+    阶段；这样可以避免斜坡—木桥、木桥—台阶交界处的瞬态轮廓被误当成越障入口。
     """
     if safety is None or not safety.perception_valid:
         return False
@@ -1443,11 +1442,31 @@ def obstacle_geometry_fits_candidate(
     roughness = float(safety.roughness)
     width = float(safety.width)
     clearance = float(safety.clearance_height)
+    # NavigationSafety 正常由 assessor 先做有限值校验，但 Action 边界仍需独立防御。
+    # 尤其 Python 的布尔短路可能让完整 T 台的 height/width 分支跳过 NaN pitch，若不在
+    # 这里原子检查，损坏消息就可能绕过最终闸门。任一米制量测无穷或非数都拒绝整帧。
+    if not all(isfinite(value) for value in (
+        pitch,
+        roll,
+        height,
+        depth,
+        roughness,
+        width,
+        clearance,
+    )):
+        return False
+    if any(value < 0.0 for value in (
+        height,
+        depth,
+        roughness,
+        width,
+        clearance,
+    )):
+        return False
 
     if obstacle_id == "right_angle_poles":
-        # Real poles are narrow, tall and clearly above the local ground profile.
-        # Visual-only hints can trigger similar wording, so this strict check is
-        # required before committing to action.
+        # 规则绕杆立柱应当窄、高，并明显突出局部地面。单独的视觉框也可能产生相似
+        # 语义，因此只有点云同时满足这些尺寸，才允许进入比赛绕杆 Action 流程。
         return (
             obstacle_type == NavigationSafety.OBSTACLE_POLE
             and height >= 0.45
@@ -1455,8 +1474,7 @@ def obstacle_geometry_fits_candidate(
             and depth < 0.08
         )
     if obstacle_id == "height_bar":
-        # Keep bar handling separate from pits and walls so slope side views do
-        # not leak into the bypass gate.
+        # 限高杆与坑洞/墙面分开校验，防止斜坡侧视轮廓误进入限高杆交接流程。
         return (
             obstacle_type in {
                 NavigationSafety.OBSTACLE_BAR,
@@ -1491,16 +1509,43 @@ def obstacle_geometry_fits_candidate(
             and roll <= 12.0
         )
     if obstacle_id == "t_shaped_stairs":
-        return (
-            obstacle_type == NavigationSafety.OBSTACLE_STEP
-            # Keep the final Action gate consistent with the display classifier:
-            # 0.44 m+ flat STEP crops were measured on the main-slope side.
-            and 0.28 <= height <= 0.43
-            and width >= 0.45
-            and 0.020 <= roughness <= 0.080
-            and pitch <= 15.0
-            and roll <= 8.0
+        # 正对 T 台存在三种合法深度轮廓：完整 0.40 m 顶部、只见前几级的局部踏面，
+        # 以及参考平面跨越多级踏面后形成的阶梯总体趋势。无闪现样本属于第三种：残余
+        # 高度仅 0.081 m，但仍保留 16.23°、0.029 m 残差和 0.998 m 宽度。名称层已经
+        # 接受该证据，最终 Action 闸门不能重新引入旧的“高度至少 0.28 m、坡角不超过
+        # 15°”矛盾。三种轮廓仍共同受 0.43 m 高度上限、6° 横滚和 0.08 m 残差上限
+        # 约束，因此实测 0.44～0.46 m 的主斜坡侧面继续被拒绝。
+        stepped_profile = (
+            7.0 <= pitch <= 18.0
+            and roughness >= 0.020
         )
+        partial_tread = (
+            height >= 0.28 and width >= 0.45 and roughness >= 0.040
+        )
+        step_profile = (
+            obstacle_type == NavigationSafety.OBSTACLE_STEP
+            and height <= 0.43
+            and roughness <= 0.080
+            and roll <= 6.0
+            and (
+                (width >= 0.60 and (height >= 0.32 or stepped_profile))
+                or partial_tread
+            )
+        )
+        # 近场参考平面可能落在较高踏面，使较低一级暂时成为 PIT。名称层只在这组
+        # 严格坡角、坑深、低残余高度、残差和规则宽度同时成立时恢复 T 台语义；最终
+        # Action 闸门复用同一轮廓，否则会出现“名称正确但永远不能交接”。横滚门排除
+        # 从侧面观察到的坡/台边缘。
+        pit_profile = (
+            obstacle_type == NavigationSafety.OBSTACLE_PIT
+            and 16.0 <= pitch <= 24.0
+            and 0.20 <= depth <= 0.36
+            and height < 0.12
+            and 0.025 <= roughness <= 0.065
+            and 0.75 <= width <= 1.25
+            and roll <= 6.0
+        )
+        return step_profile or pit_profile
     if obstacle_id == "gravel_wood_pit":
         if obstacle_type == NavigationSafety.OBSTACLE_PIT:
             return 0.06 <= depth <= 0.30 and 0.05 <= height <= 0.34
@@ -1520,10 +1565,9 @@ def obstacle_geometry_fits_candidate(
         )
         return regular_pit or close_fill
     if obstacle_id == "high_wall":
-        # The real wall is 0.30 m high and about 1.00 m wide. The gravel-pit rail that
-        # was falsely counted as a wall measured 0.10--0.25 m high; requiring the full
-        # wall face rejects that crop. A separately recognised occlusion-as-PIT shape
-        # remains admissible only with the strict metrics used by the name layer.
+        # 规则高墙约 0.30 m 高、1.00 m 宽；碎石坑边沿实测只有 0.10～0.25 m 高，
+        # 因此完整墙面门限可排除这类裁切误报。若遮挡使点云粗分类表现为 PIT，则只在
+        # 名称层使用的那组严格坡角、深度、粗糙度与宽度条件同时成立时放行。
         if obstacle_type == NavigationSafety.OBSTACLE_PIT:
             return (
                 12.0 <= pitch <= 22.0
@@ -2092,9 +2136,12 @@ class AutonomousMission(Node):
         self.front_name_received = time.monotonic()
 
     def _navigation_safety_callback(self, msg: NavigationSafety) -> None:
-        """同步最新的几何观测；只用于语义与几何一致性检查。"""
-        if not msg.perception_valid:
-            return
+        """缓存最新几何，包括明确的无效帧。
+
+        无效消息说明上一帧米制观测已经不可继续使用；若直接忽略，旧高度/宽度会在
+        ``safety_geometry_stale_seconds`` 内继续存活，传感器刚断流时仍可能授权交接。
+        因此无效帧也覆盖缓存，让最终几何闸门立即 fail-closed。
+        """
         self.last_safety = msg
         self.safety_received = time.monotonic()
 
@@ -2102,6 +2149,7 @@ class AutonomousMission(Node):
         """返回仍可用于闸门判断的最新安全观测。"""
         if (
             self.last_safety is None
+            or not self.last_safety.perception_valid
             or now - self.safety_received
             > float(self.params["safety_geometry_stale_seconds"])
         ):
@@ -2269,15 +2317,22 @@ class AutonomousMission(Node):
         candidate_id: str,
         now: Optional[float] = None,
     ) -> bool:
-        """Check whether the latest NavigationSafety geometry agrees with candidate."""
+        """只让与语义候选一致的新鲜米制几何通过。
+
+        ``front_obstacle_name`` 和 ``TraversalGuidance`` 可用于任务调度，但都不含最终
+        Action 所需的完整高度、宽度和深度。NavigationSafety 缺失、过期或明确无效时
+        必须拒绝交接，不能把“没有证据”解释成“几何匹配”；后续新鲜有效帧可自然恢复，
+        不设置永久故障锁。
+        """
         if not candidate_id:
             return False
         safety = self._latest_navigation_safety(
             time.monotonic() if now is None else float(now)
         )
-        if safety is None:
-            return True
-        return obstacle_geometry_fits_candidate(candidate_id, safety)
+        return bool(
+            safety is not None
+            and obstacle_geometry_fits_candidate(candidate_id, safety)
+        )
 
     def _voted_obstacle_id(self, fallback: str = "") -> str:
         """返回同一入口最近语义的多数票，票数相同时优先较新的结论。
@@ -2952,14 +3007,27 @@ class AutonomousMission(Node):
         handle.get_result_async().add_done_callback(self._nav_result)
 
     def _nav_result(self, future):
-        result = future.result()
-        status = int(result.status) if result is not None else 0
+        # Nav2 重启、DDS 断连或 Action server 销毁时，结果 future 可以异常结束。异常仍
+        # 必须经过下面统一的句柄/目标清理和有界重试流程，不能让 executor 回调抛出并使
+        # 独立自主任务进程退出。
+        try:
+            result = future.result()
+            status = int(result.status) if result is not None else 0
+            result_error = ""
+            result_failed = False
+        except Exception as exc:
+            result = None
+            status = GoalStatus.STATUS_UNKNOWN
+            result_error = f": {exc}"
+            result_failed = True
+            self.get_logger().error(f"Nav2 result failed{result_error}")
         purpose, target = self.nav_purpose, self.nav_target
         revisit_id = self.nav_revisit_id
         cancel_reason = self.nav_cancel_reason
         obstacle_position = self.nav_obstacle_position
         approach_initial_id = self.nav_obstacle_id
         self.nav_handle, self.nav_target, self.nav_cancel_pending = None, None, False
+        self.nav_purpose = ""
         self.nav_progress_pose = None
         self.nav_obstacle_position = None
         self.nav_obstacle_id = ""
@@ -3020,8 +3088,17 @@ class AutonomousMission(Node):
             self.nav_retry_until = time.monotonic() + float(
                 self.params["nav_failure_retry_delay"]
             )
+        if result_failed and purpose == "approach":
+            # 结果传输异常时无法证明旧 Nav2 goal 已经终止。即使该目标先前因 stall
+            # 发出过取消请求，也绝不能继续走下面的“停在膨胀层后交接”分支，否则旧
+            # Nav2 controller 与 TraverseObstacle 可能同时拥有运动控制权。释放入口锁，
+            # 等 Action 客户端/服务器恢复后从新鲜地图和感知重新建立目标。
+            self._reset_obstacle_lock()
+            self.approach_stall_id = ""
+            self.approach_stall_count = 0
         if (
             self.enabled
+            and not result_failed
             and purpose == "approach"
             and obstacle_position is not None
         ):
@@ -3193,7 +3270,9 @@ class AutonomousMission(Node):
             self._reset_obstacle_lock()
         if self.enabled:
             self.state = "EXPLORING"
-        self._publish_state(f"Nav2 {purpose} finished with status={status}")
+        self._publish_state(
+            f"Nav2 {purpose} finished with status={status}{result_error}"
+        )
 
     def _nav_is_stalled(self, robot, now: float) -> bool:
         """检测“Action 仍运行但机体不再前进/转向”，避免等满 45 秒才恢复。

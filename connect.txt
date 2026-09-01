@@ -56,7 +56,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   作用：按时间戳同步点云几何与视觉结果，并检查视觉框与前向通道相交，输出统一障碍信息。
   输入：/terrain/features_stamped、/vision/obstacle_stamped。
   输出：/perception/fused_obstacle、/diagnostics。
-  注意：点云负责尺寸和安全判断，视觉只增强类别置信度；相机断流 0.25 s 后退化为纯点云输出。
+  注意：点云负责尺寸和安全判断，视觉只增强兼容类别的置信度；vision_confirmed=true 表示
+        视觉类别已通过点云类别和米制结构一致性检查，不表示仅仅检测到视觉框。类别冲突时
+        保持点云类别且该位为 false；相机断流 0.25 s 后退化为纯点云输出。
 
 2.2 安全决策节点
 
@@ -69,7 +71,7 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         可显示主斜坡、木桥引坡、T 字形台阶、限高杆、直角绕杆区、坑区和高墙。T 字台阶
         同时兼容“直接看到顶部”和“多级踏面形成阶梯趋势”两种视角。仅视觉命中
         会标明“点云未确认/待分类”，且不能覆盖已确认名称。无法由局部数据区分木桥 A/B 时
-        明确写“待结构确认”。越障目标在 0.90 m 外保留低速入口接近窗口，进入交接区停车。
+        明确写“待结构确认”。越障目标在 1.20 m 外保留低速入口接近窗口，进入交接区停车。
         当前只提供导航约束，不发送抬腿、关节或越障动作命令。比赛专名连续 3 帧一致
         才切换、连续 4 帧无障碍才清除；感知无效立即发布，不保留旧名称。融合 Header 必须
         严格递增，重复/乱序帧不刷新安全心跳，持续重发最终按感知超时处理。高度、坑深、
@@ -80,7 +82,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   输入：/terrain/navigation_safety。
   输出：/traversal/guidance、/traversal/phase、/traversal/approach_pose。
   注意：入口位姿位于输入 frame（通常 base_link）的障碍前方；本节点不发送 Nav2 goal，
-        不生成关节动作。POLE 由 Nav2 绕杆，不触发运动控制交接；READY 需连续 3 帧，
+        不生成关节动作。普通/矮 POLE 由 Nav2 绕行；高度≥0.45 m 且语义确认为直角绕杆
+        赛项时才触发 Action 交接。READY 需连续 3 帧，
         具有距离/角度迟滞；输入断流输出 INVALID 并清除历史。approach_pose 仅在当前确有
         有效越障目标时发布，程序必须以 guidance 为权威有效性来源。
 
@@ -93,6 +96,7 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   注意：它只限制已有速度，不自行生成运动指令；雷达急停距离默认 0.22 m，不负责把
         可越障目标改成绕行目标。地形限速为零时，可把 DWB 线速度不超过 0.12 m/s 且含
         yaw 的转向主导输入转换为纯 yaw 输出；输出线速度仍为零，用于换视角和返程脱困。
+        Twist 六个分量按一个原子命令校验，任一 NaN/Inf 都使整条自动导航命令归零。
   转向恢复输入：/navigation/rotation_recovery（std_msgs/Bool，4 Hz 心跳）。仅自主任务拥有
         Nav2 转向的返航、探索、覆盖、回访、接近、对正和换视角阶段为 true；断流 0.8 s
         自动失效。速度门只提取最大 0.30 rad/s yaw，绝不放行 linear，全部安全守卫仍有效。
@@ -124,6 +128,11 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
         /traverse_obstacle 服务端。autonomous_navigation.launch.py 永远不启动仿真服务端；
         仿真替身只由 quadruped_gazebo 的独立 launch 显式启动。
+  最终几何门：每次 Action 交接都要求新鲜且 perception_valid=true 的 NavigationSafety；
+        最大年龄由 autonomous_mission.yaml/safety_geometry_stale_seconds 唯一配置。缺失、
+        超龄或无效消息不能由历史名称补位。T 字台阶接受完整顶部、局部踏面、7～18° STEP
+        趋势和严格 16～24° 近场 PIT 踏面轮廓，并保留高度/横滚/粗糙度上限排除主坡侧面。
+        Nav2 异步结果 Future 异常按普通失败清理目标并进入有界重试，不改变话题或 Action 合同。
   地图边缘：普通目标贴近当前 OccupancyGrid 外框时禁止交接；只有语义已确认为 high_wall、
         实时粗类型为 WALL 且名称不是场地边界时，才允许墙体遮挡造成的“墙后未知区”特例。
         该规则不新增话题，也不能用于放行通用 WALL、未知边界或未确认障碍。
@@ -358,7 +367,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、lateral_offset、width、
   clearance_height、time_skew、valid_points。
   融合约束：点云提供米制尺度；视觉 BAR 需点云 clearance_height 支持，POLE 需点云窄宽度
-  支持。视觉/几何冲突时类别保持点云结果并降低 confidence。所有类别、连续字段、视觉框
+  支持。vision_confirmed 只在类别/结构兼容时为 true；视觉/几何冲突时该位为 false，类别
+  保持点云结果并降低 confidence。所有类别、连续字段、视觉框
   和有效位在融合消费者处二次校验；旧/未来 Header 不得维持 perception_valid。
 
 五、决策和速度接口

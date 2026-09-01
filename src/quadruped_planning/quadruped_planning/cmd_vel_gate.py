@@ -26,6 +26,27 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32
 
 
+def twist_components_are_finite(command: Twist) -> bool:
+    """仅当 Twist 六个自由度均为有限数时返回真。
+
+    ROS 消息类型不会禁止 NaN/Inf。即使四足底盘当前只消费 ``linear.x`` 和
+    ``angular.z``，把其他损坏字段继续转发也会让未来的全向底盘、日志或仲裁器行为
+    不确定，因此最终速度门必须把整条命令作为一个原子合同检查。异常命令直接归零，
+    等待下一条新鲜且完整的 Twist，不能逐字段修补后继续运动。
+    """
+    return all(
+        isfinite(float(value))
+        for value in (
+            command.linear.x,
+            command.linear.y,
+            command.linear.z,
+            command.angular.x,
+            command.angular.y,
+            command.angular.z,
+        )
+    )
+
+
 def gated_twist(
     source: Twist,
     limit: float,
@@ -44,6 +65,7 @@ def gated_twist(
         or not navigation_healthy
         or not health_fresh
         or external_stop
+        or not twist_components_are_finite(source)
         or not isfinite(limit)
         or limit <= 0.0
     ):
@@ -66,7 +88,11 @@ def alignment_twist(source: Twist, angular_limit: float) -> Twist:
     该辅助函数故意丢弃全部线速度和 roll/pitch 角速度，不能被用于向障碍继续前进。
     """
     output = Twist()
-    if not isfinite(angular_limit) or angular_limit <= 0.0:
+    if (
+        not twist_components_are_finite(source)
+        or not isfinite(angular_limit)
+        or angular_limit <= 0.0
+    ):
         return output
     output.angular.z = max(
         -abs(float(angular_limit)),
@@ -84,6 +110,8 @@ def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.12) -> b
     ``alignment_twist``，但输出会强制丢弃全部平移，只保留有界 yaw。后续仍经过导航
     健康、超时、外部停车和 360° 雷达急停，绝不允许借此继续靠近障碍。
     """
+    if not twist_components_are_finite(source) or not isfinite(linear_tolerance):
+        return False
     tolerance = max(0.0, float(linear_tolerance))
     return bool(
         abs(float(source.linear.x)) <= tolerance
@@ -94,14 +122,19 @@ def is_pure_rotation_request(source: Twist, linear_tolerance: float = 0.12) -> b
 
 
 def has_finite_yaw_request(source: Twist, minimum_magnitude: float = 1e-3) -> bool:
-    """Return true only for a finite, non-trivial Nav2 yaw request.
+    """仅接受数值有限且幅值有效的 Nav2 转向请求。
 
-    During an explicitly heartbeated return recovery the DWB command may still carry
-    a large forward component. The caller may inspect its yaw, but must pass it through
-    :func:`alignment_twist`, which discards every linear component.
+    任务层明确发送“允许转向恢复”的心跳时，DWB 原始命令仍可能夹带较大的前进分量。
+    调用方可以读取其中的 yaw 意图，但最终必须交给 :func:`alignment_twist`；后者会
+    清空所有平移分量，仅输出受限的原地转向，避免借恢复状态继续向障碍推进。
     """
+    if (
+        not twist_components_are_finite(source)
+        or not isfinite(minimum_magnitude)
+    ):
+        return False
     yaw = float(source.angular.z)
-    return isfinite(yaw) and abs(yaw) >= max(0.0, float(minimum_magnitude))
+    return abs(yaw) >= max(0.0, float(minimum_magnitude))
 
 
 def scan_allows_command(
@@ -116,7 +149,7 @@ def scan_allows_command(
     可能被机身扫到。无效量程被忽略，但一个有效样本低于阈值就立即拒绝命令。这里使用
     ``LaserScan`` 自带角度定义，不假设固定 720 点或固定雷达型号。
     """
-    if scan is None or not scan.ranges:
+    if scan is None or not scan.ranges or not twist_components_are_finite(command):
         return False
     linear = float(command.linear.x)
     angular = float(command.angular.z)
@@ -316,11 +349,11 @@ class NavigationSpeedGate(Node):
         self.last_guidance_time = self.get_clock().now()
 
     def rotation_recovery_callback(self, msg: Bool) -> None:
-        """Cache the task heartbeat that permits bounded yaw-only Nav2 recovery.
+        """缓存任务层允许“仅转向恢复”的心跳。
 
-        The mission may assert this during exploration, return, viewpoint changes or
-        obstacle approach.  It is not a general speed bypass: ``publish_safe_command``
-        always calls :func:`alignment_twist`, which discards every linear component.
+        探索、返航、换视角或接近障碍时，任务层可以短时置位该信号。它不是通用速度
+        旁路：``publish_safe_command`` 始终通过 :func:`alignment_twist` 生成输出，
+        因而全部平移分量都会被清零。
         """
         self.rotation_recovery_requested = bool(msg.data)
         self.last_rotation_recovery_time = self.get_clock().now()

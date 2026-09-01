@@ -56,23 +56,51 @@ def test_matching_vision_boosts_confidence_but_not_geometry_requirement():
     assert result.lateral_offset == cloud.lateral_offset
 
 
-def test_visual_bar_only_refines_existing_positive_geometry():
-    """横杆细分类必须同时满足点云离地净空。"""
+def test_visual_bar_or_pole_only_refines_compatible_positive_geometry():
+    """横杆需点云净空，立柱需点云窄宽度，二者都不能仅靠视觉细分。"""
     camera = vision(VisionObstacle.HEIGHT_BAR, 0.9)
     compatible = terrain()
     compatible.clearance_height = 0.12
     result = fuse_observations(compatible, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.BAR
+    assert result.vision_confirmed
 
     ordinary_step = terrain()
     result = fuse_observations(ordinary_step, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.STEP
     assert result.confidence < ordinary_step.confidence
+    assert not result.vision_confirmed
+
+    pole_camera = vision(VisionObstacle.POLES, 0.9)
+    narrow_step = terrain()
+    narrow_step.width = 0.20
+    result = fuse_observations(narrow_step, pole_camera, 0.02, 0.55)
+    assert result.obstacle_type == FusedObstacle.POLE
+    assert result.vision_confirmed
+
+    wide_step = terrain()
+    wide_step.width = 0.26
+    result = fuse_observations(wide_step, pole_camera, 0.02, 0.55)
+    assert result.obstacle_type == FusedObstacle.STEP
+    assert result.confidence < wide_step.confidence
+    assert not result.vision_confirmed
 
     invalid = TerrainFeatures(valid=False, obstacle_type=TerrainFeatures.UNKNOWN)
     result = fuse_observations(invalid, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.UNKNOWN
     assert not result.geometry_confirmed
+    assert not result.vision_confirmed
+
+
+def test_visual_target_without_compatible_geometry_is_not_confirmed():
+    """同步视觉框不能把 CLEAR 点云冒充为已经完成类别一致性复核。"""
+    cloud = terrain(TerrainFeatures.CLEAR)
+    camera = vision(VisionObstacle.WALL, 0.9)
+    result = fuse_observations(cloud, camera, 0.02, 0.55)
+    assert result.obstacle_type == FusedObstacle.CLEAR
+    assert result.geometry_confirmed
+    assert not result.vision_confirmed
+    assert result.confidence == cloud.confidence
 
 
 def _stamp(msg, seconds, nanoseconds=0):

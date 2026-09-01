@@ -69,7 +69,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 当前代码完成的是环境感知、SLAM/Nav2、传感器通用 profile、导航健康检查、保守地形
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
-9 个 ROS 2 包可编译，288 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+9 个 ROS 2 包可编译，296 项测试记录通过，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -79,6 +79,17 @@ ROI 次序、HSV 范围、点数/频率、同步窗口、高度阈值、APPROACH
 以及速度门输入/输出回环。非法 YAML 会让对应节点启动失败，并在一条 `ValueError` 中列出同组
 全部错误，不再把错误值静默修改后继续运行。真实 ROS 节点回归还覆盖 DDS 感知配对、相机断流后
 纯点云降级和速度命令超时归零；感知、规划及 SLAM Python 核心的语句覆盖率约为 61%。
+
+2026-09-01 稳定性回归进一步收紧三道安全合同：`vision_confirmed` 只表示视觉类别与有效
+点云几何一致，不再表示“画面中存在任意候选”；自主任务进入 Action 前必须拿到新鲜、有效且
+与障碍专名一致的 `NavigationSafety`，T 字台阶同时兼容完整顶部、局部踏面、多级阶梯趋势
+以及严格的近场 PIT 轮廓；
+最终速度门把 Twist 六个分量作为一个原子命令检查，任一 NaN/Inf 都整条归零。HSV 参数校验
+允许 Hue 跨越 OpenCV 的 179→0 边界，但 S/V 上下界仍必须有序。无闪现 Gazebo 逐障碍复测
+共取得 317/317 正确专名与 100% 导航健康；动态 T 台正常到达 READY 和控制器等待。未接真实
+`/traverse_obstacle` 服务时仍不计物理越障成功。几何新鲜窗口现由
+`autonomous_mission.yaml` 的 `safety_geometry_stale_seconds` 唯一配置；Nav2 异步结果 `Future`
+异常会按有界失败清理并重试，不再使独立任务进程退出。
 
 ### 后续工作的实施内容与阶段验收
 
@@ -205,6 +216,8 @@ wakula/
   来源的重复/乱序点云不会替换最新帧；rosbag/Gazebo 时钟回拨会清除旧水位和地面先验。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；相机断流时在
   0.25 s 后退化为纯点云结果；视觉框还必须与前向通道相交，点云始终掌握尺度权限。
+  `vision_confirmed=true` 只在类别兼容且米制细分条件通过时产生；CLEAR/视觉障碍、STEP/视觉墙
+  等冲突帧保持 false，并降低而不覆盖点云置信度。
 - `terrain_safety_assessor`：优先读取按时间戳配对的融合观测，原子发布地形模式、Nav2
   速度上限、有效性与几何摘要，并在终端周期显示正前方障碍中文名称、置信度、距离、
   高度和视觉介入状态，供调试及未来运动团队只读接入。名称优先采用点云量测：可显示
@@ -348,7 +361,7 @@ OpenCV 源码，只需完成以下合同：
    `/cmd_vel` 消费者和可选越障 Action。所有项通过后才算完成上层—真机最小对接。
 
 ```bash
-ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
+ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=ros_default
 ./scripts/check_integration.sh --inputs-only --image /camera/image_raw --points /camera/depth/points
 ./scripts/check_integration.sh --image /camera/image_raw --points /camera/depth/points
 ```
@@ -541,7 +554,7 @@ OpenCV 合成矩阵已覆盖正常光、约 62% 暗光、局部阴影、全白�
 Header 时间严格递增，重复/乱序帧不能重复计票或刷新安全心跳；仿真/rosbag 时钟回拨会清除
 旧视觉投票、地面先验、障碍名称和风险迟滞。蓝白限高杆还增加蓝段尺寸与间距规律性门，
 不规则同排蓝色杂物不会再仅凭“水平对齐”确认成横杆。加上本轮地图边缘守卫回归后，
-全工作区共 288 项测试通过。
+该轮历史基线为 288 项测试通过；当前数量以本页顶部为准。
 
 2026-08-31 又完成一轮**不启动传送/闪现 Action**的逐障碍回归。八类规则障碍各取一个
 能看到关键结构的固定观察位，每类连续 40 帧，共 320/320 帧输出正确比赛名称，几何确认与
@@ -1036,7 +1049,7 @@ ros2 topic echo /perception/front_obstacle_name
 | 模式/类别 | 当前处理 | 是否执行腿部动作 |
 |---|---|---|
 | `WALK` | Nav2 速度上限为 1；视觉证据可将上限降至 0.35 | 否 |
-| `POLE` | 速度上限为 0.35，由 Nav2 代价地图规划绕行 | 否 |
+| `POLE` | 普通/矮立柱由 Nav2 低速绕行；高度≥0.45 m 且语义确认为直角绕杆赛项时，进入 Action 任务流程 | 否；由 Action 服务端负责 |
 | `STEP` / `PIT` / `WALL` / `BAR` | 远处低速接近入口；确认专名后先原地对准，再进入 1.20 m 交接区发布 `READY` 并停车 | 否 |
 | 可量测坡面 | 发布坡面越障候选及入口引导；交接区停车 | 否 |
 | 数据断流、TF 失败或字段非法 | 发布 `STOP` 和零速度上限 | 否 |
@@ -1080,7 +1093,8 @@ obstacle_type, confidence, width, clearance_height]
 同步器会在有界小队列内寻找全局时间差最小的一对消息，能处理常见的回调乱序；零时间戳、
 重复旧帧和时间差超过 `0.10 s` 的观测不会融合。融合层还会二次校验类别、NaN/Inf、
 归一化视觉框、前向通道相交关系和连续量范围；决策层拒绝超龄/未来时间戳。几何未确认、置信度不足或点数
-不足时保持停车。若相机断流，融合器等待 `0.25 s` 同步窗口后继续发布
+不足时保持停车。`vision_confirmed` 仅表示视觉类别通过了与点云类别/米制结构的一致性检查；
+它不表示“相机看到了某个框”，冲突帧不得借该位影响下游安全判断。若相机断流，融合器等待 `0.25 s` 同步窗口后继续发布
 `vision_confirmed=false` 的纯点云几何，避免辅助相机成为安全链单点故障。关闭
 OpenCV 后自动回到 `/terrain/features` 兼容路径，便于只有 3D 雷达的真机继续使用。
 
@@ -1168,7 +1182,8 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 - Nav2 controller 只发布 `/cmd_vel_nav`。
 - Velocity Smoother 限制加速度并发布 `/cmd_vel_smoothed`。
 - `navigation_speed_gate` 应用 `/terrain/speed_limit`，同时检查命令、评估和
-  `/navigation/healthy` 心跳，并读取 `/scan` 做 0.22 m 极近距离运动方向急停。
+  `/navigation/healthy` 心跳，并读取 `/scan` 做 0.22 m 极近距离运动方向急停。Twist 的三轴
+  平移和三轴转动按一个原子命令校验，任一分量为 NaN/Inf 时整条命令归零。
 - `navigation_speed_gate` 直接发布标准 `/cmd_vel`，避免当前 Jazzy 版本 Collision Monitor
   在运行/退出时的 SIGSEGV；近距离扫描只负责防撞兜底，不参与全局避障或越障分类。
 
@@ -1177,9 +1192,10 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
 
 融合模式采用非对称防抖：紧急 STOP 立即生效；STEP/CLIMB 需要连续几帧几何证据；向
 更安全等级恢复时要求更多连续安全帧。这样既不延迟紧急停车，也减少飞点和阈值抖动。
-已确认的台阶、坑洞、墙和横杆在 0.90 m 以外保留 0.25 倍低速窗口，让 Nav2 到达入口
-并对正；进入交接区立即归零并发布 READY。立柱属于绕杆导航物体，保持 0.35 倍速度由
-代价地图避碰。坡面会形成越障引导候选，但真机没有运动控制器时仍只能在交接处停车。
+已确认的台阶、坑洞、墙和横杆在 1.20 m 以外保留 0.25 倍低速窗口，让 Nav2 到达入口
+并对正；进入交接区立即归零并发布 READY。普通/矮立柱保持 0.35 倍速度由代价
+地图避碰；只有高度≥0.45 m 且语义确认为直角绕杆赛项时才进入 Action 流程。坡面会形成越障
+引导候选，但真机没有运动控制器时仍只能在交接处停车。
 视觉细分类也不能无条件覆盖点云：横杆必须同时具有米制离地净空，立柱必须满足点云窄宽度；
 视觉与几何冲突时保留几何类别并降低置信度，等待后续同步帧确认。
 高度、坡度、粗糙度、点数、消息采样时刻和超时等运行参数也在节点入口及纯决策函数处

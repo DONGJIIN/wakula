@@ -27,6 +27,9 @@
 #    目标更多、任务更慢。frontier/coverage 参数只基于在线地图，不应加入正式场地坐标。
 # 9. 无目标太早回起点：增大 maximum_search_turns/empty_frontier_confirmations；任务总时长
 #    仍受 mission_timeout 限制。return_time_reserve 是其中只留给返程的窗口，不能大于总时长。
+# 10. 名称正确但 Action 一直不交接：先检查 NavigationSafety 的时间戳/频率和
+#    perception_valid，再调整 safety_geometry_stale_seconds。低频传感器可小步增大；过严会
+#    漏交接，过松会在断流后沿用旧几何，不能超过底层感知/停车看门狗的安全窗口。
 #
 # 调参顺序：5 秒进展判据 -> 入口空间/航向 -> Action 成功后验 -> 冷却 -> 探索覆盖。
 autonomous_mission:
@@ -128,6 +131,9 @@ autonomous_mission:
     traversal_timeout: 45.0
     # 到达入口后越障 Action 服务仍未就绪，最多原地等待 5 秒；随后保留为未完成并换目标。
     controller_wait_timeout: 5.0
+    # Action 最终几何只接受 0.35 s 内的新鲜 NavigationSafety。真机若点云稳定低于 5 Hz，
+    # 先修复驱动时间戳/频率，再按实测最大帧间隔小步增大；过大会让断流后的旧尺寸继续存活。
+    safety_geometry_stale_seconds: 0.35
     minimum_obstacle_confidence: 0.55
     obstacle_confirmation_frames: 3
     # 2.5 m 内先累计同一 map 入口的语义历史，避免坡面接近后因局部裁剪误变为台阶；

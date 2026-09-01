@@ -56,15 +56,32 @@ def test_vision_validation_reports_all_related_mistakes_at_once():
 
 
 def test_vision_validation_rejects_invalid_hsv_and_topics():
-    """Reject non-portable topic names and inverted OpenCV color bounds."""
+    """Reject non-portable topic names and inverted linear HSV components."""
     values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
     values["image_topic_candidates"] = ["camera/image_raw"]
-    values["orange_hsv_lower"] = [30, 80, 70]
-    values["orange_hsv_upper"] = [20, 255, 255]
+    values["orange_hsv_lower"] = [10, 200, 70]
+    values["orange_hsv_upper"] = [20, 100, 255]
     with pytest.raises(ValueError) as error:
         validate_vision_parameters(values)
     assert "absolute ROS topic" in str(error.value)
     assert "orange_hsv_lower" in str(error.value)
+
+
+def test_vision_validation_accepts_wrapped_hue_range():
+    """Hue lower > upper denotes 179-to-0 wraparound, not an inverted range."""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values["orange_hsv_lower"] = [175, 80, 70]
+    values["orange_hsv_upper"] = [12, 255, 255]
+    validate_vision_parameters(values)
+
+
+def test_vision_validation_rejects_inverted_value_range():
+    """Hue may wrap, but the linear saturation/value bounds may never wrap."""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values["blue_hsv_lower"] = [175, 80, 240]
+    values["blue_hsv_upper"] = [12, 255, 100]
+    with pytest.raises(ValueError, match="blue_hsv_lower S/V"):
+        validate_vision_parameters(values)
 
 
 def test_terrain_validation_rejects_inverted_roi_and_thresholds():

@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import re
 
 from launch.actions import DeclareLaunchArgument
 import pytest
@@ -311,6 +312,20 @@ def test_sensor_profiles_cover_common_devices_and_allow_overrides():
     )
     assert resolved["scan_topic"] == "/front/scan"
     assert resolved["camera_topic"] == "/camera/camera/color/image_raw"
+
+
+def test_documented_sensor_profiles_exist_in_the_runtime_catalog():
+    """文档中的可复制启动命令不能引用 YAML 中不存在的传感器 profile。"""
+    profiles = load_sensor_profiles(
+        str(PACKAGE_ROOT / "config" / "sensor_profiles.yaml")
+    )
+    repository_root = PACKAGE_ROOT.parents[1]
+    documented = set()
+    for name in ("README.md", "quickstart.txt", "instruction.txt", "connect.txt"):
+        text = (repository_root / name).read_text(encoding="utf-8")
+        documented.update(re.findall(r"sensor_profile:=([A-Za-z0-9_-]+)", text))
+    assert documented, "说明文档中应至少保留一条可复制的 sensor_profile 启动命令"
+    assert documented <= profiles.keys()
 
 
 @pytest.mark.parametrize(

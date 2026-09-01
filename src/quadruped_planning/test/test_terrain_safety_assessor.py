@@ -10,6 +10,7 @@ from quadruped_planning.cmd_vel_gate import (
     has_finite_yaw_request,
     is_pure_rotation_request,
     scan_allows_command,
+    twist_components_are_finite,
 )
 from quadruped_planning.terrain_safety_assessor import (
     ObstacleNameStabilizer,
@@ -181,6 +182,17 @@ def test_front_name_uses_measured_geometry_for_rule_obstacles():
     safety.width = 0.75
     safety.roughness = 0.07
     assert front_obstacle_name_zh(safety) == "木桥 B（桥板间隙）"
+    # T 台近场的低踏面可能暂时成为 PIT；只有规则坡角/坑深/宽度且横滚较小时恢复专名。
+    safety.obstacle_height = 0.08
+    safety.pit_depth = 0.28
+    safety.slope_pitch = 0.349066
+    safety.slope_roll = 0.02
+    safety.width = 1.0
+    safety.roughness = 0.04
+    assert front_obstacle_name_zh(safety) == "T 字形台阶"
+    safety.slope_roll = 0.14
+    assert front_obstacle_name_zh(safety) != "T 字形台阶"
+    safety.slope_roll = 0.0
     safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
     safety.obstacle_height = 0.30
     safety.width = 1.0
@@ -580,7 +592,8 @@ def test_far_traversal_target_can_be_approached_but_near_target_stops():
     assert apply_distance_aware_constraint(
         stopped, FusedObstacle.WALL, 0.70, 0.75, 0.25
     ) == stopped
-    # POLE 是 Nav2 绕杆物体，不是越障控制器交接目标，距离放行函数不应改写它。
+    # 本距离函数只处理实体入口远近，不决定 POLE 任务语义，因此不改写 POLE；普通/矮柱
+    # 继续由 Nav2，规则高柱是否进入 Action 由任务层的独立语义和几何闸门决定。
     assert apply_distance_aware_constraint(
         stopped, FusedObstacle.POLE, 1.47, 0.75, 0.25
     ) == stopped
@@ -667,6 +680,30 @@ def test_velocity_gate_requires_fresh_command_and_assessment():
     assert gated_twist(command, 1.0, True, True, True, False).linear.x == 0.0
     assert gated_twist(command, float("nan"), True, True).linear.x == 0.0
     assert gated_twist(command, 1.0, True, True, True, True, True).linear.x == 0.0
+
+
+def test_velocity_gate_rejects_nonfinite_twist_as_one_atomic_command():
+    """任一自由度损坏都必须整条归零，不能把 NaN/Inf 送往底盘或变成限幅 yaw。"""
+    command = Twist()
+    command.linear.x = 0.25
+    command.angular.z = 0.40
+    assert twist_components_are_finite(command)
+
+    command.angular.x = float("nan")
+    assert not twist_components_are_finite(command)
+    output = gated_twist(command, 1.0, True, True)
+    assert output.linear.x == 0.0
+    assert output.angular.z == 0.0
+    assert not is_pure_rotation_request(command)
+    assert not has_finite_yaw_request(command)
+
+    # Python 的 min/max 遇到 NaN 可能返回边界值；必须在限幅前拒绝，不能把 NaN yaw
+    # 意外转换成允许的最大旋转速度。
+    command = Twist()
+    command.angular.z = float("nan")
+    assert alignment_twist(command, 0.30).angular.z == 0.0
+    command.angular.z = float("inf")
+    assert alignment_twist(command, 0.30).angular.z == 0.0
 
 
 def test_alignment_twist_never_preserves_translation():

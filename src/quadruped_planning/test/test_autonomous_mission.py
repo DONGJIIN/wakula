@@ -5,6 +5,7 @@ from math import hypot
 from nav_msgs.msg import OccupancyGrid
 
 from quadruped_planning.autonomous_mission import (
+    AutonomousMission,
     Frontier,
     FailedEntry,
     ObservedObstacle,
@@ -56,7 +57,7 @@ from quadruped_planning.autonomous_mission import (
 )
 from action_msgs.msg import GoalStatus
 from quadruped_interfaces.action import TraverseObstacle
-from quadruped_interfaces.msg import TraversalGuidance
+from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
 
 
 def map_with_unknown_border():
@@ -492,8 +493,6 @@ def test_bridge_platform_alone_cannot_be_traversed_without_a_or_b_evidence():
 
 
 def test_high_wall_geometry_rejects_pit_rail_but_accepts_full_face():
-    from quadruped_interfaces.msg import NavigationSafety
-
     safety = NavigationSafety()
     safety.perception_valid = True
     safety.obstacle_type = NavigationSafety.OBSTACLE_WALL
@@ -502,6 +501,186 @@ def test_high_wall_geometry_rejects_pit_rail_but_accepts_full_face():
     assert not obstacle_geometry_fits_candidate("high_wall", safety)
     safety.obstacle_height = 0.30
     assert obstacle_geometry_fits_candidate("high_wall", safety)
+
+
+def test_t_stair_action_gate_accepts_field_stepped_profile_not_slope_side():
+    """最终 Action 闸门必须与无闪现名称证据一致，同时拒绝主坡侧面。"""
+    safety = NavigationSafety()
+    safety.perception_valid = True
+    safety.obstacle_type = NavigationSafety.OBSTACLE_STEP
+    # Stable Gazebo field sample: the fitted reference plane absorbs most tread
+    # height, while the stepped pitch/roughness/width remain distinctive.
+    safety.obstacle_height = 0.081
+    safety.slope_pitch = 0.2833  # 16.23 deg
+    safety.slope_roll = 0.0005
+    safety.roughness = 0.029
+    safety.width = 0.998
+    assert obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+
+    # 完整平整顶部依靠规则高度和宽度确认，不应被阶梯趋势分支的残差下限误伤。
+    safety.obstacle_height = 0.40
+    safety.slope_pitch = 0.0
+    safety.roughness = 0.010
+    safety.width = 0.90
+    assert obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+
+    # 完整顶部的高度/宽度分支也不能用布尔短路绕过损坏的其他米制字段。
+    safety.slope_pitch = float("nan")
+    assert not obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+    safety.slope_pitch = 0.0
+    safety.clearance_height = float("inf")
+    assert not obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+    safety.clearance_height = 0.0
+
+    # 主斜坡长侧实测超过 T 台总高上限；即使它也形成宽 STEP 和非零坡角，也不能交接。
+    safety.obstacle_height = 0.455
+    safety.slope_pitch = 0.1745
+    safety.roughness = 0.030
+    assert not obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+
+    # 近场参考平面落在高踏面时，名称层会给出严格 PIT 形态；最终闸门必须接受同一
+    # 轮廓，但拒绝普通坑洞或明显侧视横滚。
+    safety.obstacle_type = NavigationSafety.OBSTACLE_PIT
+    safety.obstacle_height = 0.08
+    safety.pit_depth = 0.28
+    safety.slope_pitch = 0.349066
+    safety.slope_roll = 0.02
+    safety.roughness = 0.04
+    safety.width = 1.0
+    assert obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+    safety.slope_roll = 0.14
+    assert not obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+    safety.slope_roll = 0.0
+    safety.slope_pitch = 0.0
+    assert not obstacle_geometry_fits_candidate("t_shaped_stairs", safety)
+
+    pole = NavigationSafety()
+    pole.perception_valid = True
+    pole.obstacle_type = NavigationSafety.OBSTACLE_POLE
+    pole.obstacle_height = 0.50
+    pole.width = 0.08
+    pole.pit_depth = -0.01
+    assert not obstacle_geometry_fits_candidate("right_angle_poles", pole)
+
+
+def test_final_geometry_gate_fails_closed_without_fresh_valid_safety():
+    """名称和 guidance 不能代替新鲜米制 Action 证据。"""
+    mission = object.__new__(AutonomousMission)
+    mission.params = {"safety_geometry_stale_seconds": 0.35}
+    mission.last_safety = None
+    mission.safety_received = 0.0
+    assert not mission._geometry_supports_obstacle_id("high_wall", now=10.0)
+
+    wall = NavigationSafety()
+    wall.perception_valid = True
+    wall.obstacle_type = NavigationSafety.OBSTACLE_WALL
+    wall.obstacle_height = 0.30
+    wall.width = 1.0
+    wall.slope_pitch = 0.0
+    mission.last_safety = wall
+    mission.safety_received = 10.0
+    assert mission._geometry_supports_obstacle_id("high_wall", now=10.20)
+    assert not mission._geometry_supports_obstacle_id("high_wall", now=10.36)
+
+    # 明确无效帧立即撤销旧有效几何，即使接收时间仍在新鲜窗口内。
+    invalid = NavigationSafety()
+    invalid.perception_valid = False
+    mission._navigation_safety_callback(invalid)
+    assert mission.last_safety is invalid
+    assert not mission._geometry_supports_obstacle_id(
+        "high_wall", now=mission.safety_received
+    )
+
+
+def test_nav_result_exception_is_cleaned_up_and_retried_without_escaping_callback():
+    """Nav2/DDS 异常结果应等价于有界失败，不能杀死独立任务进程。"""
+
+    class FailingFuture:
+        def result(self):
+            raise RuntimeError("Nav2 server restarted")
+
+    class Logger:
+        def __init__(self):
+            self.errors = []
+
+        def error(self, message):
+            self.errors.append(message)
+
+    mission = object.__new__(AutonomousMission)
+    mission.params = {"nav_failure_retry_delay": 0.5}
+    mission.nav_purpose = "frontier"
+    mission.nav_target = Frontier(1.0, 2.0, 4, 2.2, 1.0)
+    mission.nav_revisit_id = ""
+    mission.nav_cancel_reason = ""
+    mission.nav_obstacle_position = None
+    mission.nav_obstacle_id = ""
+    mission.nav_handle = object()
+    mission.nav_cancel_pending = True
+    mission.nav_progress_pose = (0.0, 0.0, 0.0)
+    mission.blocked_frontiers = []
+    mission.enabled = True
+    mission.state = "NAVIGATING"
+    logger = Logger()
+    states = []
+    mission.get_logger = lambda: logger
+    mission._publish_state = states.append
+
+    mission._nav_result(FailingFuture())
+
+    assert mission.nav_handle is None
+    assert mission.nav_target is None
+    assert mission.nav_purpose == ""
+    assert not mission.nav_cancel_pending
+    assert mission.nav_progress_pose is None
+    assert mission.state == "EXPLORING"
+    assert len(mission.blocked_frontiers) == 1
+    assert mission.nav_retry_until > 0.0
+    assert logger.errors == ["Nav2 result failed: Nav2 server restarted"]
+    assert states[-1].startswith("Nav2 frontier finished with status=0")
+
+    # 即使异常发生前已因 stall 请求取消 approach，也不能把 UNKNOWN 结果解释成“Nav2
+    # 已安全停在膨胀边界”，从而与仍可能运行的旧目标并发进入 TraverseObstacle。
+    approach = object.__new__(AutonomousMission)
+    approach.params = {"nav_failure_retry_delay": 0.5}
+    approach.nav_purpose = "approach"
+    approach.nav_target = Frontier(1.0, 0.0, 4, 1.0, 1.0)
+    approach.nav_revisit_id = ""
+    approach.nav_cancel_reason = "stall"
+    approach.nav_obstacle_position = (1.0, 0.0)
+    approach.nav_obstacle_id = "t_shaped_stairs"
+    approach.nav_handle = object()
+    approach.nav_cancel_pending = True
+    approach.nav_progress_pose = (0.0, 0.0, 0.0)
+    approach.blocked_frontiers = []
+    approach.enabled = True
+    approach.state = "NAVIGATING"
+    approach.locked_obstacle_position = (1.0, 0.0)
+    approach.locked_obstacle_id = "t_shaped_stairs"
+    approach.semantic_votes = ["t_shaped_stairs"]
+    approach.semantic_vote_position = (1.0, 0.0)
+    approach.semantic_verification_position = (0.0, 0.0)
+    approach.semantic_verification_obstacle_positions = [(1.0, 0.0)]
+    approach.semantic_verification_attempts = 1
+    approach.semantic_settle_until = 1.0
+    approach.approach_stall_id = "t_shaped_stairs"
+    approach.approach_stall_count = 1
+    approach.get_logger = lambda: logger
+    approach._publish_state = states.append
+    handoffs = []
+    approach._queue_traversal_handoff = lambda *args: handoffs.append(args)
+
+    approach._nav_result(FailingFuture())
+
+    assert handoffs == []
+    assert approach.nav_handle is None
+    assert approach.nav_target is None
+    assert approach.nav_purpose == ""
+    assert approach.locked_obstacle_position is None
+    assert approach.locked_obstacle_id == ""
+    assert approach.semantic_votes == []
+    assert approach.approach_stall_id == ""
+    assert approach.approach_stall_count == 0
+    assert approach.state == "EXPLORING"
 
 
 def test_competition_score_counts_unique_tasks_and_return_bonus():
@@ -578,6 +757,7 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["nav_progress_translation"] == 0.04
     assert params["nav_progress_rotation"] == 0.06
     assert params["controller_wait_timeout"] == 5.0
+    assert params["safety_geometry_stale_seconds"] == 0.35
     assert params["approach_stall_handoff_count"] == 1
     assert params["approach_stall_handoff_max_distance"] == 2.35
     assert params["approach_stall_handoff_max_heading_error"] == 0.22

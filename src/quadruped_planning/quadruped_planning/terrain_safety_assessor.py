@@ -357,6 +357,7 @@ def front_obstacle_name_zh(
         # 否则任务会把台阶错误交给坑洞流程。
         if (
             16.0 <= pitch_deg <= 24.0
+            and roll_deg <= 6.0
             and 0.20 <= pit_depth_m <= 0.36
             and height_m < 0.12
             and 0.025 <= roughness_m <= 0.065
@@ -512,7 +513,7 @@ def front_obstacle_name_zh(
         ):
             return "木桥平台（A/B 待结构确认）"
         # 高墙已有独立 WALL 分支。正对 T 台时，近场平面会穿过多级踏面，使“相对平面
-        # 高度”小于总高；但它仍表现为宽障碍、7～15° 的阶梯总体趋势和明显离散残差。
+        # 高度”小于总高；但它仍表现为宽障碍、7～18° 的阶梯总体趋势和明显离散残差。
         # 同时支持直接看到 0.40 m 顶部与只看到多级踏面的两种距离，避免再误叫坑区。
         stepped_profile = (
             # 规则 T 台的 0.10 m 级高/0.30 m 踏面在完整 Gazebo 深度云中得到
@@ -730,17 +731,19 @@ def apply_geometry_classification(
 ) -> Assessment:
     """将显式几何类别叠加到连续量阈值结果。
 
-    坑洞、墙和横杆需要未来越障控制器接管，因此在交接区速度上限为零。立柱本身不是
-    要踩过的表面：比赛绕杆区仍由 Nav2 在立柱之间规划，采用保守低速。这里仍只输出
-    导航约束，不发出任何动作指令。
+    坑洞、墙和横杆需要未来越障控制器接管，因此在交接区速度上限为零。对于 POLE，
+    本安全层始终只给出低速 Nav2 约束：普通/矮柱由 Nav2 绕行；高度和语义都符合规则
+    绕杆赛项时，由任务层另行进入 TraverseObstacle Action。这里不决定任务语义，也不
+    发出任何动作指令。
     """
     if obstacle_type == GEOMETRY_PIT and pit_depth > 0.0:
         return "STOP", 0.0
     if obstacle_type in (GEOMETRY_WALL, GEOMETRY_BAR):
         return "STOP", 0.0
     if obstacle_type == GEOMETRY_POLE:
-        # 高立柱可能先被高度阈值评成 STOP。显式 POLE 类别优先：保留低速 Nav2 绕杆，
-        # 具体碰撞边界仍由 scan/costmap 保证，而不是在两米外冻结整机。
+        # 高立柱可能先被高度阈值评成 STOP。显式 POLE 类别优先：安全层先保留低速
+        # Nav2 接近/绕行能力，具体碰撞边界仍由 scan/costmap 保证；任务层若确认它是
+        # 规则绕杆赛项，会在独立的语义与 Action 闸门处取得控制权。
         return "WALK", 0.35
     return assessment
 

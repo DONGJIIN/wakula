@@ -50,7 +50,7 @@ controller_server:
       movement_time_allowance: 15.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 越障入口交接距离为 0.90 m；10 cm 目标容差既给未标定真机留余量，也避免在
+      # 越障入口交接距离为 1.20 m；10 cm 目标容差既给未标定真机留余量，也避免在
       # 接近入口时反复提交几厘米的伪目标。越障交接由任务层和 Action 完成。
       xy_goal_tolerance: 0.10
       yaw_goal_tolerance: 0.12

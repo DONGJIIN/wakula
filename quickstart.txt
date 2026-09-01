@@ -11,7 +11,7 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前基线：9 个 ROS 2 包、288 项测试记录通过；2026-08-31 的三分钟确定性上层流程回归
+当前基线：9 个 ROS 2 包、296 项测试记录通过；2026-08-31 的三分钟确定性上层流程回归
 在 48 秒完成 8/8、返回起点并进入 COMPLETED。原始传感器准确率、SLAM 回环和真机步态
 必须分别验收；该成绩只代表 Gazebo 上层软件链，不代表真机越障能力。
 
@@ -25,6 +25,16 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 量测快照，并在每个粗类型前说明匹配顺序、证据强弱和保守回退原因；删除同一字段的重复
 转换并统一关键中英文注释。新增 NaN/Inf fail-closed 测试，非法点云几何立即撤销旧名称，
 也不能被 OpenCV 提示覆盖。本轮没有改话题、阈值、Gazebo、Nav2 或 Action 接口。
+
+2026-09-01 安全合同复核：视觉确认位现在只在图像类别与有效点云几何一致时为 true；HSV
+参数允许 Hue 179→0 环绕，但仍拒绝反向 S/V。T 字台阶最终 Action 闸门已与名称分类统一，
+能接受无闪现实测的“低残余高度 + 16.23° 多级踏面趋势”和严格近场 PIT 轮廓，同时拒绝
+主坡侧面。缺失、失效或
+过期的 NavigationSafety 一律不能触发 Action，异常 Twist 任一分量为 NaN/Inf 时整条归零。
+本轮无闪现八障碍固定视角共 317/317 正确命名、导航健康 100%；动态 T 台进入 READY、发布
+入口到达并等待真实控制器。Nav2 异步结果 Future 异常现在清理目标并有界重试；0.35 s 几何新鲜窗口已
+显式归入 autonomous_mission.yaml。全工作区 296 项测试通过；未改 Gazebo、话题、消息或
+现有运行参数数值。
 
 2026-08-31 真机标定说明整理：OpenCV、点云、融合和安全评估代码顶部统一为“职责—标定
 入口—安全边界”，vision/terrain/terrain_navigation 三个 YAML 顶部统一为“前提—顺序—
@@ -159,7 +169,7 @@ Gazebo 替身只调用一次 SetEntityPose 将模型传送到出口并返回 Act
 闪现入口以标准 `/perception/fused_obstacle` 提供确定性仿真样本，并只在核心清单实际新增后
 切换下一观察位；它不发布完成结果。该成绩验证上层流程与时限，不代表原始 OpenCV/点云识别、
 SLAM 回环或真机步态成绩。真实传感器准确率仍使用纯 `robocon_field.launch.py` 测试。
-当前基线已增至 288 项自动测试通过。
+该次历史提交的基线为 288 项自动测试通过；当前数量见本文件顶部。
 
 未完成且暂不开发：真机动力学仿真、厂家 SDK、ros2_control、状态估计、FK/IK、动力学、
 站立步态、关节控制、真实越障 Action 服务端和正式比赛流程。当前完成的是 Nav2 到障碍
@@ -460,7 +470,8 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
 正常现象：vision=true 时相机短暂缺帧会先等待同步，超过 0.25 s 后自动使用纯点云结果；
 点云也缺失或无效才保持 speed_limit=0。识别 CLEAR 且数据持续新鲜后为 1；
 越障目标在远处先低速 APPROACH/ALIGN，进入 1.20 m 交接区后为 READY 且速度归零；
-POLE 由 Nav2 低速绕杆。相机证据不能触发腿部动作。`/navigation/healthy` 为 false 或
+普通/矮 POLE 由 Nav2 低速绕行，只有高度≥0.45 m 且语义确认为直角绕杆赛项时才进入 Action。
+相机证据不能触发腿部动作。`/navigation/healthy` 为 false 或
 断流时速度门也保持零。只有点云时
 使用 vision:=false，决策会自动采用兼容路径。
 
@@ -515,7 +526,7 @@ odom->base_link、传感器 TF、Image 和 PointCloud2。底盘/运动控制组�
 
 真机发布自身 URDF/TF 时这样启动：
 
-  ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=generic
+  ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=ros_default
 
 先在算法未启动时验收硬件输入（真实消息、frame_id 与传感器 TF）：
 

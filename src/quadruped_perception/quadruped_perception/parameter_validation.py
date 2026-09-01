@@ -244,8 +244,12 @@ def validate_vision_parameters(values: Mapping[str, object]) -> None:
     for prefix in ("orange", "blue"):
         lower = _hsv_triplet(values, f"{prefix}_hsv_lower", errors)
         upper = _hsv_triplet(values, f"{prefix}_hsv_upper", errors)
-        if any(low > high for low, high in zip(lower, upper)):
-            errors.append(f"{prefix}_hsv_lower must not exceed {prefix}_hsv_upper")
+        # Hue 是圆周量：H 下界大于上界明确表示跨越 OpenCV 的 179 -> 0 边界，
+        # ``hsv_range_mask`` 会把它拆成两段。S/V 是线性量，反向范围仍属于配置错误。
+        if any(lower[index] > upper[index] for index in (1, 2)):
+            errors.append(
+                f"{prefix}_hsv_lower S/V must not exceed {prefix}_hsv_upper S/V"
+            )
     _raise("vision", errors)
 
 

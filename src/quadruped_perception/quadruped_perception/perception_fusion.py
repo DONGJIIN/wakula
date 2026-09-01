@@ -236,7 +236,6 @@ def fuse_observations(
     ) or not vision_overlaps_forward_corridor(vision, vision_center_margin):
         return result
     visual_type = VISION_TO_GEOMETRY.get(int(vision.obstacle_type))
-    result.vision_confirmed = True
     if terrain_valid and terrain.obstacle_type in (
         TerrainFeatures.STEP,
         TerrainFeatures.WALL,
@@ -259,6 +258,10 @@ def fuse_observations(
         ):
             compatible = True
         if compatible:
+            # ``vision_confirmed`` 表示视觉和米制几何指向同一类别，而不只是“同一时刻
+            # 有一个视觉框”。这个区别很重要：规划层会用该位决定视觉限速；冲突框若
+            # 也置真，会把画面边缘的墙/立柱错误关联到正前方的 CLEAR 或台阶几何。
+            result.vision_confirmed = True
             result.obstacle_type = visual_type
             result.confidence = min(
                 1.0, 0.65 * terrain.confidence + 0.45 * vision.confidence
