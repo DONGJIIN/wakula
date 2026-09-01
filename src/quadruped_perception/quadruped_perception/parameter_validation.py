@@ -18,7 +18,9 @@ VISION_PARAMETER_NAMES = (
     "image_topic",
     "image_topic_candidates",
     "debug_mask_topic",
+    "publish_debug_mask",
     "annotated_image_topic",
+    "publish_annotated_image",
     "processing_hz",
     "resize_width",
     "min_area_px",
@@ -26,12 +28,16 @@ VISION_PARAMETER_NAMES = (
     "morphology_size",
     "edge_low_threshold",
     "edge_high_threshold",
+    "adaptive_canny",
     "adaptive_canny_sigma",
+    "illumination_normalization",
+    "dual_illumination_color_mask",
     "clahe_clip_limit",
     "clahe_grid_size",
     "glare_saturation_max",
     "glare_value_min",
     "glare_dilation_size",
+    "suppress_specular_glare",
     "roi_top_ratio",
     "roi_bottom_ratio",
     "roi_side_margin_ratio",
@@ -137,6 +143,26 @@ def _positive(values: Mapping[str, object], name: str, errors: list[str]) -> flo
     return value
 
 
+def _boolean(values: Mapping[str, object], name: str, errors: list[str]) -> None:
+    """Reject quoted ``"false"``/``"true"`` values instead of relying on truthiness."""
+    if not isinstance(values.get(name), bool):
+        errors.append(f"{name} must be a boolean")
+
+
+def _integer_range(
+    values: Mapping[str, object],
+    name: str,
+    lower: int,
+    upper: int,
+    errors: list[str],
+) -> int:
+    """Validate an integer interval without accepting a float that is later truncated."""
+    value = _integer(values, name, errors)
+    if not lower <= value <= upper:
+        errors.append(f"{name} must be an integer in [{lower}, {upper}]")
+    return value
+
+
 def _topic(name: str, value: object, errors: list[str], *, allow_empty: bool) -> None:
     """Validate the absolute topic convention used by the portable launch profiles."""
     if not isinstance(value, str):
@@ -197,36 +223,52 @@ def validate_vision_parameters(values: Mapping[str, object]) -> None:
     _topic_source(values, "image_topic", "image_topic_candidates", errors)
     _topic("debug_mask_topic", values.get("debug_mask_topic"), errors, allow_empty=False)
     _topic("annotated_image_topic", values.get("annotated_image_topic"), errors, allow_empty=False)
-    _positive(values, "processing_hz", errors)
+    for name in (
+        "publish_debug_mask",
+        "publish_annotated_image",
+        "adaptive_canny",
+        "illumination_normalization",
+        "dual_illumination_color_mask",
+        "suppress_specular_glare",
+    ):
+        _boolean(values, name, errors)
+    # These are the exact ranges used by the node.  Accepting a wider interval here and
+    # clipping later would make the YAML lie about the algorithm that actually ran.
+    _range(values, "processing_hz", 0.5, 30.0, errors)
     if _integer(values, "resize_width", errors) < 0:
         errors.append("resize_width must be >= 0 (0 disables resizing)")
-    _positive(values, "min_area_px", errors)
+    if _number(values, "min_area_px", errors) < 1.0:
+        errors.append("min_area_px must be >= 1")
     _range(values, "min_area_ratio", 0.0, 0.10, errors)
-    if _integer(values, "morphology_size", errors) < 1:
-        errors.append("morphology_size must be >= 1")
+    morphology_size = _integer(values, "morphology_size", errors)
+    if morphology_size < 1 or morphology_size % 2 == 0:
+        errors.append("morphology_size must be a positive odd integer")
     edge_low = _integer(values, "edge_low_threshold", errors)
     edge_high = _integer(values, "edge_high_threshold", errors)
     if not 0 <= edge_low < edge_high <= 255:
         errors.append("edge thresholds must satisfy 0 <= low < high <= 255")
-    _range(values, "adaptive_canny_sigma", 0.01, 0.99, errors)
-    _positive(values, "clahe_clip_limit", errors)
+    _range(values, "adaptive_canny_sigma", 0.05, 0.90, errors)
+    if _number(values, "clahe_clip_limit", errors) < 0.1:
+        errors.append("clahe_clip_limit must be >= 0.1")
     if _integer(values, "clahe_grid_size", errors) < 2:
         errors.append("clahe_grid_size must be >= 2")
-    _range(values, "glare_saturation_max", 0, 255, errors)
-    _range(values, "glare_value_min", 0, 255, errors)
-    if _integer(values, "glare_dilation_size", errors) < 1:
-        errors.append("glare_dilation_size must be >= 1")
-    roi_top = _range(values, "roi_top_ratio", 0.0, 1.0, errors)
-    roi_bottom = _range(values, "roi_bottom_ratio", 0.0, 1.0, errors)
+    _integer_range(values, "glare_saturation_max", 0, 255, errors)
+    _integer_range(values, "glare_value_min", 0, 255, errors)
+    glare_dilation_size = _integer(values, "glare_dilation_size", errors)
+    if not 1 <= glare_dilation_size <= 31 or glare_dilation_size % 2 == 0:
+        errors.append("glare_dilation_size must be an odd integer in [1, 31]")
+    roi_top = _range(values, "roi_top_ratio", 0.0, 0.95, errors)
+    roi_bottom = _range(values, "roi_bottom_ratio", 0.05, 1.0, errors)
     if roi_top >= roi_bottom:
         errors.append("roi_top_ratio must be smaller than roi_bottom_ratio")
-    _range(values, "roi_side_margin_ratio", 0.0, 0.49, errors)
+    _range(values, "roi_side_margin_ratio", 0.0, 0.45, errors)
     _range(values, "min_color_fill_ratio", 0.0, 1.0, errors)
     if _number(values, "min_bar_aspect_ratio", errors) < 1.0:
         errors.append("min_bar_aspect_ratio must be >= 1")
-    _range(values, "max_bar_width_ratio", 0.0, 1.0, errors)
-    _range(values, "max_bar_height_ratio", 0.0, 1.0, errors)
-    _positive(values, "segmented_bar_max_gap_ratio", errors)
+    _range(values, "max_bar_width_ratio", 0.10, 1.0, errors)
+    _range(values, "max_bar_height_ratio", 0.02, 1.0, errors)
+    if _number(values, "segmented_bar_max_gap_ratio", errors) < 0.10:
+        errors.append("segmented_bar_max_gap_ratio must be >= 0.10")
     _range(values, "segmented_bar_max_gap_cv", 0.0, 2.0, errors)
     _range(values, "min_image_quality", 0.0, 1.0, errors)
     history_size = _integer(values, "history_size", errors)
@@ -235,12 +277,17 @@ def validate_vision_parameters(values: Mapping[str, object]) -> None:
         errors.append("history_size must be >= 1")
     if not 1 <= confirmation_frames <= max(1, history_size):
         errors.append("confirmation_frames must be in [1, history_size]")
-    _positive(values, "max_temporal_center_jitter", errors)
-    _positive(values, "max_temporal_size_jitter", errors)
+    # Evidence boxes use image-normalized centre/size coordinates, so a one-frame delta
+    # cannot meaningfully exceed the full image span.  Keep this startup contract aligned
+    # with the node's 0.01 defensive floor while rejecting values above 1.0, which would
+    # silently disable the temporal association gate.
+    for name in ("max_temporal_center_jitter", "max_temporal_size_jitter"):
+        _range(values, name, 0.01, 1.0, errors)
     _range(values, "temporal_match_ratio", 0.0, 1.0, errors)
     _range(values, "min_temporal_iou", 0.0, 1.0, errors)
-    _positive(values, "history_reset_timeout", errors)
-    _positive(values, "source_switch_timeout", errors)
+    for name in ("history_reset_timeout", "source_switch_timeout"):
+        if _number(values, name, errors) < 0.10:
+            errors.append(f"{name} must be >= 0.10")
     for prefix in ("orange", "blue"):
         lower = _hsv_triplet(values, f"{prefix}_hsv_lower", errors)
         upper = _hsv_triplet(values, f"{prefix}_hsv_upper", errors)
@@ -264,7 +311,7 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
         or any(c.isspace() for c in target_frame)
     ):
         errors.append("target_frame must be a non-empty frame without whitespace")
-    _positive(values, "processing_hz", errors)
+    _range(values, "processing_hz", 0.5, 30.0, errors)
     if _number(values, "transform_timeout", errors) < 0.0:
         errors.append("transform_timeout must be >= 0")
     if _integer(values, "transform_max_points", errors) < 0:
@@ -278,38 +325,48 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
     x_max = _number(values, "front_x_max", errors)
     if x_min < 0.0 or x_max <= x_min:
         errors.append("front ROI must satisfy 0 <= front_x_min < front_x_max")
-    _positive(values, "lateral_half_width", errors)
+    # TerrainAnalyzer applies ``max(0.0, value)``.  Zero is therefore the exact supported
+    # lower boundary (a centre-line-only diagnostic ROI); negative YAML must fail instead
+    # of being silently clipped to that boundary.
+    if _number(values, "lateral_half_width", errors) < 0.0:
+        errors.append("lateral_half_width must be >= 0")
     z_min = _number(values, "front_z_min", errors)
     z_max = _number(values, "front_z_max", errors)
     if z_max <= z_min:
         errors.append("front_z_max must exceed front_z_min")
-    _range(values, "ground_percentile", 0.0, 1.0, errors)
+    # fit_ground_envelope uses this exact robust-quantile interval.  Values outside it used
+    # to pass validation and then be silently clipped inside the geometry hot path.
+    _range(values, "ground_percentile", 0.02, 0.40, errors)
     warning = _positive(values, "warning_height", errors)
     critical = _positive(values, "critical_height", errors)
     if critical <= warning:
         errors.append("critical_height must exceed warning_height")
-    for name in (
-        "max_slope",
-        "max_roughness",
-        "source_switch_timeout",
-        "grid_cell_size",
-        "ground_height_bin",
-        "pit_depth_threshold",
-        "wall_height_threshold",
-    ):
+    for name in ("max_slope", "max_roughness"):
         _positive(values, name, errors)
+    for name, minimum in (
+        ("source_switch_timeout", 0.10),
+        ("grid_cell_size", 0.02),
+        ("ground_height_bin", 0.01),
+        ("pit_depth_threshold", 0.03),
+        ("wall_height_threshold", 0.10),
+    ):
+        if _number(values, name, errors) < minimum:
+            errors.append(f"{name} must be >= {minimum}")
     if _number(values, "bar_min_clearance", errors) < warning:
         errors.append("bar_min_clearance must be >= warning_height")
-    for name in ("min_connected_region_cells", "min_connected_region_points"):
-        if _integer(values, name, errors) < 1:
-            errors.append(f"{name} must be >= 1")
+    if _integer(values, "min_connected_region_cells", errors) < 2:
+        errors.append("min_connected_region_cells must be >= 2")
+    if _integer(values, "min_connected_region_points", errors) < 4:
+        errors.append("min_connected_region_points must be >= 4")
     _raise("terrain", errors)
 
 
 def validate_fusion_parameters(values: Mapping[str, object]) -> None:
     """Validate bounded time synchronization and visual association settings."""
     errors: list[str] = []
-    sync_slop = _positive(values, "sync_slop", errors)
+    sync_slop = _number(values, "sync_slop", errors)
+    if sync_slop < 0.001:
+        errors.append("sync_slop must be >= 0.001")
     if _integer(values, "queue_size", errors) < 2:
         errors.append("queue_size must be >= 2")
     _range(values, "vision_min_confidence", 0.0, 1.0, errors)

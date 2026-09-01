@@ -35,7 +35,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         坏主话题不会阻止后续候选点云接管。当前来源只接受 Header 时间严格递增的点云，
         重复/乱序包不替换最新帧，也不刷新来源心跳；时钟回拨会开始新会话并清除地面先验。
         确认坑洞会以虚拟障碍点写入局部代价地图；无回波盲区不会被当成坑。
-        地面由近场有效栅格锚定；横杆落地支柱和窄立柱分别用高度带/原始回波复核。
+        地面由近场有效栅格锚定；同帧多结构按前缘选择最近的有效异常连通域，支撑点数只计
+        正/负高度异常原始回波，避免远墙遮住近杆或稀疏飞点抢占真障碍。横杆落地支柱和
+        窄立柱分别用高度带/原始回波复核。
         真机标定只改 terrain.yaml；必须用已知尺寸标定物核对 TerrainFeatures 米制字段，
         再调整类别阈值，不能用算法自身输出作为真值。
 
@@ -47,6 +49,7 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
         Image 必须具有非零新鲜时间戳、合法 frame/编码/宽高/step 和完整数据；不合格候选源不锁定。
         当前来源只接受 Header 时间严格递增的图像，重复/乱序包不刷新心跳或多帧投票。
+        时序门按相邻匹配帧检查位移/尺度，允许目标随接近平滑放大；发布框与当前 Image Header 同帧。
         蓝白限高杆需至少三段尺寸相近、水平对齐且间距规律的蓝色短段；单根着色细柱可提示立柱。孤立 Canny
         横边或大框不会单独输出横杆/墙，WALL 由点云确认。
         真机标定只改 vision.yaml；颜色、横杆间距和图像质量需按 instruction.txt 第五节用
@@ -58,7 +61,7 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   输出：/perception/fused_obstacle、/diagnostics。
   注意：点云负责尺寸和安全判断，视觉只增强兼容类别的置信度；vision_confirmed=true 表示
         视觉类别已通过点云类别和米制结构一致性检查，不表示仅仅检测到视觉框。类别冲突时
-        保持点云类别且该位为 false；相机断流 0.25 s 后退化为纯点云输出。
+        保持点云类别/置信度且该位为 false；相机断流 0.25 s 后退化为纯点云输出。
 
 2.2 安全决策节点
 
@@ -123,8 +126,13 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         20 s，允许 Nav2 行为树先执行 Spin/BackUp/重规划；若仍被正前障碍锁住，则先执行
         有界转向和安全换站，再重试终点。
   安全输出：/navigation/autonomy_stop（std_msgs/Bool，可靠 + transient_local）。启动发布
-  false；退出先发布 true。最终仲裁器收到 true 后只锁自动导航分支；有效键盘/手柄输入
-  仍可人工接管。标准优先级：人工输入 > 自动导航锁 > 自动导航输入 > 零速度。
+  false；退出先发布 true。最终仲裁器收到 true 后只锁 Nav2 Twist；它不能停止失联外部
+  越障控制器的关节动作。只有 Action 取消/结果已确认或硬件急停、停服确认所有权释放后，
+  键盘/手柄才可人工接管。
+  Action 通信：goal/cancel/result 均有超时和 generation 隔离；Nav2 未 ready 不消耗任务次数。
+        无法确认旧控制权释放时进入 ACTION_COMMUNICATION_FAULT，并保持 autonomy_stop=true。
+        Nav2 故障可停/重启 Nav2 或核心栈；Traverse 故障必须停/重启外部越障控制器；归属
+        不明时两者都处理并使用硬件急停。不能只重启本节点或只重启核心栈。
   注意：前沿和障碍锁均来自实时地图/感知，不读取 Gazebo world 坐标；真机必须提供真实
         /traverse_obstacle 服务端。autonomous_navigation.launch.py 永远不启动仿真服务端；
         仿真替身只由 quadruped_gazebo 的独立 launch 显式启动。
@@ -132,7 +140,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         最大年龄由 autonomous_mission.yaml/safety_geometry_stale_seconds 唯一配置。缺失、
         超龄或无效消息不能由历史名称补位。T 字台阶接受完整顶部、局部踏面、7～18° STEP
         趋势和严格 16～24° 近场 PIT 踏面轮廓，并保留高度/横滚/粗糙度上限排除主坡侧面。
-        Nav2 异步结果 Future 异常按普通失败清理目标并进入有界重试，不改变话题或 Action 合同。
+        Action 结果 Future 异常按“控制权未知”锁住自主 Twist，不会清句柄后盲目重试；
+        外部越障关节运动仍由其服务端取消和硬件急停负责。
   地图边缘：普通目标贴近当前 OccupancyGrid 外框时禁止交接；只有语义已确认为 high_wall、
         实时粗类型为 WALL 且名称不是场地边界时，才允许墙体遮挡造成的“墙后未知区”特例。
         该规则不新增话题，也不能用于放行通用 WALL、未知边界或未确认障碍。
@@ -172,8 +181,8 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   注意：本节点不生成 /odom，必须由未来真机状态估计模块提供。
 
 /nav2_readiness_monitor（slam / nav2_readiness_monitor）
-  作用：校验 /scan 的 frame/角度/样本/回波和 /odom 的时间/frame/数值，再等待定位 TF
-        就绪并激活 Nav2。
+  作用：校验 /scan 的 frame/角度/样本/回波和 /odom 的时间/frame/数值，再等待源时间新鲜的
+        动态定位 TF 就绪并激活 Nav2；缓存中的冻结旧 TF 不算就绪。
   输入：/scan、/odom、map -> base_link TF。
   输出：调用 /lifecycle_manager_navigation/manage_nodes，不发布运动话题。
   注意：传感器话题和生命周期服务均要求绝对 ROS 名称；frame 不带前导 `/`。
@@ -242,10 +251,12 @@ perception_bag_evaluator（离线工具，不随一键启动运行）
         有限搜索视觉置信度和三个高度等级。米制几何误差需用已知尺寸真值另行对照。
 
 stack_regression（测试工具，不随一键启动运行）
-  作用：在 Gazebo 中验证旋转/倒退回环、多目标、1 m 窄通道、恢复行为和资源占用。
+  作用：在 Gazebo 中交替验证矩形异路闭合与旋转/倒退、多目标、1 m 窄通道、恢复行为、
+        核心进程资源和感知 Header 延迟；位姿闭合不等同于证明 SLAM 回环图优化。
   接口：显式 --allow-motion 后发布 /cmd_vel_teleop；订阅 /map、/scan、/odom、
-        /navigation/healthy、/perception/front_obstacle_name、/traversal/guidance，并调用
-        Nav2 Action；额外检查错误 READY 和 ALIGN/READY 快速往返。
+        /navigation/healthy、/perception/front_obstacle_name、/traversal/guidance、
+        /terrain/features_stamped、/perception/fused_obstacle，并调用 Nav2 Action；额外检查
+        错误 READY、ALIGN/READY 快速往返和两路感知 Header 端到端年龄。
   输出：reports/*.json；真机禁止运行运动阶段。
 
 2.7 独立 Gazebo 节点（只由 quadruped_gazebo 的 launch 管理）
@@ -349,7 +360,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 /terrain/features_stamped
   类型：quadruped_interfaces/msg/TerrainFeatures
   字段：header、valid、obstacle_type、confidence、ground_height、obstacle_height、pit_depth、
-  slope_pitch、slope_roll、roughness、distance、lateral_offset、width、clearance_height、valid_points。
+  slope_pitch、slope_roll、roughness、distance、lateral_offset、width、structure_heading、
+  structure_heading_confidence、clearance_height、valid_points。
 
 /vision/obstacle_evidence
   类型：std_msgs/msg/Float32MultiArray
@@ -365,10 +377,10 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   类别码：0 UNKNOWN，1 CLEAR，2 STEP，3 PIT，4 WALL，5 BAR，6 POLE。
   字段：header、obstacle_type、confidence、geometry_confirmed、vision_confirmed、
   obstacle_height、pit_depth、slope_pitch、slope_roll、roughness、distance、lateral_offset、width、
-  clearance_height、time_skew、valid_points。
+  structure_heading、structure_heading_confidence、clearance_height、time_skew、valid_points。
   融合约束：点云提供米制尺度；视觉 BAR 需点云 clearance_height 支持，POLE 需点云窄宽度
   支持。vision_confirmed 只在类别/结构兼容时为 true；视觉/几何冲突时该位为 false，类别
-  保持点云结果并降低 confidence。所有类别、连续字段、视觉框
+  和 confidence 均保持点云结果。所有类别、连续字段、视觉框
   和有效位在融合消费者处二次校验；旧/未来 Header 不得维持 perception_valid。
 
 五、决策和速度接口
@@ -381,7 +393,9 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /cmd_vel_nav、/cmd_vel_smoothed、/cmd_vel
   类型均为 geometry_msgs/msg/Twist。分别表示 Nav2 原始、平滑后和通过地形/健康/雷达
-  急停检查后的最终自动导航速度。
+  急停检查后的最终自动导航速度。`speed_gate:=false` 时第三段不由 Wakula 发布；目标仲裁器
+  必须订阅 `/cmd_vel_smoothed` 作为自动候选，并结合 NavigationSafety、navigation/healthy、
+  autonomy_stop、命令超时及硬件安全条件后唯一发布 `/cmd_vel`。
 
 /cmd_vel_joy，geometry_msgs/msg/Twist
   Xbox 手柄独立速度候选；LB 未安全解锁/松开、B 急停或 /joy 断流时为零；断流恢复后
@@ -394,7 +408,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
   健康监控检查 LaserScan 厂商量程、NaN/±Inf、里程计有限性/协方差/四元数、采样时间戳、
-  接收超时、TF 和位置突跳。正 Inf 表示量程内无障碍，仍是合法 LaserScan 回波。
+  接收超时、动态 map -> base_link TF 源时间和位置突跳。正 Inf 表示量程内无障碍，仍是
+  合法 LaserScan 回波；诊断键 tf_age_seconds 给出 TF 年龄，缺失/零时间为 unavailable。
 
 /terrain/visual_assist_active，std_msgs/msg/Bool
   表示当前速度上限是否受稳定视觉证据限制，仅供调试和 rosbag 统计。
@@ -404,7 +419,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   模式：MODE_UNKNOWN=0、MODE_WALK=1、MODE_STEP=2、MODE_CLIMB=3、MODE_STOP=4。
   有效性：perception_valid、visual_assist_active；无效或断流时 mode=STOP、speed_limit=0。
   几何：obstacle_type、confidence、obstacle_height、pit_depth、slope_pitch、slope_roll、
-  roughness、distance、lateral_offset、width、clearance_height、valid_points。障碍码与
+  roughness、distance、lateral_offset、width、structure_heading、
+  structure_heading_confidence、clearance_height、valid_points。障碍码与
   FusedObstacle 一致；lateral_offset 在 base_link 中左正右负，用于入口对正。
   语义：同一条消息给出一个原子只读快照，供未来运动/越障模块做输入校验；它不是动作、
   关节、足端或控制器切换命令。消费者必须检查 perception_valid、Header 新鲜度和 mode。
@@ -425,15 +441,17 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   人类调试速查，值为 INVALID/CLEAR/APPROACH/ALIGN/READY；程序应优先使用强类型 guidance。
 
 /traverse_obstacle，quadruped_interfaces/action/TraverseObstacle（运动组实现的交接合同）
-  Goal：obstacle_type（STEP=2、PIT=3、WALL=4、BAR=5、SLOPE=7）、confidence、distance、
-  lateral_offset、heading_error；坡面不会与 CLEAR 共用动作编码。
+  Goal：obstacle_type（STEP=2、PIT=3、WALL=4、BAR=5、POLE=6、SLOPE=7）、稳定比赛
+  obstacle_id、confidence、distance、lateral_offset、heading_error；坡面不会与 CLEAR 共用动作编码。
   Feedback：PREPARING/TRAVERSING/STABILIZING、progress、message。
   Result：success、message；只有真实控制器确认稳定完成跨越后才能令 success=true。
 
 /autonomy/state、/autonomy/event，std_msgs/msg/String
   关键 state：WAITING_FOR_INPUTS、EXPLORING、COVERAGE_EXPLORING、
   SEEKING_PENDING_OBSTACLE、ALIGNING_OBSTACLE、HANDOFF、TRAVERSING、
-  SEARCHING_MISSING_OBSTACLES、RETURNING_TO_FINISH、RECOVERY、COMPLETED；event 是低频原因。
+  SEARCHING_MISSING_OBSTACLES、RETURNING_TO_FINISH、RECOVERY、
+  ACTION_COMMUNICATION_FAULT、COMPLETED；event 是低频原因。ACTION_COMMUNICATION_FAULT
+  表示 Action 运动所有权无法确认，必须按节点信息中的停服/重启顺序人工恢复。
   节点没有键盘或 toggle 服务；进程生命周期就是自主功能的启停边界。
 
 /autonomy/completed_obstacles、/autonomy/pending_obstacles，std_msgs/msg/String
@@ -504,7 +522,9 @@ Isaac Lab 训练/策略接口同样尚未定义。应在真机关节、状态估
 | `/odom`、`odom -> base_link` | 目标机器人的状态估计 | 只订阅，算法不得重复发布 |
 | `map -> odom`、`/map` | 本项目 SLAM Toolbox | 目标端不得再启动另一套 SLAM |
 | `base_link -> sensor_frame` | 目标机器人的 URDF/静态 TF | 移植时 `robot_model:=false` |
-| `/cmd_vel` | 目标 twist_mux/安全层，或本项目 speed gate 二选一 | 已有仲裁器时 `speed_gate:=false` |
+| `/cmd_vel_smoothed` | 本项目 Nav2 velocity_smoother | `speed_gate:=false` 时目标仲裁器必须把它接成自动候选 |
+| `/cmd_vel` | 目标 twist_mux/安全层，或本项目 speed gate 二选一 | 只能有一个最终发布链 |
+| `/navigation/autonomy_stop` | autonomous_mission | 目标仲裁器必须只封锁自动候选，不得封锁人工分支 |
 | `/navigate_to_pose` | 本项目 Nav2 bt_navigator | autonomous_mission 为客户端 |
 | `/traverse_obstacle` | 真机运动/越障控制器 | 本项目只提供 Action 客户端与合同 |
 
@@ -516,9 +536,11 @@ quadruped_planning、quadruped_bringup、slam 六个包。传感器、里程计�
     camera_topic:=/实际image point_cloud_topic:=/实际points
 
 该入口同时启动 SLAM、Nav2 和感知算法。若目标已有 twist_mux/底盘安全层，在命令中增加
-`speed_gate:=false`，让目标安全层消费 `/terrain/navigation_safety` 并独占最终 `/cmd_vel`；
-这不表示复用目标 SLAM/Nav2。目标端应把 `perception_valid=false` 或数据超时视为停车条件，
-不能把 STEP/CLIMB/READY 直接解释成关节动作。
+`speed_gate:=false`；Wakula 此时只把 Nav2 自动候选发布到 `/cmd_vel_smoothed`，不会发布
+`/cmd_vel`。目标层必须订阅该候选以及 `/terrain/navigation_safety`、`/navigation/healthy`、
+`/navigation/autonomy_stop`，再结合命令超时、雷达与硬件急停唯一发布 `/cmd_vel`；其中
+autonomy_stop 只封锁自动候选。否则 Nav2 速度不会到达真机，Ctrl-C 也无法锁住目标仲裁器的
+自动分支。这不表示复用目标 SLAM/Nav2；目标端不能把 STEP/CLIMB/READY 直接解释成关节动作。
 
 若采用本项目完整速度链，所有权必须是：Nav2 controller -> `/cmd_vel_nav` -> velocity
 smoother -> `/cmd_vel_smoothed` -> navigation_speed_gate -> `/cmd_vel`。迁移完成后执行

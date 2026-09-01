@@ -13,7 +13,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from slam.parameter_validation import (
     HEALTH_PARAMETER_NAMES,
@@ -113,6 +113,46 @@ def source_stamp_is_current(
         stamp > 0.0
         and maximum_age > 0.0
         and -max(0.0, future_tolerance) <= age <= maximum_age
+    )
+
+
+def transform_stamp_age_seconds(
+    seconds: int,
+    nanoseconds: int,
+    now_seconds: float,
+) -> float | None:
+    """返回动态 TF 的源时间年龄；非法或零时间返回 ``None``。
+
+    ``tf2.can_transform(..., Time())`` 只说明缓存中曾经存在一条变换。发布者退出后，
+    该查询仍可长期返回真，因此不能单独作为导航健康条件。``map -> base_link`` 必然
+    包含定位或里程计动态边；若最新组合变换仍为零时间，应视为只有静态占位 TF 或时间
+    合同错误，必须失效关闭，而不是把它解释成“永不过期”。
+    """
+    stamp = float(seconds) + float(nanoseconds) * 1e-9
+    if (
+        not math.isfinite(stamp)
+        or not math.isfinite(float(now_seconds))
+        or stamp <= 0.0
+    ):
+        return None
+    return float(now_seconds) - stamp
+
+
+def transform_stamp_is_current(
+    seconds: int,
+    nanoseconds: int,
+    now_seconds: float,
+    maximum_age: float,
+    future_tolerance: float = 0.10,
+) -> bool:
+    """验证动态定位 TF 未冻结、未明显来自未来且使用非零源时间。"""
+    age = transform_stamp_age_seconds(seconds, nanoseconds, now_seconds)
+    return bool(
+        age is not None
+        and math.isfinite(float(maximum_age))
+        and math.isfinite(float(future_tolerance))
+        and maximum_age > 0.0
+        and -max(0.0, float(future_tolerance)) <= age <= float(maximum_age)
     )
 
 
@@ -344,12 +384,32 @@ class NavigationHealthMonitor(Node):
 
     def evaluate(self) -> None:
         """汇总传感器、TF 和漂移检查并发布健康状态。"""
-        tf_valid = self.tf_buffer.can_transform(
-            self.global_frame,
-            self.base_frame,
-            Time(),
-            timeout=Duration(seconds=0.02),
-        )
+        now = self.get_clock().now()
+        now_seconds = now.nanoseconds * 1e-9
+        tf_age = None
+        try:
+            # 必须读取最新组合变换的 Header，而不只是询问缓存里是否“曾经有过”TF。
+            # scan/odom 继续发布但定位进程冻结时，旧变换会在 timeout 后可靠地关闭速度门。
+            transform = self.tf_buffer.lookup_transform(
+                self.global_frame,
+                self.base_frame,
+                Time(),
+                timeout=Duration(seconds=0.02),
+            )
+            tf_age = transform_stamp_age_seconds(
+                transform.header.stamp.sec,
+                transform.header.stamp.nanosec,
+                now_seconds,
+            )
+            tf_valid = transform_stamp_is_current(
+                transform.header.stamp.sec,
+                transform.header.stamp.nanosec,
+                now_seconds,
+                self.timeout,
+                self.future_stamp_tolerance,
+            )
+        except TransformException:
+            tf_valid = False
         checks, failed = navigation_failures(
             self.scan_valid and self._fresh(self.last_scan_time),
             self.odom_valid and self._fresh(self.last_odom_time),
@@ -369,7 +429,15 @@ class NavigationHealthMonitor(Node):
             ],
         )
         array = DiagnosticArray()
-        array.header.stamp = self.get_clock().now().to_msg()
+        # tf_age_seconds 直接暴露冻结程度；``unavailable`` 明确区分“没有/零时间 TF”与
+        # 正常但稍旧的动态变换，现场无需再从长串 tf2_echo 输出中猜故障原因。
+        status.values.append(
+            KeyValue(
+                key="tf_age_seconds",
+                value="unavailable" if tf_age is None else f"{tf_age:.3f}",
+            )
+        )
+        array.header.stamp = now.to_msg()
         array.status = [status]
         self.diagnostic_pub.publish(array)
 

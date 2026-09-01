@@ -158,11 +158,16 @@ def test_grayscale_geometry_and_temporal_confirmation():
     )
     assert evidence.hint == "poles"
 
-    history = [evidence, evidence, evidence, ObstacleEvidence(), ObstacleEvidence()]
+    # 确认结果必须属于当前帧；旧命中可保留在窗口里，但不能在当前
+    # NONE 帧上伪造一个带新 Header 的旧框。
+    history = [ObstacleEvidence(), ObstacleEvidence(), evidence, evidence, evidence]
     stable = stabilize_evidence(history, 3)
     assert stable.hint == "poles"
     assert stable.confidence >= 0.55
     assert stabilize_evidence(history[:2], 3).hint == "none"
+
+    disappeared = [evidence, evidence, evidence, ObstacleEvidence()]
+    assert stabilize_evidence(disappeared, 3).hint == "none"
 
 
 def test_edge_only_rectangles_cannot_claim_wall_semantics():
@@ -218,6 +223,56 @@ def test_temporal_confirmation_rejects_spatially_inconsistent_boxes():
         for center_x in (0.15, 0.50, 0.85)
     ]
     assert stabilize_evidence(history, 3).hint == "none"
+
+
+def test_temporal_confirmation_tracks_smooth_approach_and_uses_current_box():
+    """同一障碍平滑放大/下移时应继续确认，输出框必须属于最新帧。"""
+    history = [
+        ObstacleEvidence("poles", 0.82, 0.50, center_y, width, height)
+        for center_y, width, height in (
+            (0.40, 0.10, 0.24),
+            (0.44, 0.13, 0.31),
+            (0.49, 0.17, 0.40),
+            (0.55, 0.22, 0.51),
+            (0.62, 0.29, 0.65),
+        )
+    ]
+    stable = stabilize_evidence(history, 3)
+    assert stable.hint == "poles"
+    # 节点给结果填当前图像 Header，因此不得返回历史中位框。
+    assert stable.center_y == history[-1].center_y
+    assert stable.width == history[-1].width
+    assert stable.height == history[-1].height
+
+
+def test_temporal_confirmation_tracks_smooth_turn_but_rejects_one_frame_jump():
+    """连续转向允许累计大位移，单帧瞬移仍不能被多数标签掩盖。"""
+    smooth_turn = [
+        ObstacleEvidence("height_bar", 0.84, center_x, 0.48, 0.42, 0.16)
+        for center_x in (0.18, 0.28, 0.38, 0.48, 0.58)
+    ]
+    stable = stabilize_evidence(smooth_turn, 3)
+    assert stable.hint == "height_bar"
+    assert stable.center_x == smooth_turn[-1].center_x
+
+    teleported = smooth_turn[:4] + [
+        ObstacleEvidence("height_bar", 0.84, 0.88, 0.48, 0.42, 0.16)
+    ]
+    assert stabilize_evidence(teleported, 3).hint == "none"
+
+
+def test_temporal_confirmation_allows_one_quality_dropout_during_smooth_motion():
+    """一帧模糊被质量门拒绝后，平滑运动应按真实帧间隔继续关联。"""
+    history = [
+        ObstacleEvidence("poles", 0.82, 0.20, 0.50, 0.40, 0.45),
+        ObstacleEvidence(),
+        ObstacleEvidence("poles", 0.82, 0.40, 0.50, 0.40, 0.45),
+        ObstacleEvidence("poles", 0.82, 0.50, 0.50, 0.40, 0.45),
+        ObstacleEvidence("poles", 0.82, 0.60, 0.50, 0.40, 0.45),
+    ]
+    stable = stabilize_evidence(history, 3)
+    assert stable.hint == "poles"
+    assert stable.center_x == history[-1].center_x
 
 
 def test_temporal_confirmation_requires_majority_and_box_overlap():
@@ -959,6 +1014,258 @@ def test_dense_narrow_competition_pole_survives_grid_cell_gate():
     assert result.valid
     assert result.obstacle_type == POLE
     assert result.width <= 0.12
+
+
+def test_nearest_supported_positive_region_wins_over_larger_far_wall():
+    """近处细杆不得被同帧格数更多的远墙覆盖。"""
+    floor = []
+    for x in np.arange(0.10, 2.31, 0.05):
+        for y in np.arange(-0.40, 0.41, 0.05):
+            floor.extend(((x, y, -0.001), (x, y, 0.001)))
+    near_pole = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.54, 0.56)
+            for y in (-0.02, 0.0, 0.02)
+            for z in np.arange(0.02, 0.35, 0.015)
+        ]
+    )
+    far_wall = np.asarray(
+        [
+            (x, y, z)
+            for x in (1.49, 1.51)
+            for y in np.arange(-0.35, 0.36, 0.035)
+            for z in np.arange(0.02, 0.35, 0.02)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((np.asarray(floor), near_pole, far_wall)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == POLE
+    assert 0.45 <= result.distance <= 0.65
+
+
+def test_selected_region_geometry_is_not_polluted_at_the_same_distance():
+    """同距离但横向分离的侧墙不得把中央细杆的前缘跨度扩大。"""
+    floor = _dense_floor()
+    center_pole = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in (-0.02, 0.0, 0.02)
+            for z in np.arange(0.02, 0.35, 0.015)
+        ]
+    )
+    disconnected_side_wall = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.59, 0.61)
+            for y in np.arange(0.25, 0.41, 0.03)
+            for z in np.arange(0.02, 0.35, 0.02)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((floor, center_pole, disconnected_side_wall))
+    )
+    assert result.valid
+    assert result.obstacle_type == POLE
+    assert abs(result.lateral_offset) <= 0.05
+    assert result.width <= 0.12
+
+
+def test_nearest_step_wins_over_larger_far_pit_region():
+    """近台阶应先于远处坑底回波，坑类别不再无条件抢占优先级。"""
+    floor = []
+    for x in np.arange(0.10, 2.31, 0.05):
+        for y in np.arange(-0.40, 0.41, 0.05):
+            floor.extend(((x, y, -0.001), (x, y, 0.001)))
+    near_step = np.asarray(
+        [
+            (x, y, 0.10 + noise)
+            for x in np.arange(0.52, 0.77, 0.04)
+            for y in np.arange(-0.18, 0.19, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    far_pit = np.asarray(
+        [
+            (x, y, -0.13 + noise)
+            for x in np.arange(1.35, 1.86, 0.04)
+            for y in np.arange(-0.30, 0.31, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((np.asarray(floor), near_step, far_pit)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == STEP
+    assert 0.45 <= result.distance <= 0.80
+    assert result.pit_depth == 0.0
+
+
+def test_nearest_pit_wins_without_inheriting_larger_far_wall_height():
+    """近坑洞与远墙同帧时输出 PIT，且不得把远墙高度混入坑几何。"""
+    floor = []
+    for x in np.arange(0.10, 2.31, 0.05):
+        for y in np.arange(-0.40, 0.41, 0.05):
+            floor.extend(((x, y, -0.001), (x, y, 0.001)))
+    near_pit = np.asarray(
+        [
+            (x, y, -0.13 + noise)
+            # 与既有坑洞回归使用同等尺寸，保证近场仍有足够地面可锚定。
+            for x in np.arange(0.55, 0.76, 0.04)
+            for y in np.arange(-0.15, 0.16, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    far_wall = np.asarray(
+        [
+            (x, y, z)
+            for x in (1.49, 1.51)
+            for y in np.arange(-0.35, 0.36, 0.035)
+            for z in np.arange(0.02, 0.35, 0.02)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((np.asarray(floor), near_pit, far_wall)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == PIT
+    assert 0.45 <= result.distance <= 0.85
+    assert result.obstacle_height == 0.0
+
+
+def test_near_sparse_height_noise_cannot_hide_far_supported_wall():
+    """近处相邻高飞点不能借格内地面回波抢占远处真实墙面。"""
+    floor = []
+    for x in np.arange(0.10, 2.31, 0.05):
+        for y in np.arange(-0.40, 0.41, 0.05):
+            floor.extend(((x, y, -0.001), (x, y, 0.001)))
+    # 四个相邻格各有两个高飞点。旧逻辑把同格地面点也计入 region points，
+    # 总数恰好达到 16，于是最近候选会错误遮挡后方墙；真实异常回波只有 8 个。
+    near_noise = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.51, 0.56)
+            for y in (-0.025, 0.025)
+            for z in (0.30, 0.31)
+        ]
+    )
+    far_wall = np.asarray(
+        [
+            (x, y, z)
+            for x in (1.49, 1.51)
+            for y in np.arange(-0.35, 0.36, 0.035)
+            for z in np.arange(0.02, 0.35, 0.02)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((np.asarray(floor), near_noise, far_wall)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == WALL
+    assert 1.35 <= result.distance <= 1.65
+
+
+def test_near_sparse_depth_noise_cannot_hide_far_supported_pit():
+    """负异常使用独立原始回波计数，近低飞点不能抢占远处真实坑洞。"""
+    floor = []
+    for x in np.arange(0.10, 2.31, 0.05):
+        for y in np.arange(-0.40, 0.41, 0.05):
+            floor.extend(((x, y, -0.001), (x, y, 0.001)))
+    near_noise = np.asarray(
+        [
+            (x, y, z)
+            for x in (0.51, 0.56)
+            for y in (-0.025, 0.025)
+            for z in (-0.31, -0.30)
+        ]
+    )
+    far_pit = np.asarray(
+        [
+            (x, y, -0.13 + noise)
+            for x in np.arange(1.35, 1.86, 0.04)
+            for y in np.arange(-0.30, 0.31, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((np.asarray(floor), near_noise, far_pit)),
+        step_height=0.07,
+        pit_depth=0.07,
+        wall_height=0.23,
+        min_region_cells=4,
+        min_region_points=16,
+    )
+    assert result.valid
+    assert result.obstacle_type == PIT
+    assert 1.25 <= result.distance <= 1.90
+
+
+def test_region_confidence_counts_anomaly_echoes_not_coincident_ground():
+    """地面回波不虚增正障碍置信度，更多真实坑底回波应提高 PIT 置信度。"""
+    floor = _dense_floor()
+    coordinates = tuple(
+        (x, y) for x in (0.51, 0.56) for y in (-0.025, 0.025)
+    )
+    high_echoes = np.asarray(
+        [(x, y, 0.10) for x, y in coordinates for _ in range(2)]
+    )
+    coincident_ground = np.asarray([(x, y, 0.0) for x, y in coordinates])
+    parameters = dict(
+        step_height=0.07,
+        pit_depth=0.07,
+        min_region_cells=4,
+        min_region_points=8,
+    )
+    baseline = analyze_terrain_geometry(
+        np.vstack((floor, high_echoes)), **parameters
+    )
+    extra_ground = analyze_terrain_geometry(
+        np.vstack((floor, high_echoes, coincident_ground)), **parameters
+    )
+    assert baseline.obstacle_type == STEP
+    assert extra_ground.obstacle_type == STEP
+    # 地面平面重拟合可能产生约 1e-5 的浮点差，但旧总点数公式会增加 0.008。
+    assert abs(extra_ground.confidence - baseline.confidence) < 0.001
+
+    weak_pit = np.asarray(
+        [(x, y, -0.13) for x, y in coordinates for _ in range(2)]
+    )
+    dense_pit = np.asarray(
+        [(x, y, -0.13) for x, y in coordinates for _ in range(4)]
+    )
+    weak_result = analyze_terrain_geometry(
+        np.vstack((floor, weak_pit)), **parameters
+    )
+    dense_result = analyze_terrain_geometry(
+        np.vstack((floor, dense_pit)), **parameters
+    )
+    assert weak_result.obstacle_type == PIT
+    assert dense_result.obstacle_type == PIT
+    assert dense_result.confidence > weak_result.confidence + 0.02
 
 
 def test_dense_single_cell_flat_blob_cannot_use_narrow_pole_exception():

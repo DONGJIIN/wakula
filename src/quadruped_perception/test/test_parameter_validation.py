@@ -55,6 +55,91 @@ def test_vision_validation_reports_all_related_mistakes_at_once():
     assert "segmented_bar_max_gap_cv" in message
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("processing_hz", 30.01),
+        ("processing_hz", 0.49),
+        ("min_area_px", 0.5),
+        ("adaptive_canny_sigma", 0.01),
+        ("roi_top_ratio", 0.96),
+        ("roi_bottom_ratio", 0.04),
+        ("roi_side_margin_ratio", 0.46),
+        ("max_bar_width_ratio", 0.09),
+        ("max_bar_height_ratio", 0.01),
+        ("segmented_bar_max_gap_ratio", 0.09),
+        ("max_temporal_center_jitter", 0.009),
+        ("max_temporal_center_jitter", 1.001),
+        ("max_temporal_size_jitter", 0.009),
+        ("max_temporal_size_jitter", 1.001),
+        ("history_reset_timeout", 0.09),
+        ("source_switch_timeout", 0.09),
+    ),
+)
+def test_vision_validation_rejects_values_the_node_would_silently_clip(
+    name, value
+):
+    """YAML 参数要么原样生效，要么启动失败，不得悄悄改成运行边界。"""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values[name] = value
+    with pytest.raises(ValueError, match=name):
+        validate_vision_parameters(values)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("max_temporal_center_jitter", 0.01),
+        ("max_temporal_center_jitter", 1.0),
+        ("max_temporal_size_jitter", 0.01),
+        ("max_temporal_size_jitter", 1.0),
+    ),
+)
+def test_vision_validation_accepts_normalized_temporal_jitter_boundaries(
+    name, value
+):
+    """归一化框的时序跳变阈值必须接受运行合同的两个闭区间端点。"""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values[name] = value
+    validate_vision_parameters(values)
+
+
+@pytest.mark.parametrize("name", ("morphology_size", "glare_dilation_size"))
+def test_vision_validation_rejects_even_kernel_size(name):
+    """形态学核必须显式配成奇数，不能在运行时自动加一。"""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values[name] = 4
+    with pytest.raises(ValueError, match=name):
+        validate_vision_parameters(values)
+
+
+def test_vision_validation_rejects_glare_kernel_above_runtime_limit():
+    """高光膘胀核大于 31 时必须启动失败，不得静默缩到 31。"""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values["glare_dilation_size"] = 33
+    with pytest.raises(ValueError, match="glare_dilation_size"):
+        validate_vision_parameters(values)
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "publish_debug_mask",
+        "publish_annotated_image",
+        "adaptive_canny",
+        "illumination_normalization",
+        "dual_illumination_color_mask",
+        "suppress_specular_glare",
+    ),
+)
+def test_vision_validation_rejects_quoted_boolean(name):
+    """字符串 ``false`` 在 Python 中为真值，因此必须在参数合同边界拒绝。"""
+    values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
+    values[name] = "false"
+    with pytest.raises(ValueError, match=name):
+        validate_vision_parameters(values)
+
+
 def test_vision_validation_rejects_invalid_hsv_and_topics():
     """Reject non-portable topic names and inverted linear HSV components."""
     values = deepcopy(_parameters("vision.yaml", "vision_obstacle_detector"))
@@ -103,6 +188,40 @@ def test_terrain_validation_rejects_inverted_roi_and_thresholds():
     assert "critical_height" in message
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("processing_hz", 30.01),
+        ("processing_hz", 0.49),
+        ("lateral_half_width", -0.001),
+        ("ground_percentile", 0.01),
+        ("ground_percentile", 0.41),
+        ("source_switch_timeout", 0.09),
+        ("grid_cell_size", 0.019),
+        ("ground_height_bin", 0.009),
+        ("pit_depth_threshold", 0.029),
+        ("wall_height_threshold", 0.099),
+        ("min_connected_region_cells", 1),
+        ("min_connected_region_points", 3),
+    ),
+)
+def test_terrain_validation_rejects_values_the_node_would_silently_clip(
+    name, value
+):
+    """点云 YAML 的可接受边界必须与 TerrainAnalyzer 的实际运行边界相同。"""
+    values = deepcopy(_parameters("terrain.yaml", "terrain_analyzer"))
+    values[name] = value
+    with pytest.raises(ValueError, match=name):
+        validate_terrain_parameters(values)
+
+
+def test_terrain_validation_accepts_zero_lateral_half_width_runtime_boundary():
+    """零宽中心线 ROI 是 TerrainAnalyzer 的明确运行下边界，不应被校验器拒绝。"""
+    values = deepcopy(_parameters("terrain.yaml", "terrain_analyzer"))
+    values["lateral_half_width"] = 0.0
+    validate_terrain_parameters(values)
+
+
 def test_fusion_validation_preserves_synchronization_window_contract():
     """Require a bounded queue and a fallback delay no shorter than sync slop."""
     values = deepcopy(_parameters("vision.yaml", "perception_fusion"))
@@ -114,3 +233,11 @@ def test_fusion_validation_preserves_synchronization_window_contract():
     message = str(error.value)
     assert "queue_size" in message
     assert "terrain_only_timeout" in message
+
+
+def test_fusion_validation_rejects_sync_window_below_runtime_minimum():
+    """同步窗不得在校验后再被节点静默放大到 1 ms。"""
+    values = deepcopy(_parameters("vision.yaml", "perception_fusion"))
+    values["sync_slop"] = 0.0005
+    with pytest.raises(ValueError, match="sync_slop"):
+        validate_fusion_parameters(values)

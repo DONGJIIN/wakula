@@ -216,17 +216,21 @@ def _fit_plane(samples: np.ndarray) -> Tuple[float, float, float, float]:
     return float(coefficients[0]), float(coefficients[1]), float(coefficients[2]), mad
 
 
-def _largest_connected_region(
+def _connected_regions(
     cells: np.ndarray, candidate_mask: np.ndarray, cell_size: float
-) -> np.ndarray:
-    """返回候选高度格中最大的八邻域连通区域下标。
+) -> list[np.ndarray]:
+    """返回候选高度格的所有八邻域连通区。
 
     过去只要任意三个异常格就会触发障碍，三个互不相邻的飞点也可能造成误检。
     真正的台阶、坑洞和墙面应在 XY 高度栅格中形成连续表面，因此先做连通域筛选。
+
+    不在此处只保留“面积最大”的一块：2.5 m ROI 内可能同时看到近处细杆
+    和远处宽墙，远墙格数更多却不是机器人当前应对准的入口。上层会先对每块
+    执行格数/回波数守卫，再从正负高度区中选前缘最近者。
     """
     candidate_indices = np.flatnonzero(candidate_mask)
     if not len(candidate_indices):
-        return candidate_indices
+        return []
     # ``_grid_samples`` 最初用 floor(x / cell_size) 建格。这里必须使用同一规则恢复
     # 栅格坐标：若用四舍五入，位于相邻格两侧的 0.099 m 和 0.101 m 可能都变成索引 2，
     # 字典随后覆盖其中一格，使细台阶、横杆或立柱的连通区域被错误缩小。
@@ -238,7 +242,7 @@ def _largest_connected_region(
         for coordinate, index in zip(coordinates, candidate_indices)
     }
     remaining = set(by_coordinate)
-    largest = []
+    regions = []
     while remaining:
         seed = remaining.pop()
         stack = [seed]
@@ -252,25 +256,145 @@ def _largest_connected_region(
                     if neighbor in remaining:
                         remaining.remove(neighbor)
                         stack.append(neighbor)
-        if len(component) > len(largest):
-            largest = component
-    return np.asarray(largest, dtype=np.int64)
+        regions.append(np.asarray(component, dtype=np.int64))
+    return regions
+
+
+def _largest_connected_region(
+    cells: np.ndarray, candidate_mask: np.ndarray, cell_size: float
+) -> np.ndarray:
+    """返回最大连通区，仅保留给旧纯函数调用与回归测试。
+
+    在线分类不再用该函数决定“当前障碍”，否则远处宽障碍会吞掉近处
+    细障碍。
+    """
+    regions = _connected_regions(cells, candidate_mask, cell_size)
+    if not regions:
+        return np.empty(0, dtype=np.int64)
+    return max(regions, key=len)
+
+
+def _region_front_distance(cells: np.ndarray, region: np.ndarray) -> float:
+    """返回连通区稳健前缘距离（m，``base_link`` x 轴）。"""
+    if not len(region):
+        return float("inf")
+    return float(np.quantile(cells[region, 0], 0.10))
+
+
+def _narrow_region_is_pole_like(
+    points: np.ndarray,
+    cells: np.ndarray,
+    region: np.ndarray,
+    *,
+    plane_a: float,
+    plane_b: float,
+    plane_c: float,
+    step_height: float,
+    cell_size: float,
+) -> bool:
+    """在细障碍绕过普通连通格数门前，先确认其三维立柱形态。
+
+    70 mm 规则立柱在 5 cm 高度图里可能只占一两格，所以不能与墙/台阶
+    共用四格门。但若仅凭“单格点多”就把它排在远处真障碍前，密集飞点
+    会遮蔽后方几何。因此这里先在该区域的 XY 包围内要求足够的垂直高度，
+    并限制 x/y 宽度；后续正式分类仍会独立复核。
+    """
+    if not len(region):
+        return False
+    selected = cells[region]
+    x_low = float(np.min(selected[:, 0])) - cell_size
+    x_high = float(np.max(selected[:, 0])) + cell_size
+    y_low = float(np.min(selected[:, 1])) - cell_size
+    y_high = float(np.max(selected[:, 1])) + cell_size
+    local = points[
+        (points[:, 0] >= x_low)
+        & (points[:, 0] <= x_high)
+        & (points[:, 1] >= y_low)
+        & (points[:, 1] <= y_high)
+    ]
+    if len(local) < 8:
+        return False
+    relative = local[:, 2] - (
+        plane_a * local[:, 0] + plane_b * local[:, 1] + plane_c
+    )
+    elevated = local[relative >= step_height]
+    if len(elevated) < 8:
+        return False
+    return (
+        float(np.ptp(elevated[:, 2])) >= 0.15
+        and float(np.ptp(elevated[:, 0])) <= 0.18
+        and float(np.ptp(elevated[:, 1])) <= 0.18
+    )
 
 
 def _region_has_support(
-    cells: np.ndarray,
     region: np.ndarray,
+    anomaly_echo_counts: np.ndarray,
     min_region_cells: int,
     min_region_points: int,
 ) -> bool:
-    """同时检查异常区域的空间连续性和原始回波数量。
+    """同时检查异常区域的空间连续性和异常原始回波数量。
 
-    连续的少量飞点可能恰好落入相邻栅格，仅检查格数仍会误报。第 6 列保存每格原始点数，
-    因而可在不增加一次点云遍历的前提下要求真实表面具有足够回波支撑。
+    连续的少量飞点可能恰好落入相邻栅格，仅检查格数仍会误报。这里不能使用
+    ``cells[:, 5]`` 的格内总点数：同一格的大量正常地面回波会替少数高度飞点“凑够”
+    ``min_region_points``，使近处噪点抢在远处真实墙面之前。调用方传入逐格正/负异常
+    回波数，因此支撑门只统计真正越过本类高度阈值的原始点。
     """
     return len(region) >= max(2, int(min_region_cells)) and int(
-        np.sum(cells[region, 5])
+        np.sum(anomaly_echo_counts[region])
     ) >= max(4, int(min_region_points))
+
+
+def _anomaly_echo_counts_by_cell(
+    points: np.ndarray,
+    cells: np.ndarray,
+    *,
+    cell_size: float,
+    plane_a: float,
+    plane_b: float,
+    plane_c: float,
+    step_height: float,
+    pit_depth: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """统计每个高度格内真正越过正/负阈值的原始回波数。
+
+    高度格用 15/90% 分位数决定“这个格是否异常”，它负责抵抗单点噪声；区域支撑则
+    必须回到原始点计数，防止格内正常地面点被误当作障碍证据。这里只对整帧做一次
+    向量化残差计算和两次 ``unique``，随后所有连通域复用计数，避免按候选区域反复扫描
+    点云而增加 RK3588 延迟。
+    """
+    positive_counts = np.zeros(len(cells), dtype=np.int64)
+    negative_counts = np.zeros(len(cells), dtype=np.int64)
+    if not len(points) or not len(cells):
+        return positive_counts, negative_counts
+
+    size = max(0.02, float(cell_size))
+    cell_coordinates = np.floor(cells[:, :2] / size).astype(np.int32)
+    cell_index = {
+        (int(coordinate[0]), int(coordinate[1])): index
+        for index, coordinate in enumerate(cell_coordinates)
+    }
+    point_coordinates = np.floor(points[:, :2] / size).astype(np.int32)
+    relative = points[:, 2] - (
+        plane_a * points[:, 0] + plane_b * points[:, 1] + plane_c
+    )
+
+    def accumulate(mask: np.ndarray, output: np.ndarray) -> None:
+        if not np.any(mask):
+            return
+        coordinates, counts = np.unique(
+            point_coordinates[mask], axis=0, return_counts=True
+        )
+        for coordinate, count in zip(coordinates, counts):
+            index = cell_index.get((int(coordinate[0]), int(coordinate[1])))
+            # ``_grid_samples`` discards single-return cells. Their echoes cannot
+            # support a connected height region and therefore have no output slot.
+            if index is not None:
+                output[index] = int(count)
+
+    accumulate(relative >= step_height, positive_counts)
+    accumulate(relative <= -pit_depth, negative_counts)
+    return positive_counts, negative_counts
 
 
 def obstacle_front_heading(
@@ -404,6 +528,19 @@ def analyze_terrain_geometry(
     high_relative = cells[:, 4] - plane_cells
     positive = high_relative >= step_height
     negative = low_relative <= -pit_depth
+    # Candidate cells come from robust height quantiles, while support and confidence
+    # must count only raw echoes that actually cross the corresponding threshold. This
+    # prevents dense ground returns in a noisy near cell from hiding a real farther object.
+    positive_echo_counts, negative_echo_counts = _anomaly_echo_counts_by_cell(
+        points,
+        cells,
+        cell_size=cell_size,
+        plane_a=a,
+        plane_b=b,
+        plane_c=c,
+        step_height=step_height,
+        pit_depth=pit_depth,
+    )
     obstacle_height = max(0.0, float(np.quantile(high_relative, 0.98)))
     measured_pit = max(0.0, -float(np.quantile(low_relative, 0.02)))
     slope_pitch, slope_roll = math.atan(a), math.atan(b)
@@ -418,33 +555,105 @@ def analyze_terrain_geometry(
     structure_heading = 0.0
     structure_heading_confidence = 0.0
 
-    negative_region = _largest_connected_region(cells, negative, cell_size)
-    positive_region = _largest_connected_region(cells, positive, cell_size)
-    negative_supported = _region_has_support(
-        cells,
-        negative_region,
-        min_region_cells,
-        min_region_points,
-    )
-    positive_supported = _region_has_support(
-        cells,
-        positive_region,
-        min_region_cells,
-        min_region_points,
-    )
-    # 规则立柱直径只有约 70 mm；5 cm 高度图中通常只占 1～2 格，无法满足宽障碍使用的
-    # 连通格数门槛。允许“少格但原始回波很多”的候选进入后续三维细长结构校验；真正
-    # 飞点仍会因回波总数、z/y/x 跨度三重约束被拒绝。
-    positive_region_points = (
-        int(np.sum(cells[positive_region, 5])) if len(positive_region) else 0
-    )
-    narrow_positive_supported = (
-        len(positive_region) >= 1
-        and positive_region_points >= max(12, int(min_region_points))
-    )
+    # 先给每个连通域单独做回波守卫，再在正高度/负高度候选中选前缘最近者。
+    # 不能先选面积最大者：比如 0.55 m 的细杆与 1.5 m 的宽墙同帧出现时，
+    # 机器人必须先报告并对准细杆。坑洞也不再因类别而无条件抢占更近台阶。
+    candidates = []
+    for region in _connected_regions(cells, negative, cell_size):
+        if _region_has_support(
+            region, negative_echo_counts, min_region_cells, min_region_points
+        ):
+            region_echoes = int(np.sum(negative_echo_counts[region]))
+            # 距离相同时 PIT 排在正障碍前，保留对坑边的保守性。
+            candidates.append(
+                (
+                    _region_front_distance(cells, region),
+                    0,
+                    "negative",
+                    region,
+                    False,
+                    region_echoes,
+                )
+            )
+    for region in _connected_regions(cells, positive, cell_size):
+        ordinary_support = _region_has_support(
+            region, positive_echo_counts, min_region_cells, min_region_points
+        )
+        region_points = (
+            int(np.sum(positive_echo_counts[region])) if len(region) else 0
+        )
+        narrow_pole_support = (
+            # 普通连通域已达标时无需再遍历原始点云；该例外仅用于
+            # 1～2 格的细杆，避免多障碍帧在 RK3588 上对每个大区域重复做 O(N) 过滤。
+            not ordinary_support
+            and region_points >= max(12, int(min_region_points))
+            and _narrow_region_is_pole_like(
+                points,
+                cells,
+                region,
+                plane_a=a,
+                plane_b=b,
+                plane_c=c,
+                step_height=step_height,
+                cell_size=cell_size,
+            )
+        )
+        if ordinary_support or narrow_pole_support:
+            candidates.append(
+                (
+                    _region_front_distance(cells, region),
+                    1,
+                    "positive",
+                    region,
+                    narrow_pole_support,
+                    region_points,
+                )
+            )
+
+    negative_region = np.empty(0, dtype=np.int64)
+    positive_region = np.empty(0, dtype=np.int64)
+    negative_supported = False
+    positive_supported = False
+    narrow_positive_supported = False
+    selected_anomaly_echoes = 0
+    if candidates:
+        (
+            _,
+            _,
+            selected_kind,
+            selected_region,
+            selected_narrow,
+            selected_anomaly_echoes,
+        ) = min(
+            candidates,
+            # 前缘同距离时先保守选坑，同类再选更接近机身中线且
+            # 回波区更大者。这也消除 set 遍历顺序对完全对称场景的随机影响。
+            key=lambda item: (
+                item[0],
+                item[1],
+                abs(float(np.median(cells[item[3], 1]))),
+                -len(item[3]),
+                -item[5],
+            ),
+        )
+        if selected_kind == "negative":
+            negative_region = selected_region
+            negative_supported = True
+        else:
+            positive_region = selected_region
+            positive_supported = _region_has_support(
+                positive_region,
+                positive_echo_counts,
+                min_region_cells,
+                min_region_points,
+            )
+            narrow_positive_supported = bool(selected_narrow)
 
     if negative_supported:
         selected = cells[negative_region]
+        # 当前输出描述的是最近 PIT 连通域，不能把远处墙/台阶的全局
+        # 高分位带入 obstacle_height；否则类别虽是坑，Action 闸门却会看到墙高。
+        obstacle_height = 0.0
         measured_pit = max(
             0.0, -float(np.quantile(low_relative[negative_region], 0.10))
         )
@@ -457,11 +666,22 @@ def analyze_terrain_geometry(
         structure_heading, structure_heading_confidence = obstacle_front_heading(
             selected, distance, cell_size
         )
-        confidence = min(0.96, 0.42 + 0.07 * len(selected))
+        # 连通格数衡量空间面积，异常回波数衡量重复观测；地面回波不再虚增坑洞置信度。
+        confidence = min(
+            0.96,
+            0.38
+            + 0.05 * len(selected)
+            + 0.003 * selected_anomaly_echoes,
+        )
     elif positive_supported or narrow_positive_supported:
+        # 与 PIT 分支对称：选中近处正障碍后，远处坑底不再污染本条台阶/墙/杆
+        # 的原子量测。后续帧移近坑区时会独立选中并发布 PIT。
+        measured_pit = 0.0
         narrow_only = narrow_positive_supported and not positive_supported
         selected_cells = cells[positive_region]
-        supporting_points = int(np.sum(selected_cells[:, 5]))
+        # 所有类别置信度和墙面支撑门均只使用高于阈值的原始回波；格内地面点
+        # 仍参与地面拟合，但不能替正障碍增加可信度。
+        supporting_points = selected_anomaly_echoes
         obstacle_height = max(
             0.0, float(np.quantile(high_relative[positive_region], 0.90))
         )
@@ -513,9 +733,15 @@ def analyze_terrain_geometry(
                     valid_points=len(points),
                 )
         # 只看障碍前缘附近的原始点，利用垂直/横向跨度区分几何类别。
+        # 既然上面已选定单一最近连通域，这里还必须限制其 y 包围；否则同一
+        # x 距离但不相连的另一面墙/杆会污染 z_span、y_span 和净空分类。
+        selected_y_low = float(np.min(selected_cells[:, 1])) - cell_size
+        selected_y_high = float(np.max(selected_cells[:, 1])) + cell_size
         front = points[
             (points[:, 0] >= distance - cell_size)
             & (points[:, 0] <= distance + 2.0 * cell_size)
+            & (points[:, 1] >= selected_y_low)
+            & (points[:, 1] <= selected_y_high)
         ]
         front_relative = front[:, 2] - (
             a * front[:, 0] + b * front[:, 1] + c

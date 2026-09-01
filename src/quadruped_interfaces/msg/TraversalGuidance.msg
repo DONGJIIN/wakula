@@ -19,7 +19,7 @@ uint8 OBSTACLE_POLE=6
 uint8 phase                # 当前越障引导阶段
 uint8 obstacle_type        # 与 TerrainFeatures/FusedObstacle 完全相同的类别编码
 bool perception_valid      # false 时其余字段不得用于导航或控制
-bool traversal_required    # true 表示需要未来越障控制器接管；POLE 等导航物体为 false
+bool traversal_required    # true 表示需越障控制器接管；普通/矮柱为 false，语义确认的规则高绕杆可为 true
 bool ready_for_handoff     # 已到入口且对正；运动团队未来只在此状态申请接管
 float32 confidence
 float32 distance           # 当前障碍前缘距离，m

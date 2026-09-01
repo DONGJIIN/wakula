@@ -330,7 +330,7 @@ class NavigationSpeedGate(Node):
         self.last_health_time = self.get_clock().now()
 
     def autonomy_stop_callback(self, msg: Bool) -> None:
-        """锁止核心速度链；最终底盘仲裁器还必须用同一信号覆盖手动输入。"""
+        """只锁止 Nav2 自主速度链；人工分支由独立所有权与硬件安全门管理。"""
         self.external_stop = bool(msg.data)
 
     def scan_callback(self, msg: LaserScan) -> None:

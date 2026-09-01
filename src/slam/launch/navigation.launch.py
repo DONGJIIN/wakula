@@ -63,7 +63,8 @@ def generate_launch_description():
 
     # 速度链刻意分成三个命名话题，便于逐段定位“谁把速度归零”：
     # controller -> cmd_vel_nav -> smoother -> cmd_vel_smoothed -> 最终地形/雷达安全门 ->
-    # cmd_vel。每段仍有独立话题，最终节点持续发布，避免下游在停车后永久等不到新命令。
+    # cmd_vel。Wakula gate 启用时由它持续发布最终速度；关闭时目标仲裁器必须接管
+    # cmd_vel_smoothed 与全部安全/停车心跳，再唯一发布 cmd_vel。
     nodes = [
         nav2_node(
             "nav2_controller",

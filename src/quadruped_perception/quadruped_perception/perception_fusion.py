@@ -267,8 +267,11 @@ def fuse_observations(
                 1.0, 0.65 * terrain.confidence + 0.45 * vision.confidence
             )
         else:
-            # 冲突证据不改变几何类别，只降低置信度，交由后续帧继续确认。
-            result.confidence = max(0.0, 0.75 * terrain.confidence)
+            # 冲突视觉只能表示“未完成辅助复核”，不得惩罚已有米制支撑的点云。
+            # 例如点云置信度 0.30 本来足以进入下游；乘 0.75 后会低于 0.25
+            # 有效门，一个画面杂物就能把权威几何变成 STOP。保持原置信度并置
+            # vision_confirmed=false，既不提升也不否决点云。
+            result.confidence = float(terrain.confidence)
     return result
 
 

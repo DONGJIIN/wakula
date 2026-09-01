@@ -808,10 +808,15 @@ def stabilize_evidence(
     minimum_match_ratio: float = 0.60,
     minimum_iou: float = 0.20,
 ) -> ObstacleEvidence:
-    """仅接受在近期多帧重复且位置/尺寸变化合理的非空候选。
+    """仅接受在近期多帧重复且相邻观测运动合理的当前候选。
 
-    输出采用各字段中位数，降低单帧抖动影响。窗口内多数投票解决类别闪烁，中心与
-    尺寸极差约束则拒绝反光、运动模糊或多个不同目标碰巧同类的情况。
+    窗口内多数投票解决类别闪烁；空间门则比较相邻同类框，而不是比较整个
+    窗口的极差。机器人持续接近或转向时，同一障碍的框会每帧平滑放大/平移；
+    累计位移可以很大，但单次跳变仍必须被拒绝。
+
+    返回框始终取当前（窗口最后）匹配帧，使节点赋予的当前 Image Header 与框
+    来自同一时刻。历史中位框虽然更平滑，但在 5 Hz、5 帧窗口下约滞后 0.4 s，
+    时间同步节点会误以为它是当前空间证据。
     """
     # 多帧投票抑制反光、运动模糊和单帧噪声。
     hints = [item.hint for item in history if item.hint != "none"]
@@ -824,31 +829,56 @@ def stabilize_evidence(
     )
     if count < required:
         return ObstacleEvidence()
-    matches = [item for item in history if item.hint == hint]
-    center_x = np.asarray([item.center_x for item in matches])
-    center_y = np.asarray([item.center_y for item in matches])
-    widths = np.asarray([item.width for item in matches])
-    heights = np.asarray([item.height for item in matches])
-    center_jitter = max(float(np.ptp(center_x)), float(np.ptp(center_y)))
-    size_jitter = max(float(np.ptp(widths)), float(np.ptp(heights)))
-    if center_jitter > max_center_jitter or size_jitter > max_size_jitter:
+    # 历史多数不得为当前帧伪造框。本帧丢检或已切换类别时先输出 NONE，
+    # 待新类别重新累积；否则会把旧障碍位置配上新图像的 Header。
+    current = history[-1]
+    if current.hint != hint:
         return ObstacleEvidence()
-    median_box = ObstacleEvidence(
-        hint=hint,
-        center_x=float(np.median(center_x)),
-        center_y=float(np.median(center_y)),
-        width=float(np.median(widths)),
-        height=float(np.median(heights)),
-    )
-    overlaps = [evidence_iou(item, median_box) for item in matches]
-    minimum_overlap = float(min(overlaps))
+    indexed_matches = [
+        (index, item)
+        for index, item in enumerate(history)
+        if item.hint == hint
+    ]
+    matches = [item for _, item in indexed_matches]
+    center_steps = []
+    size_steps = []
+    overlaps = []
+    for (previous_index, previous), (following_index, following) in zip(
+        indexed_matches, indexed_matches[1:]
+    ):
+        # NONE 通常来自一帧拖影/曝光质量门。跨过这种缺口时，允许的位移与
+        # 尺寸变化应按真实帧间隔线性放大，不能把相隔两帧的框当成相邻一帧。
+        frame_gap = max(1, int(following_index) - int(previous_index))
+        center_delta = max(
+            abs(float(following.center_x) - float(previous.center_x)),
+            abs(float(following.center_y) - float(previous.center_y)),
+        )
+        size_delta = max(
+            abs(float(following.width) - float(previous.width)),
+            abs(float(following.height) - float(previous.height)),
+        )
+        if (
+            center_delta > max_center_jitter * frame_gap
+            or size_delta > max_size_jitter * frame_gap
+        ):
+            return ObstacleEvidence()
+        center_steps.append(center_delta / frame_gap)
+        size_steps.append(size_delta / frame_gap)
+        # IoU 是“相邻帧是同一实体”的强约束；跨过缺帧时框可能正常放大
+        # 数倍，此时由上面的单帧平均运动门承担关联，不强制原始 IoU。
+        if frame_gap == 1:
+            overlaps.append(evidence_iou(previous, following))
+    maximum_center_step = max(center_steps, default=0.0)
+    maximum_size_step = max(size_steps, default=0.0)
+    # 上面已用实际 frame_gap 拒绝超限跳变；这两个归一化值仅用于置信度降权。
+    minimum_overlap = float(min(overlaps, default=1.0))
     if minimum_overlap < float(np.clip(minimum_iou, 0.0, 1.0)):
         return ObstacleEvidence()
     confidence = float(np.median([item.confidence for item in matches]))
     consistency = count / max(1, len(history))
     spatial_consistency = 1.0 - max(
-        center_jitter / max(1e-6, max_center_jitter),
-        size_jitter / max(1e-6, max_size_jitter),
+        maximum_center_step / max(1e-6, max_center_jitter),
+        maximum_size_step / max(1e-6, max_size_jitter),
     )
     return ObstacleEvidence(
         hint=hint,
@@ -856,10 +886,11 @@ def stabilize_evidence(
         confidence=confidence
         * (0.8 + 0.2 * consistency)
         * (0.85 + 0.10 * spatial_consistency + 0.05 * minimum_overlap),
-        center_x=median_box.center_x,
-        center_y=median_box.center_y,
-        width=median_box.width,
-        height=median_box.height,
+        # 时间同步的原子性比平滑显示更重要：框与外层即将填入的最新 Header 同帧。
+        center_x=current.center_x,
+        center_y=current.center_y,
+        width=current.width,
+        height=current.height,
     )
 
 

@@ -157,13 +157,42 @@ def inventory_display(completed: Sequence[str], pending: Sequence[str]) -> str:
 
 
 def timeout_reached(started: float, now: float, timeout: float) -> bool:
-    """Safely evaluate a monotonic inactivity deadline; invalid clocks fail closed."""
+    """Evaluate an armed monotonic deadline; unarmed or non-finite inputs return false.
+
+    Runtime timeouts are positively validated before this helper is used.  Returning
+    false for ``started == 0`` is important because zero denotes "no request pending";
+    non-finite ROS/TF data is rejected at its message boundary instead.
+    """
     values = (started, now, timeout)
     return (
         all(isfinite(float(value)) for value in values)
         and float(started) > 0.0
         and float(timeout) > 0.0
         and float(now) - float(started) >= float(timeout)
+    )
+
+
+def bounded_shutdown_wait(
+    response_timeout: float,
+    cancel_timeout: float,
+    *,
+    minimum: float = 0.75,
+    maximum: float = 5.0,
+) -> float:
+    """Return the finite Ctrl-C ownership-drain window used by ``main``.
+
+    A signal can arrive before an Action goal response.  In that case shutdown must
+    first wait for the handle and then wait for the cancellation result, so the two
+    communication budgets are sequential rather than alternatives.
+    """
+    values = (response_timeout, cancel_timeout, minimum, maximum)
+    if not all(isfinite(float(value)) for value in values):
+        return 0.75
+    lower = max(0.0, float(minimum))
+    upper = max(lower, float(maximum))
+    return min(
+        upper,
+        max(lower, float(response_timeout) + float(cancel_timeout)),
     )
 
 
@@ -193,6 +222,102 @@ def terminal_pose_reached(
         float(robot_pose[0]) - float(terminal_pose[0]),
         float(robot_pose[1]) - float(terminal_pose[1]),
     ) <= float(tolerance)
+
+
+def guidance_is_well_formed(guidance: Optional[TraversalGuidance]) -> bool:
+    """Validate one guidance snapshot before it can affect task state.
+
+    ``TraversalGuidance`` normally comes from this repository, but the real-robot
+    integration boundary permits another process to publish the same interface.  A
+    single NaN in distance/lateral/yaw can otherwise become a NaN map goal, while an
+    out-of-range phase or confidence can keep an old obstacle lock alive.  Treat the
+    numeric fields as one atomic snapshot: reject the whole message when any member is
+    non-finite or outside the documented message range.
+    """
+    if guidance is None:
+        return False
+    numeric = (
+        guidance.confidence,
+        guidance.distance,
+        guidance.lateral_offset,
+        guidance.heading_error,
+        guidance.approach_x,
+        guidance.approach_y,
+        guidance.approach_yaw,
+        guidance.speed_limit,
+    )
+    if not all(isfinite(float(value)) for value in numeric):
+        return False
+    ranges_valid = bool(
+        TraversalGuidance.PHASE_INVALID
+        <= int(guidance.phase)
+        <= TraversalGuidance.PHASE_READY
+        and TraversalGuidance.OBSTACLE_UNKNOWN
+        <= int(guidance.obstacle_type)
+        <= TraversalGuidance.OBSTACLE_POLE
+        and 0.0 <= float(guidance.confidence) <= 1.0
+        and float(guidance.distance) >= 0.0
+        and abs(float(guidance.heading_error)) <= pi
+        and abs(float(guidance.approach_yaw)) <= pi
+        and 0.0 <= float(guidance.speed_limit) <= 1.0
+    )
+    if not ranges_valid:
+        return False
+    if not bool(guidance.perception_valid):
+        return int(guidance.phase) == TraversalGuidance.PHASE_INVALID
+    if int(guidance.phase) == TraversalGuidance.PHASE_INVALID:
+        return False
+    if bool(guidance.ready_for_handoff) != (
+        int(guidance.phase) == TraversalGuidance.PHASE_READY
+    ):
+        return False
+    if bool(guidance.traversal_required):
+        return int(guidance.phase) in {
+            TraversalGuidance.PHASE_APPROACH,
+            TraversalGuidance.PHASE_ALIGN,
+            TraversalGuidance.PHASE_READY,
+        }
+    return int(guidance.phase) == TraversalGuidance.PHASE_CLEAR
+
+
+def planar_pose_from_transform(transform) -> Optional[Tuple[float, float, float]]:
+    """Return a finite planar pose from TF, or ``None`` for a corrupt transform.
+
+    TF lookup success only proves that a transform object exists.  Driver restart or
+    partially initialised hardware can still expose NaN/Inf translation or a zero
+    quaternion.  Normalising a finite non-zero quaternion tolerates harmless numeric
+    scaling, while rejecting the entire transform prevents ``floor(NaN)`` in map-grid
+    conversion from terminating the 4 Hz mission timer.
+    """
+    t = transform.transform.translation
+    q = transform.transform.rotation
+    values = (t.x, t.y, t.z, q.x, q.y, q.z, q.w)
+    if not all(isfinite(float(value)) for value in values):
+        return None
+    norm_squared = sum(float(value) ** 2 for value in (q.x, q.y, q.z, q.w))
+    if norm_squared < 1e-12:
+        return None
+    scale = norm_squared ** -0.5
+    qx, qy = float(q.x) * scale, float(q.y) * scale
+    qz, qw = float(q.z) * scale, float(q.w) * scale
+    yaw = atan2(
+        2.0 * (qw * qz + qx * qy),
+        1.0 - 2.0 * (qy * qy + qz * qz),
+    )
+    if not isfinite(yaw):
+        return None
+    return float(t.x), float(t.y), float(yaw)
+
+
+def navigation_pose_is_well_formed(pose: PoseStamped) -> bool:
+    """Reject a malformed Nav2 goal locally before it crosses the Action boundary."""
+    if pose is None or str(pose.header.frame_id).lstrip("/") != "map":
+        return False
+    p, q = pose.pose.position, pose.pose.orientation
+    values = (p.x, p.y, p.z, q.x, q.y, q.z, q.w)
+    if not all(isfinite(float(value)) for value in values):
+        return False
+    return sum(float(value) ** 2 for value in (q.x, q.y, q.z, q.w)) >= 1e-12
 
 
 def canonical_obstacle_id(name: str) -> str:
@@ -891,7 +1016,7 @@ def verification_station_matches(
 
     A long bridge, ramp or pit can report a different *nearest obstacle point* after
     every in-place turn. Resetting the view counter from that moving point caused
-    repeated ``1/4`` verification cycles. The robot pose is the stable reference:
+    repeated ``1/2`` verification cycles. The robot pose is the stable reference:
     pure rotations at one station remain one bounded sequence, while driving to a
     genuinely new viewpoint starts a fresh sequence.
     """
@@ -1700,10 +1825,10 @@ class AutonomousMission(Node):
             # 底盘规划，转入 TraverseObstacle；否则会永久重发同一个不可达入口点。
             "approach_stall_handoff_count": 1,
             # Nav2 may stop at the inflation boundary before the nominal 1.20 m
-            # handoff.  A repeated stall may transfer the remaining approach to
+            # handoff.  A complete timed stall may transfer the remaining approach to
             # TraverseObstacle, whose goal carries the measured entry distance.
             # 当前地形 ROI 到 2.5 m；在空间、横偏、航向和语义守卫同时成立时，允许
-            # 越障控制器从 2.10 m 内接管最后一段低速接近。否则 Nav2 的膨胀边界可能
+            # 越障控制器从 2.35 m 内接管最后一段低速接近。否则 Nav2 的膨胀边界可能
             # 恰好停在 1.9~2.0 m，使任务虽看清障碍却永远够不到名义入口。
             "approach_stall_handoff_max_distance": 2.35,
             "approach_stall_handoff_max_lateral": 0.75,
@@ -1720,6 +1845,13 @@ class AutonomousMission(Node):
             # seconds for a long bridge.  This is a safety ceiling, not the
             # nominal duration, and therefore must exceed every valid action.
             "goal_timeout": 45.0, "traversal_timeout": 45.0,
+            # DDS 断连可能让 send/cancel Future 永远不完成。响应看门狗只覆盖通信握手；
+            # 已接受目标的正常执行仍分别由 goal_timeout/traversal_timeout 限制。
+            # 超时代表运动控制权未知，任务只会锁住自主 Twist。Nav2 故障可停/重启
+            # Nav2 或核心栈；Traverse 故障必须停/重启外部控制器；归属不明时两者都处理
+            # 并使用硬件急停。不能只重启本自主进程或只重启核心栈。
+            "action_response_timeout": 2.0,
+            "action_cancel_timeout": 2.0,
             # 到达入口但越障 Action 服务未就绪时不能永久停留；短暂等待后保留该障碍
             # 为未完成，换一个目标继续探索。真机服务应在启动自主任务前先就绪。
             "controller_wait_timeout": 5.0,
@@ -1734,7 +1866,7 @@ class AutonomousMission(Node):
             "semantic_observation_distance": 2.50,
             "semantic_confirmation_distance": 1.20,
             # 名称输入已由感知层完成多帧稳定和几何校验；任务层只做第二级短窗口确认。
-            # 2/6 能接住木桥偶发但连续的专名，又不接受单帧颜色/深度跳变。
+            # 3/6 能接住木桥偶发但连续的专名，又不接受一两帧颜色/深度跳变。
             "semantic_confirmation_votes": 3,
             "semantic_recent_window": 6,
             # If metric geometry is stable but the competition name remains
@@ -1742,7 +1874,7 @@ class AutonomousMission(Node):
             # Translation stays locked by the safety gate during verification.
             "semantic_verification_turn_angle": 0.30,
             # 每个驻留点最多看左右两个附加视角；仍不明确就移动到新观察站，不在原地
-            # 用四次旋转耗掉 15～25 秒的比赛预算。
+            # 用更多旋转耗掉 15～25 秒的比赛预算。
             "semantic_verification_max_attempts": 2,
             "semantic_verification_lock_radius": 1.50,
             # Wait for several complete 5 Hz depth frames after a viewpoint
@@ -1855,7 +1987,7 @@ class AutonomousMission(Node):
             inventory_qos,
         )
         # 独立任务进程拥有自己的运动许可。TRANSIENT_LOCAL 让核心速度门记住最后状态：
-        # 启动时解除自主停车，Ctrl-C 时先锁止，再取消异步 Action。核心 SLAM 不需要启动
+        # 启动时解除自主 Twist 锁，Ctrl-C 时先锁止 Nav2 速度，再取消异步 Action。核心 SLAM 不需要启动
         # 或管理本节点；它只把这一标准布尔量作为额外的失效安全输入。
         stop_qos = QoSProfile(depth=1)
         stop_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -1890,6 +2022,12 @@ class AutonomousMission(Node):
         self.nav_handle = None
         self.nav_send_pending = False
         self.nav_cancel_pending = False
+        # 每次发送都携带递增代次。看门狗作废请求后，迟到回调只能尝试取消其旧句柄，
+        # 不能覆盖当前状态或把旧结果解释为新目标完成。
+        self.nav_generation = 0
+        self.nav_cancel_generation = 0
+        self.nav_send_started = 0.0
+        self.nav_cancel_started = 0.0
         # 取消原因与目标用途必须分开保存。旧实现把 ``approach`` 覆盖成
         # ``cancel_approach_within_tolerance``，result 回调因而不知道这是一次障碍入口
         # 导航，无法进入受保护的 Action 交接，只会反复提交同一个近距离目标。
@@ -1920,8 +2058,17 @@ class AutonomousMission(Node):
         # 否则 4 Hz 定时器会在服务器响应前重复提交同一个障碍。
         self.traverse_send_pending = False
         self.traverse_cancel_pending = False
+        self.traverse_generation = 0
+        self.traverse_cancel_generation = 0
+        self.traverse_send_started = 0.0
+        self.traverse_cancel_started = 0.0
         self.traverse_handle = None
         self.traverse_started = 0.0
+        # Action 通信超时后不能证明远端是否已经接管。该锁存状态持续发布自主 Twist 锁，
+        # 但不能停止失联外部控制器的关节动作；它绝不自动清空，只重启自主 launch 也无法
+        # 证明远端旧目标已经消失。
+        self.action_ownership_fault = False
+        self.action_fault_reason = ""
         self.traversal_verification: Optional[TraversalVerification] = None
         self.obstacle_signature = None
         self.obstacle_frames = 0
@@ -2041,9 +2188,28 @@ class AutonomousMission(Node):
             self.last_inventory_log_time = now
 
     def _publish_immediate_stop(self) -> None:
-        """锁住核心速度门；用于独立 launch 退出时确定性停车。"""
+        """确定性锁住 Nav2 Twist；不冒充外部关节控制器的硬件急停。"""
         self.rotation_recovery_pub.publish(Bool(data=False))
         self.autonomy_stop_pub.publish(Bool(data=True))
+
+    def _release_autonomy_stop_after_cancel(self) -> None:
+        """Re-open autonomous velocity only after every known Action owner released.
+
+        A cancel *response* is insufficient; callers invoke this only from a matching
+        goal-result callback.  Manual keyboard/joystick ownership is outside this node
+        and remains governed by the final command arbiter.
+        """
+        if (
+            self.enabled
+            and not self.action_ownership_fault
+            and self.nav_handle is None
+            and not self.nav_send_pending
+            and not self.nav_cancel_pending
+            and self.traverse_handle is None
+            and not self.traverse_send_pending
+            and not self.traverse_cancel_pending
+        ):
+            self.autonomy_stop_pub.publish(Bool(data=False))
 
     def _map_callback(self, msg):
         self.map_msg = msg
@@ -2075,11 +2241,33 @@ class AutonomousMission(Node):
         ):
             pose = self.latest_odom.pose.pose
             q = pose.orientation
-            yaw = atan2(
-                2.0 * (q.w * q.z + q.x * q.y),
-                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            values = (
+                pose.position.x,
+                pose.position.y,
+                pose.position.z,
+                q.x,
+                q.y,
+                q.z,
+                q.w,
             )
-            return float(pose.position.x), float(pose.position.y), float(yaw)
+            norm_squared = sum(
+                float(value) ** 2 for value in (q.x, q.y, q.z, q.w)
+            ) if all(isfinite(float(value)) for value in values) else 0.0
+            if norm_squared >= 1e-12:
+                scale = norm_squared ** -0.5
+                qx, qy = float(q.x) * scale, float(q.y) * scale
+                qz, qw = float(q.z) * scale, float(q.w) * scale
+                yaw = atan2(
+                    2.0 * (qw * qz + qx * qy),
+                    1.0 - 2.0 * (qy * qy + qz * qz),
+                )
+                if isfinite(yaw):
+                    return (
+                        float(pose.position.x),
+                        float(pose.position.y),
+                        float(yaw),
+                    )
+            # 损坏的 odom 不能被当作“有运动进展”；退回已校验的 map TF。
         return self._robot_pose()
 
     def _finish_pose_callback(self, msg: PoseStamped) -> None:
@@ -2480,13 +2668,16 @@ class AutonomousMission(Node):
             transform = self.tf_buffer.lookup_transform("map", "base_link", Time())
         except TransformException:
             return None
-        t, q = transform.transform.translation, transform.transform.rotation
-        yaw = atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-        return float(t.x), float(t.y), yaw
+        return planar_pose_from_transform(transform)
 
     def _guidance_callback(self, msg):
         self.guidance = msg
         self.guidance_received = time.monotonic()
+        if not guidance_is_well_formed(msg):
+            # 明确的坏帧必须立即撤销旧确认；不能仅等待 guidance_timeout，否则上一帧
+            # 合法 READY 仍可能在传感器刚损坏时继续参与入口交接。
+            self.obstacle_signature, self.obstacle_frames = None, 0
+            return
         position = self._obstacle_position(msg)
         if position is None or not msg.perception_valid or not msg.traversal_required:
             self.obstacle_signature, self.obstacle_frames = None, 0
@@ -2615,11 +2806,18 @@ class AutonomousMission(Node):
                 )
 
     def _obstacle_position(self, msg):
+        if not guidance_is_well_formed(msg):
+            return None
         pose = self._robot_pose()
         if pose is None:
             return None
-        return (pose[0] + cos(pose[2]) * msg.distance - sin(pose[2]) * msg.lateral_offset,
-                pose[1] + sin(pose[2]) * msg.distance + cos(pose[2]) * msg.lateral_offset)
+        position = (
+            pose[0] + cos(pose[2]) * float(msg.distance)
+            - sin(pose[2]) * float(msg.lateral_offset),
+            pose[1] + sin(pose[2]) * float(msg.distance)
+            + cos(pose[2]) * float(msg.lateral_offset),
+        )
+        return position if all(isfinite(value) for value in position) else None
 
     def _already_completed(self, msg):
         position = self._obstacle_position(msg)
@@ -2665,6 +2863,7 @@ class AutonomousMission(Node):
         msg = self.guidance
         if (
             msg is None
+            or not guidance_is_well_formed(msg)
             or time.monotonic() - self.guidance_received
             > float(self.params["guidance_timeout"])
             or not msg.perception_valid
@@ -2728,6 +2927,8 @@ class AutonomousMission(Node):
         return pose
 
     def _relative_approach_pose(self, guidance):
+        if not guidance_is_well_formed(guidance):
+            return None
         robot = self._robot_pose()
         if robot is None:
             return None
@@ -2751,7 +2952,7 @@ class AutonomousMission(Node):
             return
         # 换视角时长坡、桥面和坑沿的“最近前缘”会沿结构移动。这里必须用几乎不动的
         # 机器人驻留点判断是否仍是同一轮验证；若用障碍前缘，即使半径放到 1.5 m 也会
-        # 在同一长结构上反复重置为 1/4。
+        # 在同一长结构上反复重置为 1/2。
         lock_radius = float(self.params["semantic_verification_lock_radius"])
         robot_xy = (float(robot[0]), float(robot[1]))
         if not verification_station_matches(
@@ -2768,12 +2969,12 @@ class AutonomousMission(Node):
             for previous in self.semantic_verification_obstacle_positions
         ):
             self.semantic_verification_obstacle_positions.append(position)
-        self.semantic_verification_attempts += 1
+        next_attempt = self.semantic_verification_attempts + 1
         maximum = int(self.params["semantic_verification_max_attempts"])
-        if self.semantic_verification_attempts > maximum:
+        if next_attempt > maximum:
             expiry = now + float(self.params["obstacle_failure_cooldown"])
             # 冷却本轮各个朝向看到的前缘，而不是只冷却最后一个像素投影点。这样长桥/坡
-            # 转身后不会立刻从另一个前缘绕过 failure_radius 再进入 1/4。
+            # 转身后不会立刻从另一个前缘绕过 failure_radius 再进入 1/2。
             for blocked_position in self.semantic_verification_obstacle_positions:
                 self.blocked_obstacles.append((
                     float(blocked_position[0]),
@@ -2801,22 +3002,24 @@ class AutonomousMission(Node):
         # +a, -2a, +3a, -4a samples both sides without accumulating yaw in
         # one direction.  The largest change is still below one radian.
         signed_step = (
-            self.semantic_verification_attempts
-            if self.semantic_verification_attempts % 2
-            else -self.semantic_verification_attempts
+            next_attempt
+            if next_attempt % 2
+            else -next_attempt
         )
         delta = signed_step * float(
             self.params["semantic_verification_turn_angle"]
         )
-        self.state = "VERIFYING_OBSTACLE"
-        self._send_nav_goal(
+        sent = self._send_nav_goal(
             self._make_pose(robot[0], robot[1], robot[2] + delta),
             "verify_obstacle",
         )
-        self._publish_state(
-            "metric obstacle confirmed but name is ambiguous; "
-            f"changing view {self.semantic_verification_attempts}/{maximum}"
-        )
+        if sent:
+            self.semantic_verification_attempts = next_attempt
+            self.state = "VERIFYING_OBSTACLE"
+            self._publish_state(
+                "metric obstacle confirmed but name is ambiguous; "
+                f"changing view {self.semantic_verification_attempts}/{maximum}"
+            )
 
     def _queue_traversal_handoff(self, target, semantic_id: str, position, now: float) -> bool:
         """冻结已验证入口并切换控制权，避免多个分支各自拼装 Action 状态。
@@ -2824,6 +3027,12 @@ class AutonomousMission(Node):
         该函数只准备任务层状态；真正的腿部动作仍由 ``TraverseObstacle`` 服务端负责。
         Gazebo 替身与未来真机控制器因此使用完全相同的入口合同。
         """
+        # A goal request without a handle cannot yet be cancelled.  Freezing HANDOFF
+        # here would let its late accepted response continue toward the old Nav2 target,
+        # then execute TraverseObstacle from stale geometry.  Wait for the response;
+        # the next tick can cancel the now-observable handle using fresh perception.
+        if self.nav_send_pending:
+            return False
         if not is_actionable_semantic_id(semantic_id) or position is None:
             return False
         # A named rule obstacle exists once.  Re-check at the last possible moment so
@@ -2918,18 +3127,200 @@ class AutonomousMission(Node):
         self.state = "HANDOFF"
         return True
 
-    def _cancel_nav(self, reason="replace"):
+    def _cancel_late_action_handle(self, handle, label: str) -> None:
+        """Best-effort cancellation for a response from an invalidated request.
+
+        The autonomy speed latch is already closed before this method is used.  A late
+        accepted response must never be installed as the current handle; requesting
+        cancellation merely helps the remote server release its resources sooner.
+        """
+        if handle is None or not bool(getattr(handle, "accepted", False)):
+            return
+        try:
+            handle.cancel_goal_async()
+        except Exception as exc:
+            self.get_logger().error(
+                f"Late {label} goal could not be cancelled: {exc}"
+            )
+
+    def _enter_action_ownership_fault(self, reason: str) -> None:
+        """Lock autonomy Twist when an Action owner can no longer be observed.
+
+        Clearing a local handle and immediately sending another goal would create two
+        possible motion owners.  Instead, invalidate both callback generations, publish
+        the standard autonomy speed stop and retain the inventory unchanged.  A Nav2
+        fault requires Nav2/the core stack to stop; a Traverse fault requires the external
+        traversal controller to stop; an unknown owner requires both plus hardware e-stop.
+        Restarting autonomy alone (or only the core for a Traverse fault) is not proof that
+        an old accepted goal disappeared.  This lock cannot stop joint motion inside an
+        unresponsive external traversal controller; its server-side cancel handling or
+        the robot's hardware emergency stop must do that.  Late callbacks are ignored by
+        generation token, and accepted late responses are cancelled on a best-effort basis.
+        """
+        self._publish_immediate_stop()
+        if self.action_ownership_fault:
+            return
+        known_nav_handle = self.nav_handle
+        known_traverse_handle = self.traverse_handle
+        self.action_ownership_fault = True
+        self.action_fault_reason = str(reason)
+        self.nav_generation += 1
+        self.traverse_generation += 1
+        self.nav_cancel_generation += 1
+        self.traverse_cancel_generation += 1
+        self.nav_handle = None
+        self.nav_send_pending = False
+        self.nav_cancel_pending = False
+        self.nav_send_started = 0.0
+        self.nav_cancel_started = 0.0
+        self.nav_target = None
+        self.nav_purpose = ""
+        self.nav_revisit_id = ""
+        self.nav_cancel_reason = ""
+        self.nav_progress_pose = None
+        self.nav_obstacle_position = None
+        self.nav_obstacle_id = ""
+        self.traverse_handle = None
+        self.traverse_send_pending = False
+        self.traverse_cancel_pending = False
+        self.traverse_send_started = 0.0
+        self.traverse_cancel_started = 0.0
+        self.pending_traverse = None
+        self.pending_traverse_id = ""
+        self.pending_traverse_position = None
+        self.pending_traverse_robot_start = None
+        self.traversal_verification = None
+        # 对已经拿到 handle 的目标再尽力取消一次。自主速度锁只保证 Nav2 Twist 归零，
+        # 不能替代外部越障控制器的取消确认或硬件急停；这里也不把 cancel request 成功
+        # 误当作 ownership 已释放，更不会自动清除 fault。
+        self._cancel_late_action_handle(known_nav_handle, "Nav2 faulted")
+        self._cancel_late_action_handle(
+            known_traverse_handle, "TraverseObstacle faulted"
+        )
+        self.state = "ACTION_COMMUNICATION_FAULT"
+        self._publish_state(
+            f"{self.action_fault_reason}; autonomous speed locked; stop/restart the "
+            "owning Nav2 or traversal controller before restarting autonomy"
+        )
+
+    def _check_action_watchdogs(self, now: float) -> bool:
+        """Bound every Action handshake that otherwise has no ROS-side deadline."""
+        if self.action_ownership_fault:
+            self._publish_immediate_stop()
+            self.state = "ACTION_COMMUNICATION_FAULT"
+            return True
+        response_timeout = float(self.params["action_response_timeout"])
+        cancel_timeout = float(self.params["action_cancel_timeout"])
+        if self.nav_send_pending and timeout_reached(
+            self.nav_send_started, now, response_timeout
+        ):
+            self._enter_action_ownership_fault(
+                f"Nav2 goal response exceeded {response_timeout:.1f} seconds"
+            )
+            return True
+        if self.traverse_send_pending and timeout_reached(
+            self.traverse_send_started, now, response_timeout
+        ):
+            self._enter_action_ownership_fault(
+                "TraverseObstacle goal response exceeded "
+                f"{response_timeout:.1f} seconds"
+            )
+            return True
+        # cancel response alone does not prove that a controller stopped.  Keep this
+        # deadline active until the goal-result callback releases the handle.
+        if self.nav_cancel_pending and timeout_reached(
+            self.nav_cancel_started, now, cancel_timeout
+        ):
+            self._enter_action_ownership_fault(
+                f"Nav2 cancel/result exceeded {cancel_timeout:.1f} seconds"
+            )
+            return True
+        if self.traverse_cancel_pending and timeout_reached(
+            self.traverse_cancel_started, now, cancel_timeout
+        ):
+            self._enter_action_ownership_fault(
+                "TraverseObstacle cancel/result exceeded "
+                f"{cancel_timeout:.1f} seconds"
+            )
+            return True
+        return False
+
+    def _nav_cancel_response(
+        self,
+        future,
+        generation: Optional[int] = None,
+        cancel_generation: Optional[int] = None,
+    ) -> None:
+        """Observe cancel transport failure while result remains the ownership proof."""
+        token = self.nav_generation if generation is None else int(generation)
+        cancel_token = (
+            self.nav_cancel_generation
+            if cancel_generation is None
+            else int(cancel_generation)
+        )
+        # The terminal result is authoritative.  Its callback clears ``cancel_pending``;
+        # a later service-future exception must not re-latch a fault after ownership was
+        # already released.  The per-cancel token also rejects a callback from any older
+        # cancellation attempt without relying only on the goal generation.
+        if (
+            token != self.nav_generation
+            or cancel_token != self.nav_cancel_generation
+            or not self.nav_cancel_pending
+            or self.nav_handle is None
+        ):
+            return
+        try:
+            future.result()
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 cancel response failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 cancel response failed while motion ownership was unknown"
+            )
+
+    def _cancel_nav(self, reason="replace") -> bool:
         """只发送一次取消请求，并等待 Nav2 result 回调释放句柄。
 
         Action 的 cancel future 只说明服务收到请求；真正可以提交新目标的时刻是旧 goal
         result 到达以后。显式锁可避免入口目标与仍在执行的前沿目标互相抢占。
         """
-        if self.nav_handle is not None and not self.nav_cancel_pending:
-            self.nav_cancel_pending = True
-            self.nav_cancel_reason = str(reason)
-            self.nav_handle.cancel_goal_async()
+        if self.nav_handle is None or self.nav_cancel_pending:
+            return False
+        # 从取消发起到最终 result 之间，远端仍可能发布上一目标的速度。先锁门再发 RPC，
+        # 即使 cancel 调用同步异常也不会留下继续运动的窗口。
+        self._publish_immediate_stop()
+        token = self.nav_generation
+        try:
+            future = self.nav_handle.cancel_goal_async()
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 cancel request failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 cancel request failed while motion ownership was unknown"
+            )
+            return False
+        self.nav_cancel_pending = True
+        self.nav_cancel_generation += 1
+        cancel_token = self.nav_cancel_generation
+        self.nav_cancel_reason = str(reason)
+        self.nav_cancel_started = time.monotonic()
+        try:
+            future.add_done_callback(
+                lambda done,
+                request_token=token,
+                request_cancel_token=cancel_token: self._nav_cancel_response(
+                    done,
+                    request_token,
+                    request_cancel_token,
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 cancel callback setup failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 cancel response could not be monitored"
+            )
+            return False
+        return True
 
-    def _send_nav_goal(self, pose, purpose, guidance=None, revisit_id=""):
+    def _send_nav_goal(self, pose, purpose, guidance=None, revisit_id="") -> bool:
         """Submit one Nav2 goal and bind all callback context before async send.
 
         ``revisit_id`` is reporting/scheduling metadata only.  Nav2 still receives a
@@ -2939,19 +3330,19 @@ class AutonomousMission(Node):
         if (
             self.nav_handle is not None
             or self.nav_send_pending
+            or self.action_ownership_fault
             or not self.nav_client.server_is_ready()
         ):
-            return
+            return False
+        if not navigation_pose_is_well_formed(pose):
+            self.get_logger().error("Refusing malformed map-frame Nav2 goal")
+            return False
         goal = NavigateToPose.Goal()
         goal.pose = pose
-        self.nav_send_pending, self.nav_purpose = True, purpose
-        self.nav_revisit_id = str(revisit_id) if purpose == "revisit_obstacle" else ""
-        self.nav_cancel_reason = ""
-        self.nav_target = (pose.pose.position.x, pose.pose.position.y)
-        self.nav_progress_pose = self._motion_pose()
-        self.nav_progress_time = time.monotonic()
+        obstacle_position = None
+        obstacle_id = ""
         if purpose == "approach" and guidance is not None:
-            self.nav_obstacle_position = self._obstacle_position(guidance)
+            obstacle_position = self._obstacle_position(guidance)
             # 冻结“创建接近目标时”已经通过多帧和几何校验的语义。接近碰撞膨胀边界后，
             # 局部点云常在 BAR/WALL/STEP 间变化；result 回调只能在空间和粗类型仍一致时
             # 使用该 ID，不能把它无条件套给相邻结构。
@@ -2967,22 +3358,63 @@ class AutonomousMission(Node):
             # A pending ledger record bridges a short near-field semantic dropout.  It
             # never bypasses the live spatial/type/distance/alignment gates in
             # ``_nav_result``; it only preserves which obstacle those gates refer to.
-            self.nav_obstacle_id = resolved_id
-        elif purpose != "approach":
-            self.nav_obstacle_position = None
-            self.nav_obstacle_id = ""
-        future = self.nav_client.send_goal_async(goal)
-        future.add_done_callback(self._nav_goal_response)
+            obstacle_id = resolved_id
+        # 只有 ActionClient 真正返回 Future 后才提交本地状态。server 未 ready 或同步
+        # 发送失败时，调用方据 False 保留补扫次数、恢复动作和回访冷却，不虚构已执行。
+        try:
+            future = self.nav_client.send_goal_async(goal)
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 goal request failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 goal request failed with unknown delivery state"
+            )
+            return False
+        token = self.nav_generation + 1
+        self.nav_generation = token
+        now = time.monotonic()
+        self.nav_send_pending, self.nav_purpose = True, purpose
+        self.nav_send_started = now
+        self.nav_revisit_id = str(revisit_id) if purpose == "revisit_obstacle" else ""
+        self.nav_cancel_reason = ""
+        self.nav_target = (pose.pose.position.x, pose.pose.position.y)
+        self.nav_progress_pose = self._motion_pose(now)
+        self.nav_progress_time = now
+        self.nav_obstacle_position = obstacle_position
+        self.nav_obstacle_id = obstacle_id
+        try:
+            future.add_done_callback(
+                lambda done, request_token=token: self._nav_goal_response(
+                    done, request_token
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 goal callback setup failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 goal response could not be monitored"
+            )
+            return False
+        return True
 
-    def _nav_goal_response(self, future):
+    def _nav_goal_response(self, future, generation: Optional[int] = None):
+        token = self.nav_generation if generation is None else int(generation)
+        if token != self.nav_generation:
+            try:
+                late_handle = future.result()
+            except Exception:
+                return
+            self._cancel_late_action_handle(late_handle, "Nav2")
+            return
         self.nav_send_pending = False
+        self.nav_send_started = 0.0
         try:
             handle = future.result()
             response_error = ""
         except Exception as exc:  # DDS/server loss may complete the future exceptionally.
-            handle = None
-            response_error = f": {exc}"
-            self.get_logger().error(f"Nav2 goal response failed{response_error}")
+            self.get_logger().error(f"Nav2 goal response failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 goal response failed with unknown delivery state"
+            )
+            return
         if handle is None or not handle.accepted:
             # Action server 在 Nav2 lifecycle 激活之前已经可被发现，但会拒绝目标。这不是
             # 路径规划失败，不能污染 blocked_frontiers；短暂退避后原目标可重新选择。
@@ -3004,35 +3436,52 @@ class AutonomousMission(Node):
         self.nav_progress_time = self.nav_started
         if not self.enabled:
             self._cancel_nav("stopped_before_accept")
-        handle.get_result_async().add_done_callback(self._nav_result)
+        try:
+            result_future = handle.get_result_async()
+            result_future.add_done_callback(
+                lambda done, request_token=token: self._nav_result(
+                    done, request_token
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 result setup failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 accepted a goal whose result could not be monitored"
+            )
 
-    def _nav_result(self, future):
-        # Nav2 重启、DDS 断连或 Action server 销毁时，结果 future 可以异常结束。异常仍
-        # 必须经过下面统一的句柄/目标清理和有界重试流程，不能让 executor 回调抛出并使
-        # 独立自主任务进程退出。
+    def _nav_result(self, future, generation: Optional[int] = None):
+        token = self.nav_generation if generation is None else int(generation)
+        if token != self.nav_generation:
+            return
+        # Nav2 重启、DDS 断连或 Action server 销毁时，结果 Future 可以异常结束。
+        # 此时无法证明旧控制器已经停止，必须锁住自主速度；不能清句柄后直接重试，
+        # 更不能把先前的 stall 解释成安全越障入口。
         try:
             result = future.result()
             status = int(result.status) if result is not None else 0
             result_error = ""
-            result_failed = False
         except Exception as exc:
-            result = None
-            status = GoalStatus.STATUS_UNKNOWN
-            result_error = f": {exc}"
-            result_failed = True
-            self.get_logger().error(f"Nav2 result failed{result_error}")
+            self.get_logger().error(f"Nav2 result failed: {exc}")
+            self._enter_action_ownership_fault(
+                "Nav2 result failed before motion ownership was released"
+            )
+            return
         purpose, target = self.nav_purpose, self.nav_target
+        was_cancel_pending = bool(self.nav_cancel_pending)
         revisit_id = self.nav_revisit_id
         cancel_reason = self.nav_cancel_reason
         obstacle_position = self.nav_obstacle_position
         approach_initial_id = self.nav_obstacle_id
         self.nav_handle, self.nav_target, self.nav_cancel_pending = None, None, False
+        self.nav_cancel_started = 0.0
         self.nav_purpose = ""
         self.nav_progress_pose = None
         self.nav_obstacle_position = None
         self.nav_obstacle_id = ""
         self.nav_revisit_id = ""
         self.nav_cancel_reason = ""
+        if was_cancel_pending:
+            self._release_autonomy_stop_after_cancel()
         succeeded = status == GoalStatus.STATUS_SUCCEEDED
         if purpose == "verify_obstacle":
             self.semantic_settle_until = time.monotonic() + float(
@@ -3088,17 +3537,8 @@ class AutonomousMission(Node):
             self.nav_retry_until = time.monotonic() + float(
                 self.params["nav_failure_retry_delay"]
             )
-        if result_failed and purpose == "approach":
-            # 结果传输异常时无法证明旧 Nav2 goal 已经终止。即使该目标先前因 stall
-            # 发出过取消请求，也绝不能继续走下面的“停在膨胀层后交接”分支，否则旧
-            # Nav2 controller 与 TraverseObstacle 可能同时拥有运动控制权。释放入口锁，
-            # 等 Action 客户端/服务器恢复后从新鲜地图和感知重新建立目标。
-            self._reset_obstacle_lock()
-            self.approach_stall_id = ""
-            self.approach_stall_count = 0
         if (
             self.enabled
-            and not result_failed
             and purpose == "approach"
             and obstacle_position is not None
         ):
@@ -3176,7 +3616,7 @@ class AutonomousMission(Node):
                 self.approach_stall_count = 0
 
             # 对坑沿、墙脚和台阶立面，Nav2 的正确行为本来就是停在障碍外，因而无法
-            # 达到位于障碍投影内的 approach goal。只有同一类别连续停滞两次，并且最新
+            # 达到位于障碍投影内的 approach goal。只有同一类别完成一次完整 5 秒停滞，并且最新
             # 点云仍证明目标在正前方、横偏/航向误差受限时，才允许越过空间一致性门限。
             # 这是“导航控制权交给越障控制器”，不是把障碍从代价地图中删掉。
             repeated_stall_handoff = (
@@ -3310,31 +3750,135 @@ class AutonomousMission(Node):
         )
         return now - self.nav_progress_time >= stall_timeout
 
-    def _start_traverse(self, guidance):
+    def _discard_pending_traverse(self, reason: str, now: float) -> None:
+        """Drop an unexecuted handoff and resume perception without scoring failure."""
+        self.pending_traverse = None
+        self.pending_traverse_id = ""
+        self.pending_traverse_position = None
+        self.pending_traverse_robot_start = None
+        self.pending_traverse_started = 0.0
+        self.controller_wait_reported = False
+        self._reset_obstacle_lock()
+        self.cooldown_until = float(now) + float(
+            self.params["nav_failure_retry_delay"]
+        )
+        self.state = "EXPLORING" if self.enabled else "STOPPED"
+        self._publish_state(
+            "handoff final recheck failed: " + str(reason) + "; resuming observation"
+        )
+
+    def _validated_traverse_snapshot(
+        self, now: float
+    ) -> Tuple[Optional[TraversalGuidance], str]:
+        """Atomically revalidate live geometry immediately before Action submission.
+
+        A pending handoff may wait for a Nav2 cancellation result or for a controller
+        to appear.  The message that created it is therefore only scheduling context,
+        never permission to move.  This final boundary requires a newly received
+        Guidance snapshot, the same map-space obstacle, compatible coarse geometry and
+        a fresh NavigationSafety sample before copying any fields into the Action goal.
+        """
+        live = self.guidance
+        semantic_id = str(self.pending_traverse_id)
+        pending_position = self.pending_traverse_position
+        safety = self.last_safety
+        guidance_received = float(self.guidance_received)
+        safety_received = float(self.safety_received)
+
+        if not guidance_is_well_formed(live):
+            return None, "latest guidance is invalid"
+        if float(now) - guidance_received > float(self.params["guidance_timeout"]):
+            return None, "latest guidance is stale"
+        if (
+            not bool(live.perception_valid)
+            or not bool(live.traversal_required)
+            or float(live.confidence)
+            < float(self.params["minimum_obstacle_confidence"])
+        ):
+            return None, "latest guidance no longer authorizes traversal"
+        if pending_position is None or not all(
+            isfinite(float(value)) for value in pending_position
+        ):
+            return None, "pending obstacle position is invalid"
+        robot = self._robot_pose()
+        if robot is None:
+            return None, "map pose is unavailable"
+        live_position = (
+            float(robot[0])
+            + cos(float(robot[2])) * float(live.distance)
+            - sin(float(robot[2])) * float(live.lateral_offset),
+            float(robot[1])
+            + sin(float(robot[2])) * float(live.distance)
+            + cos(float(robot[2])) * float(live.lateral_offset),
+        )
+        if (
+            not all(isfinite(value) for value in live_position)
+            or hypot(
+                live_position[0] - float(pending_position[0]),
+                live_position[1] - float(pending_position[1]),
+            ) > float(self.params["handoff_fallback_spatial_tolerance"])
+        ):
+            return None, "live guidance belongs to a different map-space obstacle"
+        if semantic_id_for_action(
+            semantic_id, action_obstacle_type(live)
+        ) != semantic_id:
+            return None, "live coarse type conflicts with the pending obstacle"
+        if self._arena_boundary_ahead(float(now)):
+            return None, "arena boundary evidence forbids traversal"
+        if (
+            safety is None
+            or float(now) - safety_received
+            > float(self.params["safety_geometry_stale_seconds"])
+            or not obstacle_geometry_fits_candidate(semantic_id, safety)
+        ):
+            return None, "fresh NavigationSafety geometry does not match"
+        # This is the widest deliberately configured handoff envelope.  Strict READY
+        # and direct handoffs enter with tighter limits; a measured five-second Nav2
+        # inflation-layer stall may use these values so the real controller can perform
+        # its final PREPARING alignment.  Nothing outside this envelope reaches Action.
+        if (
+            float(live.distance)
+            > float(self.params["approach_stall_handoff_max_distance"])
+            or abs(float(live.lateral_offset))
+            > float(self.params["approach_stall_handoff_max_lateral"])
+            or abs(float(live.heading_error))
+            > float(self.params["approach_stall_handoff_max_heading_error"])
+        ):
+            return None, "live entry pose moved outside the handoff envelope"
+        # Use the last pre-Action measurement as the crossing plane.  It is still tied
+        # to the queued target by the spatial gate above, but is more accurate than an
+        # edge measured before a potentially multi-second cancellation/controller wait.
+        self.pending_traverse_position = live_position
+        return live, ""
+
+    def _start_traverse(self, guidance) -> bool:
         if (
             self.traverse_handle is not None
             or self.traverse_send_pending
+            or self.action_ownership_fault
             or not self.traverse_client.server_is_ready()
         ):
-            return
+            return False
         # 入口接近期间分类仍可能变化。必须在构造 Action 之前做最后一次“名称 + 几何”
         # 一致性校验；没有稳定比赛 ID 时返回探索换视角，绝不发送匿名直行命令。
-        if not self.pending_traverse_id:
-            self.pending_traverse_id = self._action_semantic_id(
-                guidance,
-                self.locked_obstacle_id or self._current_obstacle_id(),
-            )
+        # Every production path sets this ID while queuing from fresh, multi-frame
+        # evidence.  Do not try to reconstruct a missing ID here from the older queued
+        # message: the final boundary must fail closed before reading stale fields.
         if not is_actionable_semantic_id(self.pending_traverse_id):
-            self.pending_traverse = None
-            self.pending_traverse_position = None
-            self.pending_traverse_robot_start = None
-            self._reset_obstacle_lock()
-            self.cooldown_until = time.monotonic() + 1.0
-            self.state = "EXPLORING" if self.enabled else "STOPPED"
-            self._publish_state(
-                "handoff rejected: obstacle identity is not stable; resuming observation"
+            self._discard_pending_traverse(
+                "obstacle identity is not stable", time.monotonic()
             )
-            return
+            return False
+        now = time.monotonic()
+        live_guidance, rejection_reason = self._validated_traverse_snapshot(now)
+        if live_guidance is None:
+            self._discard_pending_traverse(rejection_reason, now)
+            return False
+        # Copy only the snapshot that passed the final atomic gate.  The older object
+        # retained in ``pending_traverse`` may have initiated scheduling, but cannot
+        # supply distance/alignment fields after an asynchronous wait.
+        guidance = live_guidance
+        self.pending_traverse = live_guidance
         goal = TraverseObstacle.Goal()
         # 冻结 Action 开始时的真实机体位置；成功回调再取出口位置，形成长障碍去重线段。
         # 不能用障碍前缘位置代替，因为它会随点云视角漂移。
@@ -3349,14 +3893,40 @@ class AutonomousMission(Node):
         goal.obstacle_id = str(self.pending_traverse_id)
         for field in ("confidence", "distance", "lateral_offset", "heading_error"):
             setattr(goal, field, getattr(guidance, field))
-        self.state, self.traverse_started = "TRAVERSING", time.monotonic()
+        # 与 Nav2 相同，先获得 Future 再提交本地 pending 状态；同步异常可能处于
+        # “请求已送达但调用端未拿到响应”的未知所有权区间，因此直接锁住自主速度。
+        try:
+            future = self.traverse_client.send_goal_async(goal)
+        except Exception as exc:
+            self.get_logger().error(f"TraverseObstacle goal request failed: {exc}")
+            self._enter_action_ownership_fault(
+                "TraverseObstacle request failed with unknown delivery state"
+            )
+            return False
+        token = self.traverse_generation + 1
+        self.traverse_generation = token
+        self.state, self.traverse_started = "TRAVERSING", now
+        self.traverse_send_started = now
         self.traverse_send_pending = True
         self._publish_state(
             f"handoff obstacle={self.pending_traverse_id}, "
             f"action_type={goal.obstacle_type}"
         )
-        future = self.traverse_client.send_goal_async(goal)
-        future.add_done_callback(self._traverse_goal_response)
+        try:
+            future.add_done_callback(
+                lambda done, request_token=token: self._traverse_goal_response(
+                    done, request_token
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f"TraverseObstacle goal callback setup failed: {exc}"
+            )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle response could not be monitored"
+            )
+            return False
+        return True
 
     def _hold_for_traversal_controller(self, target, position, now):
         """入口已到达但执行器未接入时保持原地，不让 Nav2把赛道障碍当作绕行物。
@@ -3411,17 +3981,101 @@ class AutonomousMission(Node):
             f"{float(self.params['controller_wait_timeout']):.1f} seconds",
         )
 
-    def _traverse_goal_response(self, future):
+    def _traverse_cancel_response(
+        self,
+        future,
+        generation: Optional[int] = None,
+        cancel_generation: Optional[int] = None,
+    ) -> None:
+        """Observe traversal cancel transport while waiting for the final result."""
+        token = self.traverse_generation if generation is None else int(generation)
+        cancel_token = (
+            self.traverse_cancel_generation
+            if cancel_generation is None
+            else int(cancel_generation)
+        )
+        if (
+            token != self.traverse_generation
+            or cancel_token != self.traverse_cancel_generation
+            or not self.traverse_cancel_pending
+            or self.traverse_handle is None
+        ):
+            return
+        try:
+            future.result()
+        except Exception as exc:
+            self.get_logger().error(
+                f"TraverseObstacle cancel response failed: {exc}"
+            )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle cancel failed while motion ownership was unknown"
+            )
+
+    def _cancel_traverse(self, reason: str) -> bool:
+        """Request one traversal cancel and keep ownership until result arrives."""
+        if self.traverse_handle is None or self.traverse_cancel_pending:
+            return False
+        self._publish_immediate_stop()
+        token = self.traverse_generation
+        try:
+            future = self.traverse_handle.cancel_goal_async()
+        except Exception as exc:
+            self.get_logger().error(
+                f"TraverseObstacle cancel request failed: {exc}"
+            )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle cancel request failed with unknown ownership"
+            )
+            return False
+        self.traverse_cancel_pending = True
+        self.traverse_cancel_generation += 1
+        cancel_token = self.traverse_cancel_generation
+        self.traverse_cancel_started = time.monotonic()
+        try:
+            future.add_done_callback(
+                lambda done,
+                request_token=token,
+                request_cancel_token=cancel_token: self._traverse_cancel_response(
+                    done,
+                    request_token,
+                    request_cancel_token,
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f"TraverseObstacle cancel callback setup failed: {exc}"
+            )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle cancel response could not be monitored"
+            )
+            return False
+        self._publish_state(f"traversal cancel requested: {reason}")
+        return True
+
+    def _traverse_goal_response(
+        self, future, generation: Optional[int] = None
+    ):
+        token = self.traverse_generation if generation is None else int(generation)
+        if token != self.traverse_generation:
+            try:
+                late_handle = future.result()
+            except Exception:
+                return
+            self._cancel_late_action_handle(late_handle, "TraverseObstacle")
+            return
         self.traverse_send_pending = False
+        self.traverse_send_started = 0.0
         try:
             handle = future.result()
             response_error = ""
         except Exception as exc:  # Treat transport failure exactly like a rejected handoff.
-            handle = None
-            response_error = f": {exc}"
             self.get_logger().error(
-                f"TraverseObstacle goal response failed{response_error}"
+                f"TraverseObstacle goal response failed: {exc}"
             )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle response failed with unknown delivery state"
+            )
+            return
         if handle is None or not handle.accepted:
             semantic_id = self.pending_traverse_id
             position = self.pending_traverse_position
@@ -3438,11 +4092,23 @@ class AutonomousMission(Node):
             return
         self.traverse_handle = handle
         if not self.enabled:
-            self.traverse_cancel_pending = True
-            handle.cancel_goal_async()
-        handle.get_result_async().add_done_callback(self._traverse_result)
+            self._cancel_traverse("stopped_before_accept")
+        try:
+            result_future = handle.get_result_async()
+            result_future.add_done_callback(
+                lambda done, request_token=token: self._traverse_result(
+                    done, request_token
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f"TraverseObstacle result setup failed: {exc}"
+            )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle accepted a goal whose result could not be monitored"
+            )
 
-    def _traverse_result(self, future):
+    def _traverse_result(self, future, generation: Optional[int] = None):
         """Accept controller success only as a request for task-level verification.
 
         ROS Action status, controller result, map displacement, crossing direction and
@@ -3450,15 +4116,20 @@ class AutonomousMission(Node):
         only after all available upper-layer checks pass; the real controller remains
         responsible for feet/contact, body attitude and actuator-fault verification.
         """
-        # DDS/服务器异常会让 result future 抛出异常，而不是返回一个失败 Result。任务节点
-        # 不能因此崩溃，也绝不能沿用上一次成功；统一降级为未证实并把本障碍留在待办。
+        token = self.traverse_generation if generation is None else int(generation)
+        if token != self.traverse_generation:
+            return
+        # DDS/服务器异常会让 result Future 抛出，而不是返回失败 Result。此时远端可能
+        # 仍在运动，任务锁住自主速度并保持清单未完成，绝不沿用上一次 success。
         try:
             wrapped = future.result()
             result_exception = ""
         except Exception as exc:  # rclpy future exposes several middleware errors.
-            wrapped = None
-            result_exception = f"Action result exception: {exc}"
-            self.get_logger().error(result_exception)
+            self.get_logger().error(f"Action result exception: {exc}")
+            self._enter_action_ownership_fault(
+                "TraverseObstacle result failed before ownership was released"
+            )
+            return
         action_succeeded = bool(
             wrapped
             and int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED
@@ -3470,6 +4141,7 @@ class AutonomousMission(Node):
             else result_exception
         )
         completed_position = self.pending_traverse_position
+        was_cancel_pending = bool(self.traverse_cancel_pending)
         completed_robot_start = self.pending_traverse_robot_start
         completed_type = (
             int(self.pending_traverse.obstacle_type)
@@ -3479,9 +4151,12 @@ class AutonomousMission(Node):
         completed_id = self.pending_traverse_id
         self.traverse_handle, self.pending_traverse = None, None
         self.traverse_cancel_pending = False
+        self.traverse_cancel_started = 0.0
         self.pending_traverse_position = None
         self.pending_traverse_robot_start = None
         self.pending_traverse_id = ""
+        if was_cancel_pending:
+            self._release_autonomy_stop_after_cancel()
         # 无论 Action 成功、失败还是被取消，下一障碍都必须重新累计入口停滞，不能继承
         # 当前障碍获得的交接许可。
         self.approach_stall_id = ""
@@ -3677,9 +4352,13 @@ class AutonomousMission(Node):
             and (self.nav_handle is not None or self.nav_send_pending)
         )))
         self._publish_inventory()
+        now = time.monotonic()
+        # Action response/cancel Futures must be monitored even if map/TF input drops;
+        # otherwise an unrelated sensor outage could hide an unknown motion owner.
+        if self._check_action_watchdogs(now):
+            return
         if not self.enabled:
             return
-        now = time.monotonic()
         if (
             self.nav_handle is not None
             and now - self.nav_started > float(self.params["goal_timeout"])
@@ -3692,9 +4371,7 @@ class AutonomousMission(Node):
             and not self.traverse_cancel_pending
             and now - self.traverse_started > float(self.params["traversal_timeout"])
         ):
-            self.traverse_cancel_pending = True
-            self.traverse_handle.cancel_goal_async()
-            self._publish_state("traversal timeout; cancelling")
+            self._cancel_traverse("traversal timeout")
             return
         if self.map_msg is None or now - self.map_received > float(self.params["map_timeout"]):
             self.state = "WAITING_FOR_INPUTS"
@@ -3768,6 +4445,7 @@ class AutonomousMission(Node):
             guidance = self.guidance
             guidance_is_blocking = (
                 guidance is not None
+                and guidance_is_well_formed(guidance)
                 and now - self.guidance_received
                 <= float(self.params["guidance_timeout"])
                 and bool(guidance.perception_valid)
@@ -3848,8 +4526,6 @@ class AutonomousMission(Node):
             if self.nav_handle is not None or self.nav_send_pending:
                 return
             escape_distance = float(self.failed_entry_escape_pending)
-            self.failed_entry_escape_pending = 0.0
-            self.state = "RECOVERY"
             # Prefer the global costmap because it contains both laser and filtered
             # terrain points. Fall back to the current SLAM map only if costmap data
             # has not arrived; both use the same standard OccupancyGrid contract.
@@ -3865,19 +4541,25 @@ class AutonomousMission(Node):
                 clearance=float(self.params["coverage_goal_clearance"]),
             ) if recovery_grid is not None else None
             if station is None:
+                # 地图/代价地图明确证明无安全换站点时才消费本次平移；Action server
+                # 暂未 ready 则必须保留，避免把“没有发送”伪装成“已经脱离”。
+                self.failed_entry_escape_pending = 0.0
                 self.nav_retry_until = now + float(self.params["nav_failure_retry_delay"])
                 self._publish_state(
                     "no costmap-clear recovery station; skipping blind translation"
                 )
                 return
-            self._send_nav_goal(
+            sent = self._send_nav_goal(
                 self._make_pose(*station),
                 "entry_escape",
             )
-            self._publish_state(
-                "moving to a costmap-clear observation station "
-                f"({hypot(station[0] - robot[0], station[1] - robot[1]):.2f} m)"
-            )
+            if sent:
+                self.failed_entry_escape_pending = 0.0
+                self.state = "RECOVERY"
+                self._publish_state(
+                    "moving to a costmap-clear observation station "
+                    f"({hypot(station[0] - robot[0], station[1] - robot[1]):.2f} m)"
+                )
             return
         if abs(self.failed_entry_turn_pending) > 0.0:
             # Perform exactly one bounded viewpoint change after a rejected Action.
@@ -3886,16 +4568,17 @@ class AutonomousMission(Node):
             if self.nav_handle is not None or self.nav_send_pending:
                 return
             recovery_delta = float(self.failed_entry_turn_pending)
-            self.failed_entry_turn_pending = 0.0
-            self.state = "RECOVERY"
-            self._send_nav_goal(
+            sent = self._send_nav_goal(
                 self._make_pose(robot[0], robot[1], robot[2] + recovery_delta),
                 "entry_recovery",
             )
-            self._publish_state(
-                "unsafe or ambiguous entry: changing viewpoint by "
-                f"{degrees(recovery_delta):.0f} deg before selecting another target"
-            )
+            if sent:
+                self.failed_entry_turn_pending = 0.0
+                self.state = "RECOVERY"
+                self._publish_state(
+                    "unsafe or ambiguous entry: changing viewpoint by "
+                    f"{degrees(recovery_delta):.0f} deg before selecting another target"
+                )
             return
         if self.pending_traverse is not None:
             if (
@@ -3993,7 +4676,7 @@ class AutonomousMission(Node):
                 self._reset_obstacle_lock()
             if target.phase == TraversalGuidance.PHASE_READY and target.ready_for_handoff:
                 # 纯旋转目标必须真正执行完成并等待新点云。旧逻辑在下一帧 READY 到达时
-                # 立即取消刚提交的 verify/pre-align goal，结果每次只转动约 0.25 s，四次
+                # 立即取消刚提交的 verify/pre-align goal，结果每次只转动约 0.25 s，两次
                 # 尝试全部耗尽后仍保持原视角。对正过程中不得提前进入 Action 交接。
                 if (
                     self.nav_handle is not None
@@ -4257,8 +4940,6 @@ class AutonomousMission(Node):
             now,
         )
         if frontier is None and pending_record is not None:
-            self.search_turn_index = 0
-            self.exploration_exhausted = False
             distance_to_view = hypot(
                 pending_record.view_x - robot[0],
                 pending_record.view_y - robot[1],
@@ -4274,17 +4955,20 @@ class AutonomousMission(Node):
                 pending_record.obstacle_y - goal_y,
                 pending_record.obstacle_x - goal_x,
             )
-            self._defer_obstacle_revisit(pending_record.semantic_id, now)
-            self.state = "SEEKING_PENDING_OBSTACLE"
-            self._send_nav_goal(
+            sent = self._send_nav_goal(
                 self._make_pose(goal_x, goal_y, goal_yaw),
                 "revisit_obstacle",
                 revisit_id=pending_record.semantic_id,
             )
-            self._publish_state(
-                f"actively revisiting pending obstacle={pending_record.semantic_id}; "
-                f"view_distance={distance_to_view:.2f} m"
-            )
+            if sent:
+                self._defer_obstacle_revisit(pending_record.semantic_id, now)
+                self.search_turn_index = 0
+                self.exploration_exhausted = False
+                self.state = "SEEKING_PENDING_OBSTACLE"
+                self._publish_state(
+                    f"actively revisiting pending obstacle={pending_record.semantic_id}; "
+                    f"view_distance={distance_to_view:.2f} m"
+                )
             return
         if frontier is None:
             # 激光的长视距可能早于相机/深度 ROI 把整场变成 known；没有 frontier 时不能
@@ -4304,21 +4988,21 @@ class AutonomousMission(Node):
                 float(self.params["frontier_exclusion_radius"]),
             )
             if coverage is not None:
-                self.empty_frontier_count = 0
-                self.search_turn_index = 0
-                self.exploration_exhausted = False
                 yaw = atan2(coverage.y - robot[1], coverage.x - robot[0])
-                self.state = "COVERAGE_EXPLORING"
-                self._send_nav_goal(
+                sent = self._send_nav_goal(
                     self._make_pose(coverage.x, coverage.y, yaw), "coverage"
                 )
-                self._publish_state(
-                    f"coverage survey: distance={coverage.distance:.2f} m"
-                )
+                if sent:
+                    self.empty_frontier_count = 0
+                    self.search_turn_index = 0
+                    self.exploration_exhausted = False
+                    self.state = "COVERAGE_EXPLORING"
+                    self._publish_state(
+                        f"coverage survey: distance={coverage.distance:.2f} m"
+                    )
                 return
             self.empty_frontier_count += 1
             if self.empty_frontier_count >= int(self.params["empty_frontier_confirmations"]):
-                self.empty_frontier_count = 0
                 if self.search_turn_index >= int(
                     self.params["maximum_search_turns"]
                 ):
@@ -4328,33 +5012,41 @@ class AutonomousMission(Node):
                         "bounded missing-obstacle scan exhausted; returning with current ledger"
                     )
                     return
-                self.search_turn_index += 1
+                next_search_turn = self.search_turn_index + 1
                 # 分段旋转而不是一次 360°：每个 90° 目标都由 Nav2/碰撞监控接管，并在
                 # 转动过程中持续更新 SLAM 和障碍识别。转满一圈后清除临时失败前沿，允许
                 # 代价地图恢复后再次尝试，解决“走到一半自己停下”。
-                if self.search_turn_index % 4 == 0:
-                    self.blocked_frontiers.clear()
                 yaw = robot[2] + float(self.params["search_turn_angle"])
-                self.state = "SEARCHING_MISSING_OBSTACLES"
-                self._send_nav_goal(
+                sent = self._send_nav_goal(
                     self._make_pose(robot[0], robot[1], yaw),
                     "search_turn",
                 )
-                missing = set(self.params["expected_obstacle_ids"]) - set(
-                    self.completed_semantics
-                )
-                self._publish_state(
-                    "no frontier: scanning for missing tasks "
-                    + ",".join(sorted(missing))
-                )
+                if sent:
+                    self.empty_frontier_count = 0
+                    self.search_turn_index = next_search_turn
+                    if self.search_turn_index % 4 == 0:
+                        self.blocked_frontiers.clear()
+                    self.state = "SEARCHING_MISSING_OBSTACLES"
+                    missing = set(self.params["expected_obstacle_ids"]) - set(
+                        self.completed_semantics
+                    )
+                    self._publish_state(
+                        "no frontier: scanning for missing tasks "
+                        + ",".join(sorted(missing))
+                    )
             return
-        self.empty_frontier_count = 0
-        self.search_turn_index = 0
-        self.exploration_exhausted = False
         yaw = atan2(frontier.y - robot[1], frontier.x - robot[0])
-        self.state = "EXPLORING"
-        self._send_nav_goal(self._make_pose(frontier.x, frontier.y, yaw), "frontier")
-        self._publish_state(f"frontier cells={frontier.cells}, distance={frontier.distance:.2f} m")
+        sent = self._send_nav_goal(
+            self._make_pose(frontier.x, frontier.y, yaw), "frontier"
+        )
+        if sent:
+            self.empty_frontier_count = 0
+            self.search_turn_index = 0
+            self.exploration_exhausted = False
+            self.state = "EXPLORING"
+            self._publish_state(
+                f"frontier cells={frontier.cells}, distance={frontier.distance:.2f} m"
+            )
 
 
 def main(args=None):
@@ -4381,16 +5073,43 @@ def main(args=None):
         if rclpy.ok():
             # 必须先锁速度再取消 Action。取消是跨进程异步 RPC，而停车布尔量可在一个
             # 速度门周期内生效，避免 Ctrl-C 后继续滑行到 cancel result 返回。
+            # 先撤销 enabled，确保尚无 handle 的 pending send 若随后被接受，response
+            # 回调也会立即走 stopped_before_accept 取消路径，而不是留下后台 Nav2 目标。
+            node.enabled = False
             node._publish_immediate_stop()
             node._cancel_nav("shutdown")
-            if node.traverse_handle is not None and not node.traverse_cancel_pending:
-                node.traverse_cancel_pending = True
-                node.traverse_handle.cancel_goal_async()
-            # 给 Action cancel 请求一个短暂 DDS 发送窗口；不等待远端控制器无限响应。
-            deadline = time.monotonic() + 0.75
+            node._cancel_traverse("shutdown")
+            # 正常退出尽量等到 result 释放控制权，而不是固定只 spin 0.75 s。窗口覆盖
+            # “pending response 后再 cancel”的两个连续预算并封顶 5 s；若仍不确定，最后
+            # 一条自主 Twist 锁保持为 transient-local。Nav2 故障可处理 Nav2/核心栈；
+            # Traverse 故障必须处理外部控制器；归属不明时两者都处理并使用硬件急停。
+            shutdown_wait = bounded_shutdown_wait(
+                node.params["action_response_timeout"],
+                node.params["action_cancel_timeout"],
+            )
+            deadline = time.monotonic() + shutdown_wait
+            ownership_released = False
             while rclpy.ok() and time.monotonic() < deadline:
                 node._publish_immediate_stop()
+                ownership_released = bool(
+                    node.nav_handle is None
+                    and not node.nav_send_pending
+                    and not node.nav_cancel_pending
+                    and node.traverse_handle is None
+                    and not node.traverse_send_pending
+                    and not node.traverse_cancel_pending
+                    and not node.action_ownership_fault
+                )
+                if ownership_released:
+                    break
                 rclpy.spin_once(node, timeout_sec=0.05)
+            if not ownership_released:
+                node.get_logger().error(
+                    "Action ownership was not released before shutdown; autonomy Twist "
+                    "remains locked. Stop/restart the owning Nav2 or traversal server "
+                    "(use hardware emergency stop for unconfirmed joint motion) before "
+                    "starting autonomy again"
+                )
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

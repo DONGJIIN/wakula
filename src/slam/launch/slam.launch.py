@@ -226,7 +226,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "speed_gate",
                 default_value="true",
-                description="是否由 Wakula 速度门发布最终 /cmd_vel；嵌入现有仲裁器时关闭",
+                description=(
+                    "是否由 Wakula 速度门发布最终 /cmd_vel；关闭后目标仲裁器必须接入 "
+                    "/cmd_vel_smoothed 及安全/停车心跳"
+                ),
             ),
             DeclareLaunchArgument(
                 "robot_model",

@@ -15,6 +15,8 @@ from slam.navigation_health_monitor import (
     scan_contract_is_valid,
     scan_is_valid,
     source_stamp_is_current,
+    transform_stamp_age_seconds,
+    transform_stamp_is_current,
 )
 from slam.parameter_validation import (
     validate_nav2_readiness_parameters,
@@ -122,6 +124,33 @@ def test_sensor_header_age_rejects_replayed_and_future_data():
     assert not source_stamp_is_current(0, 0, 100.0, 1.0, 0.1)
     assert not source_stamp_is_current(98, 0, 100.0, 1.0, 0.1)
     assert not source_stamp_is_current(100, 200_000_000, 100.0, 1.0, 0.1)
+
+
+@pytest.mark.parametrize(
+    ("seconds", "nanoseconds", "now", "expected_age", "expected_current"),
+    (
+        (99, 500_000_000, 100.0, 0.5, True),
+        (98, 900_000_000, 100.0, 1.1, False),
+        (100, 200_000_000, 100.0, -0.2, False),
+        (0, 0, 100.0, None, False),
+    ),
+)
+def test_dynamic_localization_tf_requires_fresh_nonzero_source_stamp(
+    seconds, nanoseconds, now, expected_age, expected_current
+):
+    """缓存中“存在”的冻结/未来/零时间 TF 不能激活或保持 Nav2 健康。"""
+    age = transform_stamp_age_seconds(seconds, nanoseconds, now)
+    if expected_age is None:
+        assert age is None
+    else:
+        assert age == pytest.approx(expected_age)
+    assert transform_stamp_is_current(
+        seconds,
+        nanoseconds,
+        now,
+        maximum_age=1.0,
+        future_tolerance=0.1,
+    ) is expected_current
 
 
 def test_fault_matrix_covers_dropout_tf_loss_drift_and_recovery():

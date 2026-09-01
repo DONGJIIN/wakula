@@ -22,10 +22,9 @@ def _clock_is_available() -> bool:
 
     ``ros2 topic list --no-daemon`` needs roughly two seconds for DDS graph
     discovery on this workstation.  The former 1.2 s subprocess timeout
-    therefore killed a healthy query and silently selected the hardware path,
-    so the simulation TraverseObstacle server was never started.  Query the
-    already-running ROS daemon first (normally <0.5 s), then use one bounded
-    daemon-free fallback for clean machines.
+    therefore killed a healthy query and silently selected system time while
+    Gazebo messages used ``/clock``.  Query the already-running ROS daemon first
+    (normally <0.5 s), then use one bounded daemon-free fallback for clean machines.
     """
     commands = (
         ["ros2", "topic", "list"],

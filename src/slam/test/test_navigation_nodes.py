@@ -8,6 +8,7 @@ transient-local health publication, and watchdog expiry are tested without Gazeb
 import math
 import time
 
+from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import pytest
@@ -18,7 +19,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
-from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from tf2_ros import TransformBroadcaster
 
 from slam.nav2_readiness_monitor import Nav2ReadinessMonitor
 from slam.navigation_health_monitor import NavigationHealthMonitor
@@ -109,7 +110,7 @@ def test_navigation_nodes_reject_invalid_overrides(
 
 
 def test_navigation_health_transitions_true_then_false_on_real_dds(ros_context):
-    """Require valid scan+odom+TF, then fail closed when only the sensor streams expire."""
+    """动态 TF 冻结时，即使 scan/odom 继续更新也必须关闭健康门。"""
     monitor = NavigationHealthMonitor(
         parameter_overrides=[
             Parameter("global_frame", value="odom"),
@@ -120,14 +121,14 @@ def test_navigation_health_transitions_true_then_false_on_real_dds(ros_context):
     scan_publisher = driver.create_publisher(LaserScan, "/scan", qos_profile_sensor_data)
     odom_publisher = driver.create_publisher(Odometry, "/odom", qos_profile_sensor_data)
     health_messages = []
+    diagnostics = []
     driver.create_subscription(Bool, "/navigation/healthy", health_messages.append, 10)
-    broadcaster = StaticTransformBroadcaster(driver)
+    driver.create_subscription(DiagnosticArray, "/diagnostics", diagnostics.append, 10)
+    broadcaster = TransformBroadcaster(driver)
     transform = TransformStamped()
-    transform.header.stamp = driver.get_clock().now().to_msg()
     transform.header.frame_id = "odom"
     transform.child_frame_id = "base_link"
     transform.transform.rotation.w = 1.0
-    broadcaster.sendTransform(transform)
 
     executor = SingleThreadedExecutor()
     executor.add_node(monitor)
@@ -144,17 +145,34 @@ def test_navigation_health_transitions_true_then_false_on_real_dds(ros_context):
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline and not any(msg.data for msg in health_messages):
             stamp = driver.get_clock().now().to_msg()
+            transform.header.stamp = stamp
+            broadcaster.sendTransform(transform)
             scan_publisher.publish(_valid_scan(stamp))
             odom_publisher.publish(_valid_odom(stamp))
             executor.spin_once(timeout_sec=0.04)
         assert any(message.data for message in health_messages)
-
-        health_messages.clear()
         assert _spin_until(
             executor,
-            lambda: any(not message.data for message in health_messages),
-            0.7,
+            lambda: any(
+                value.key == "tf_age_seconds"
+                for array in diagnostics
+                for status in array.status
+                for value in status.values
+            ),
+            0.5,
         )
+
+        # 只冻结 TF；持续发送带新源时间的 scan/odom，证明 false 的原因不是传感器断流。
+        health_messages.clear()
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline and not any(
+            not message.data for message in health_messages
+        ):
+            stamp = driver.get_clock().now().to_msg()
+            scan_publisher.publish(_valid_scan(stamp))
+            odom_publisher.publish(_valid_odom(stamp))
+            executor.spin_once(timeout_sec=0.04)
+        assert any(not message.data for message in health_messages)
         assert not health_messages[-1].data
     finally:
         executor.remove_node(driver)

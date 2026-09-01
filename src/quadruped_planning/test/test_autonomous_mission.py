@@ -1,7 +1,9 @@
 """前沿探索和自动任务安全边界的确定性测试。"""
 
 from math import hypot
+from types import SimpleNamespace
 
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
 
 from quadruped_planning.autonomous_mission import (
@@ -11,6 +13,7 @@ from quadruped_planning.autonomous_mission import (
     ObservedObstacle,
     action_type_for_semantic,
     action_obstacle_type,
+    bounded_shutdown_wait,
     bounded_alignment_delta,
     canonical_obstacle_id,
     choose_frontier,
@@ -24,12 +27,14 @@ from quadruped_planning.autonomous_mission import (
     extract_frontiers,
     failed_entry_matches,
     frontier_goal_in_known_free_space,
+    guidance_is_well_formed,
     inventory_display,
     is_actionable_semantic_id,
     map_edge_allows_obstacle_handoff,
     mission_score,
     mission_inventory,
     navigation_purpose_allows_yaw_only_recovery,
+    navigation_pose_is_well_formed,
     matching_pending_semantic,
     matching_pending_semantic_from_viewpoint,
     nav_status_allows_guarded_handoff,
@@ -37,6 +42,7 @@ from quadruped_planning.autonomous_mission import (
     obstacle_revisit_delay,
     obstacle_geometry_fits_candidate,
     obstacle_was_completed,
+    planar_pose_from_transform,
     resolve_completed_semantics,
     inventory_message,
     semantic_id_for_action,
@@ -107,6 +113,65 @@ def test_terminal_arrival_uses_position_even_if_yaw_differs():
     assert not terminal_pose_reached(None, (1.0, 0.0, 0.0), 0.25)
     assert not terminal_pose_reached((1.0, 0.0, 0.0), None, 0.25)
     assert not terminal_pose_reached((float("nan"), 0.0, 0.0), (1.0, 0.0, 0.0), 0.25)
+
+
+def test_guidance_numeric_contract_fails_closed_as_one_snapshot():
+    """任一字段损坏都不能产生 map 障碍位置或 Nav2/Action 入口。"""
+    guidance = TraversalGuidance()
+    guidance.phase = TraversalGuidance.PHASE_APPROACH
+    guidance.obstacle_type = TraversalGuidance.OBSTACLE_STEP
+    guidance.perception_valid = True
+    guidance.traversal_required = True
+    guidance.confidence = 0.8
+    guidance.distance = 1.0
+    guidance.lateral_offset = 0.1
+    guidance.heading_error = 0.2
+    guidance.approach_x = 0.5
+    guidance.approach_y = 0.0
+    guidance.approach_yaw = 0.2
+    guidance.speed_limit = 0.3
+    assert guidance_is_well_formed(guidance)
+
+    for field, invalid in (
+        ("confidence", float("nan")),
+        ("distance", float("inf")),
+        ("lateral_offset", float("nan")),
+        ("heading_error", 3.2),
+        ("approach_x", float("-inf")),
+        ("approach_y", float("nan")),
+        ("approach_yaw", -3.2),
+        ("speed_limit", 1.01),
+    ):
+        original = getattr(guidance, field)
+        setattr(guidance, field, invalid)
+        assert not guidance_is_well_formed(guidance), field
+        setattr(guidance, field, original)
+    guidance.distance = -0.01
+    assert not guidance_is_well_formed(guidance)
+
+
+def test_tf_and_navigation_goals_reject_nonfinite_or_zero_quaternion():
+    """TF/goal 存在并不代表数值有效；坏值必须在栅格转换与 Action 之前被拒绝。"""
+
+    def transform(x=1.0, q_w=1.0):
+        return SimpleNamespace(transform=SimpleNamespace(
+            translation=SimpleNamespace(x=x, y=2.0, z=0.0),
+            rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=q_w),
+        ))
+
+    assert planar_pose_from_transform(transform()) == (1.0, 2.0, 0.0)
+    assert planar_pose_from_transform(transform(float("nan"))) is None
+    assert planar_pose_from_transform(transform(q_w=0.0)) is None
+
+    pose = PoseStamped()
+    pose.header.frame_id = "map"
+    pose.pose.orientation.w = 1.0
+    assert navigation_pose_is_well_formed(pose)
+    pose.pose.position.x = float("nan")
+    assert not navigation_pose_is_well_formed(pose)
+    pose.pose.position.x = 0.0
+    pose.pose.orientation.w = 0.0
+    assert not navigation_pose_is_well_formed(pose)
 
 
 def test_frontier_navigation_goal_retreats_into_known_free_space():
@@ -592,95 +657,28 @@ def test_final_geometry_gate_fails_closed_without_fresh_valid_safety():
     )
 
 
-def test_nav_result_exception_is_cleaned_up_and_retried_without_escaping_callback():
-    """Nav2/DDS 异常结果应等价于有界失败，不能杀死独立任务进程。"""
+def test_nav_result_exception_locks_motion_and_never_hands_off():
+    """结果异常无法证明旧控制器停止，必须锁速且禁止越障交接。"""
 
     class FailingFuture:
         def result(self):
             raise RuntimeError("Nav2 server restarted")
 
-    class Logger:
-        def __init__(self):
-            self.errors = []
-
-        def error(self, message):
-            self.errors.append(message)
-
     mission = object.__new__(AutonomousMission)
-    mission.params = {"nav_failure_retry_delay": 0.5}
-    mission.nav_purpose = "frontier"
-    mission.nav_target = Frontier(1.0, 2.0, 4, 2.2, 1.0)
-    mission.nav_revisit_id = ""
-    mission.nav_cancel_reason = ""
-    mission.nav_obstacle_position = None
-    mission.nav_obstacle_id = ""
-    mission.nav_handle = object()
-    mission.nav_cancel_pending = True
-    mission.nav_progress_pose = (0.0, 0.0, 0.0)
-    mission.blocked_frontiers = []
-    mission.enabled = True
-    mission.state = "NAVIGATING"
-    logger = Logger()
-    states = []
-    mission.get_logger = lambda: logger
-    mission._publish_state = states.append
+    mission.nav_generation = 7
+    errors = []
+    faults = []
+    mission.get_logger = lambda: type(
+        "Logger", (), {"error": lambda _self, message: errors.append(message)}
+    )()
+    mission._enter_action_ownership_fault = faults.append
 
     mission._nav_result(FailingFuture())
 
-    assert mission.nav_handle is None
-    assert mission.nav_target is None
-    assert mission.nav_purpose == ""
-    assert not mission.nav_cancel_pending
-    assert mission.nav_progress_pose is None
-    assert mission.state == "EXPLORING"
-    assert len(mission.blocked_frontiers) == 1
-    assert mission.nav_retry_until > 0.0
-    assert logger.errors == ["Nav2 result failed: Nav2 server restarted"]
-    assert states[-1].startswith("Nav2 frontier finished with status=0")
-
-    # 即使异常发生前已因 stall 请求取消 approach，也不能把 UNKNOWN 结果解释成“Nav2
-    # 已安全停在膨胀边界”，从而与仍可能运行的旧目标并发进入 TraverseObstacle。
-    approach = object.__new__(AutonomousMission)
-    approach.params = {"nav_failure_retry_delay": 0.5}
-    approach.nav_purpose = "approach"
-    approach.nav_target = Frontier(1.0, 0.0, 4, 1.0, 1.0)
-    approach.nav_revisit_id = ""
-    approach.nav_cancel_reason = "stall"
-    approach.nav_obstacle_position = (1.0, 0.0)
-    approach.nav_obstacle_id = "t_shaped_stairs"
-    approach.nav_handle = object()
-    approach.nav_cancel_pending = True
-    approach.nav_progress_pose = (0.0, 0.0, 0.0)
-    approach.blocked_frontiers = []
-    approach.enabled = True
-    approach.state = "NAVIGATING"
-    approach.locked_obstacle_position = (1.0, 0.0)
-    approach.locked_obstacle_id = "t_shaped_stairs"
-    approach.semantic_votes = ["t_shaped_stairs"]
-    approach.semantic_vote_position = (1.0, 0.0)
-    approach.semantic_verification_position = (0.0, 0.0)
-    approach.semantic_verification_obstacle_positions = [(1.0, 0.0)]
-    approach.semantic_verification_attempts = 1
-    approach.semantic_settle_until = 1.0
-    approach.approach_stall_id = "t_shaped_stairs"
-    approach.approach_stall_count = 1
-    approach.get_logger = lambda: logger
-    approach._publish_state = states.append
-    handoffs = []
-    approach._queue_traversal_handoff = lambda *args: handoffs.append(args)
-
-    approach._nav_result(FailingFuture())
-
-    assert handoffs == []
-    assert approach.nav_handle is None
-    assert approach.nav_target is None
-    assert approach.nav_purpose == ""
-    assert approach.locked_obstacle_position is None
-    assert approach.locked_obstacle_id == ""
-    assert approach.semantic_votes == []
-    assert approach.approach_stall_id == ""
-    assert approach.approach_stall_count == 0
-    assert approach.state == "EXPLORING"
+    assert errors == ["Nav2 result failed: Nav2 server restarted"]
+    assert faults == [
+        "Nav2 result failed before motion ownership was released"
+    ]
 
 
 def test_competition_score_counts_unique_tasks_and_return_bonus():
@@ -713,6 +711,13 @@ def test_five_second_watchdog_uses_monotonic_deadline():
     assert timeout_reached(10.0, 15.0, 5.0)
     assert not timeout_reached(0.0, 100.0, 5.0)
     assert not timeout_reached(10.0, 15.0, 0.0)
+
+
+def test_shutdown_wait_tracks_action_contract_with_a_hard_safety_cap():
+    assert bounded_shutdown_wait(2.0, 3.0) == 5.0
+    assert bounded_shutdown_wait(0.1, 0.2) == 0.75
+    assert bounded_shutdown_wait(20.0, 2.0) == 5.0
+    assert bounded_shutdown_wait(float("nan"), 2.0) == 0.75
 
 
 def test_stall_preserves_confirmed_identity_only_for_same_compatible_entry():
@@ -757,6 +762,8 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["nav_progress_translation"] == 0.04
     assert params["nav_progress_rotation"] == 0.06
     assert params["controller_wait_timeout"] == 5.0
+    assert params["action_response_timeout"] == 2.0
+    assert params["action_cancel_timeout"] == 2.0
     assert params["safety_geometry_stale_seconds"] == 0.35
     assert params["approach_stall_handoff_count"] == 1
     assert params["approach_stall_handoff_max_distance"] == 2.35
@@ -941,7 +948,7 @@ def test_failed_obstacle_revisit_uses_bounded_exponential_backoff():
 
 def test_ambiguous_view_counter_tracks_robot_station_not_moving_front_edge():
     # A pure camera turn may move the reported bridge/pit edge by metres, while the
-    # base itself stays at one station and must consume the same bounded 1/4 sequence.
+    # base itself stays at one station and must consume the same bounded 1/2 sequence.
     anchor = (1.0, 2.0)
     assert verification_station_matches(anchor, (1.02, 1.98), 1.50)
     assert not verification_station_matches(anchor, (2.6, 2.0), 1.50)
@@ -1092,7 +1099,7 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert '"SEEKING_PENDING_OBSTACLE"' in source
     assert "SEARCHING_MISSING_OBSTACLES" in source
     assert "_nav_is_stalled" in source
-    cancel_body = source.split('def _cancel_nav(self, reason="replace"):', 1)[1].split(
+    cancel_body = source.split('def _cancel_nav(self, reason="replace") -> bool:', 1)[1].split(
         "def _send_nav_goal", 1
     )[0]
     assert "self.nav_cancel_reason" in cancel_body
@@ -1101,7 +1108,8 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     assert "semantic_votes" in source
     # 三条交接路径（Nav2 结果、READY 周期、Action 发送前）都必须拒绝空语义；
     # 仿真替身绝不能收到会让机器人盲目前冲的匿名障碍。
-    assert "handoff rejected: obstacle identity is not stable" in source
+    assert "handoff final recheck failed:" in source
+    assert "obstacle identity is not stable" in source
     assert "_verify_ambiguous_obstacle" in source
     assert '"VERIFYING_OBSTACLE"' in source
     assert "semantic_verification_max_attempts" in source
@@ -1120,6 +1128,9 @@ def test_mission_has_runtime_stop_and_no_world_coordinate_dependency():
     start_traverse = source.split("def _start_traverse", 1)[1].split(
         "def _hold_for_traversal_controller", 1
     )[0]
-    assert start_traverse.index("if not self.pending_traverse_id:") < start_traverse.index(
+    assert start_traverse.index(
+        "if not is_actionable_semantic_id(self.pending_traverse_id):"
+    ) < start_traverse.index("goal = TraverseObstacle.Goal()")
+    assert start_traverse.index("_validated_traverse_snapshot") < start_traverse.index(
         "goal = TraverseObstacle.Goal()"
     )

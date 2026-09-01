@@ -13,13 +13,14 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from slam.navigation_health_monitor import (
     odometry_is_valid,
     scan_contract_is_valid,
     scan_is_valid,
     source_stamp_is_current,
+    transform_stamp_is_current,
 )
 from slam.parameter_validation import (
     READINESS_PARAMETER_NAMES,
@@ -217,12 +218,23 @@ class Nav2ReadinessMonitor(Node):
         # 不只检查“曾经收到”，还检查传感器正在持续更新。
         scan_ready = self.scan_valid and self._sensor_is_fresh(self.last_scan_time)
         odom_ready = self.odom_valid and self._sensor_is_fresh(self.last_odom_time)
-        tf_ready = self.tf_buffer.can_transform(
-            self.global_frame,
-            self.base_frame,
-            Time(),
-            timeout=Duration(seconds=0.05),
-        )
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.global_frame,
+                self.base_frame,
+                Time(),
+                timeout=Duration(seconds=0.05),
+            )
+            now_seconds = self.get_clock().now().nanoseconds * 1e-9
+            tf_ready = transform_stamp_is_current(
+                transform.header.stamp.sec,
+                transform.header.stamp.nanosec,
+                now_seconds,
+                self.sensor_timeout,
+                self.future_stamp_tolerance,
+            )
+        except TransformException:
+            tf_ready = False
         # Only inspect SLAM after both physical inputs are healthy.  If an external
         # localization stack is used and no slam_toolbox service exists this branch
         # is a harmless no-op; the normal TF readiness contract remains unchanged.

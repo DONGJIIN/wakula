@@ -68,7 +68,7 @@ def test_visual_bar_or_pole_only_refines_compatible_positive_geometry():
     ordinary_step = terrain()
     result = fuse_observations(ordinary_step, camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.STEP
-    assert result.confidence < ordinary_step.confidence
+    assert result.confidence == ordinary_step.confidence
     assert not result.vision_confirmed
 
     pole_camera = vision(VisionObstacle.POLES, 0.9)
@@ -82,7 +82,7 @@ def test_visual_bar_or_pole_only_refines_compatible_positive_geometry():
     wide_step.width = 0.26
     result = fuse_observations(wide_step, pole_camera, 0.02, 0.55)
     assert result.obstacle_type == FusedObstacle.STEP
-    assert result.confidence < wide_step.confidence
+    assert result.confidence == wide_step.confidence
     assert not result.vision_confirmed
 
     invalid = TerrainFeatures(valid=False, obstacle_type=TerrainFeatures.UNKNOWN)
@@ -100,6 +100,18 @@ def test_visual_target_without_compatible_geometry_is_not_confirmed():
     assert result.obstacle_type == FusedObstacle.CLEAR
     assert result.geometry_confirmed
     assert not result.vision_confirmed
+    assert result.confidence == cloud.confidence
+
+
+def test_visual_conflict_cannot_invalidate_low_confidence_metric_geometry():
+    """辅助视觉杂物不得把已达下游门限的点云置信度压回无效区。"""
+    cloud = terrain(TerrainFeatures.STEP)
+    cloud.confidence = 0.30
+    camera = vision(VisionObstacle.WALL, 0.90)
+    result = fuse_observations(cloud, camera, 0.02, 0.55)
+    assert result.geometry_confirmed
+    assert not result.vision_confirmed
+    assert result.obstacle_type == FusedObstacle.STEP
     assert result.confidence == cloud.confidence
 
 

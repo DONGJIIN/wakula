@@ -202,6 +202,7 @@ def validate_mission_parameters(values: Mapping[str, object]) -> None:
     for name in (
         "map_timeout", "guidance_timeout", "startup_sensor_settle_time",
         "goal_timeout", "traversal_timeout",
+        "action_response_timeout", "action_cancel_timeout",
         "controller_wait_timeout", "safety_geometry_stale_seconds",
         "nav_stall_timeout", "return_nav_stall_timeout",
         "odom_progress_timeout",

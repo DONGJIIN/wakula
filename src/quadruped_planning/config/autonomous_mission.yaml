@@ -30,6 +30,11 @@
 # 10. 名称正确但 Action 一直不交接：先检查 NavigationSafety 的时间戳/频率和
 #    perception_valid，再调整 safety_geometry_stale_seconds。低频传感器可小步增大；过严会
 #    漏交接，过松会在断流后沿用旧几何，不能超过底层感知/停车看门狗的安全窗口。
+# 11. 日志出现 ACTION_COMMUNICATION_FAULT：自主速度锁只能令 Nav2 Twist 归零；同时用硬件
+#    急停或停服确认外部 TraverseObstacle 关节运动停止。再停止/重启拥有旧目标的 Nav2、
+#    TraverseObstacle 控制器；归属不明时两者都处理。单独重启自主进程或只重启核心栈不安全。
+#    仅当 rosbag/网络证明确有正常响应超过默认 2 s，才小步增大 action_response_timeout 或
+#    action_cancel_timeout；增大只延后故障判定，不能修复 DDS 断连或控制器不返回 result。
 #
 # 调参顺序：5 秒进展判据 -> 入口空间/航向 -> Action 成功后验 -> 冷却 -> 探索覆盖。
 autonomous_mission:
@@ -124,6 +129,12 @@ autonomous_mission:
     # 坡度证据，防止近场只看到侧边便把同一目标改叫 T 台。
     obstacle_lock_radius: 1.50
     goal_timeout: 45.0
+    # Action send 在 2 秒内没有 goal response 时，无法判断远端是否已经接管；任务锁住
+    # 自主速度且不自动解锁。先停止/重启 Nav2 或越障控制器确认旧目标消失，再重启自主进程。
+    action_response_timeout: 2.0
+    # cancel response 不等于运动已停止；从请求取消到最终 result 最多再等 2 秒。
+    # 真机控制器若需要更长的安全收尾，应小步增大，但不得用它替代控制器内部停车确认。
+    action_cancel_timeout: 2.0
     # 包含较长坡/桥的保守上限；真机控制器仍应自行实现更短的内部超时。
     # Long competition structures (especially the segmented wooden bridge)
     # need more time than a single step.  Keep this above the longest adapter
@@ -141,9 +152,9 @@ autonomous_mission:
     semantic_observation_distance: 2.50
     semantic_confirmation_distance: 1.20
     # /front_obstacle_name 已经过感知层多帧稳定与几何一致性检查，任务层再要求最近 6 帧中
-    # 2 票即可锁定。若真机类别偶发串扰，先提高感知层 name_confirmation_frames；只有
-    # 稳定名称仍误锁时才把这里恢复为 3，避免在同一桥面白白等待几十秒。
-    # 两帧仅 0.2～0.4 s，曾把坡侧的短暂 WALL 轮廓锁成高墙；三帧仍足够快，且允许
+    # 3 票才可锁定。若真机类别偶发串扰，先提高感知层 name_confirmation_frames；只有
+    # 稳定名称仍误锁时才继续提高这里，避免在同一桥面白白等待几十秒。
+    # 两票仅约 0.2～0.4 s，曾把坡侧的短暂 WALL 轮廓锁成高墙；三票仍足够快，且允许
     # sustained recent evidence 纠正旧锁。真机掉帧严重时先降低感知频率，不建议减回 2。
     semantic_confirmation_votes: 3
     semantic_recent_window: 6
@@ -152,7 +163,7 @@ autonomous_mission:
     semantic_verification_turn_angle: 0.30
     semantic_verification_max_attempts: 2
     # 换视角序列按机器人驻留点而不是会漂移的障碍前缘计数；该半径表示位姿移动多远
-    # 才算真正的新观察站。过大会合并相邻观察站，过小会在同一地点重复 1/4。
+    # 才算真正的新观察站。过大会合并相邻观察站，过小会在同一地点重复 1/2。
     semantic_verification_lock_radius: 1.50
     # 原地换视角结束后等待至少六帧 5 Hz 深度数据，禁止使用旋转残影立即交接。
     semantic_post_turn_settle_time: 1.20

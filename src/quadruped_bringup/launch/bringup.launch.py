@@ -55,7 +55,8 @@ def generate_launch_description():
                 "speed_gate",
                 default_value="true",
                 description=(
-                    "启动 Wakula 最终 /cmd_vel 速度门；嵌入已有底盘速度仲裁时设为 false"
+                    "启动 Wakula 最终 /cmd_vel 速度门；设为 false 后目标仲裁器必须消费 "
+                    "/cmd_vel_smoothed、NavigationSafety、navigation/healthy 和 autonomy_stop"
                 ),
             ),
             DeclareLaunchArgument(
@@ -152,8 +153,9 @@ def generate_launch_description():
                 executable="navigation_speed_gate",
                 output="screen",
                 parameters=[terrain_navigation_params_file, common_time],
-                # 已有机器人通常已经拥有 twist_mux/急停/底盘安全层。移植时可只消费
-                # NavigationSafety，而不创建第二个 /cmd_vel 发布者。
+                # 已有机器人若关闭本门，目标仲裁器必须把 /cmd_vel_smoothed 接成自动候选，
+                # 同时消费 NavigationSafety、navigation/healthy、autonomy_stop，并在命令
+                # 超时及硬件安全检查后唯一发布 /cmd_vel，不能只监听旧 /cmd_vel。
                 condition=IfCondition(speed_gate),
             ),
         ]

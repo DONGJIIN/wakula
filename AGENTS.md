@@ -32,8 +32,10 @@ Action as proof that a real quadruped can traverse an obstacle.
 4. Nav2 moves through free space and reaches an obstacle entry. A real motion controller
    must execute the obstacle. Do not make an obstacle traversable by deleting it from a
    costmap.
-5. Keep real-robot values in the existing YAML files. Do not duplicate tunable defaults
-   in Python or create a second inactive "tuning" file.
+5. Keep real-robot deployment/tuning values in the existing YAML files. Python parameter
+   declarations may retain tested fallback values required before YAML is loaded, but they
+   must stay synchronized and are not a second tuning surface. Never create another inactive
+   "tuning" file; numeric values in documentation are versioned snapshots, not overrides.
 
 ## Parameter ownership
 
