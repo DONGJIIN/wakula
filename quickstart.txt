@@ -11,25 +11,28 @@ Nav2 越障入口 APPROACH/ALIGN/READY 引导、一键接口检查、
 手柄安全 Twist 适配、独立 Gazebo 比赛参考场地、长时间全栈回归、测试和 CI。任务节点只
 决定探索目标与越障交接；Gazebo 适配器只模拟流程，均不生成真实机器狗腿部或关节动作。
 
-当前失效安全边界：中央地面走廊缺少连续有效回波时输出 UNKNOWN 并保持自动速度为零，
-既不能据此猜成坑洞，也不能猜成 CLEAR；CLEAR 必须有真实、连续的地面覆盖。视觉当前只
+当前失效安全边界：中央地面走廊缺少连续有效回波时输出 UNKNOWN 并保持自动速度为零；每个
+纵向切片必须同时有中心、左侧和右侧地面支撑，单侧窄条不能放行。无回波既不能猜成坑洞，
+也不能猜成 CLEAR；CLEAR 和远障碍前方在默认 0.80 m 滚动安全前视内
+的接近走廊必须有真实、连续的地面覆盖，更远盲带会在接近后进入窗口并触发 UNKNOWN。
+视觉当前只
 确认点云已经给出的完全相同类别，冲突时保留点云类别且不置视觉确认位。机器任务只消费
 带 Header 的强类型消息与稳定英文 semantic_id；中文障碍名只供终端/RViz 显示，地图投影
 使用观测 Header 时刻的历史 TF，不能拿“最新 TF”替代。
 
-自主任务受 `/navigation/healthy`、临时停车锁和 `/navigation/autonomy_lease` 三层合同约束：
+自主任务受 `/navigation/healthy`、临时停车否决和强类型 `/navigation/autonomy_lease` 三层合同约束：
 导航失健康会暂停并保留当前 Nav2 目标，健康连续恢复后再重试；lease 失效只锁住自动速度
-候选，不封锁独立的键盘/手柄人工分支。TraverseObstacle 客户端已按同一 Header 的不可变
+候选，不封锁独立的键盘/手柄人工分支。lease 用 session ID、严格递增序号和
+`motion_allowed` 将所有权/运动许可原子化，旧进程迟到消息不能解锁。TraverseObstacle 客户端已按同一 Header 的不可变
 快照发送全部入口/地形字段，并检查严格反馈序列、5 秒进展看门狗和 45 秒单次总限。
 任务在 240 秒工作截止时取消未完成工作并返程，300 秒硬截止时锁自主速度并取消所有
 已知 Action；不会把未完成任务报成 COMPLETED。
 
 当前基线：9 个 ROS 2 包全量构建通过，`colcon test-result --all --verbose` 为
-514 tests、0 errors、0 failures、0 skipped。2026-09-01 的三分钟确定性上层流程回归
+550 tests、0 errors、0 failures、0 skipped。2026-09-01 的三分钟确定性上层流程回归
 在 48 秒完成 8/8、返回起点并进入 COMPLETED。原始传感器准确率、SLAM 回环和真机步态
-必须分别验收；该成绩只代表 Gazebo 上层软件链，不代表真机越障能力。
-原始传感器准确率、SLAM 回环和真机步态仍须分别验收；下面带日期的旧测试数字是历史记录，
-不机械改写为当前基线。
+仍须分别验收；该成绩只代表 Gazebo 上层软件链，不代表真机越障能力。下面带日期的旧测试
+数字是历史记录，不机械改写为当前基线。
 
 2026-08-31 无闪现逐障碍回归：未启动仿真 TraverseObstacle/传送服务，八类障碍在各自
 可观测入口视角各采 40 帧，名称、几何确认、导航健康均为 320/320；分开的动态试验 8/8
@@ -245,13 +248,12 @@ NavFn；D* Lite 不是 Nav2 Jazzy 内置插件且尚无性能
   git clone <仓库地址> ~/wakula
   cd ~/wakula
   source /opt/ros/jazzy/setup.bash
-  ros2 pkg prefix ament_python
-  rosdep install --from-paths src --ignore-src --rosdistro jazzy \
-    --skip-keys ament_python -y
+  python3 -c 'import colcon_ros.task.ament_python.build'
+  rosdep install --from-paths src --ignore-src --rosdistro jazzy -y
 
-Ubuntu 24.04 的 rosdep 数据库没有把 ROS 构建类型 `ament_python` 映射成系统 key；上面的
-第一条必须能找到 `/opt/ros/jazzy` 中的包，随后只跳过这一项。不要使用 `-r` 隐藏其他未知
-依赖；`scripts/bootstrap.sh` 已执行同一检查。
+`ament_python` 是 colcon 构建类型，不是名为 `ros-jazzy-ament-python` 的发行包；
+上面第一条检查真正的 colcon 扩展。不要在 rosdep 中使用 `-r` 或
+`--skip-keys` 隐藏未知依赖；`scripts/bootstrap.sh` 已执行同一检查。
   ./scripts/build.sh
   source install/setup.bash
 
@@ -301,18 +303,22 @@ CameraInfo 投影；若以后启用像素—点云关联或跨类重分类，Cam
   ros2 launch slam autonomous_navigation.launch.py
 
 第三条不启动或关闭 SLAM、Nav2、OpenCV、RViz、Gazebo，也不启动仿真越障后端；现实传感器
-和 Gazebo 传感器接口一致。任务启动后以 4 Hz 发布 `/navigation/autonomy_lease=true`，并先
-保持 `/navigation/autonomy_stop=true`；只有实际发送 Nav2 目标时才暂时放开自动速度。
+和 Gazebo 传感器接口一致。任务启动后以 4 Hz 发布强类型 `/navigation/autonomy_lease`，
+首帧仅以新 `session_id` 取得所有权且强制 `motion_allowed=false`，并保持
+`/navigation/autonomy_stop=true`。只有 Nav2 目标已接受、结果 Future 可监控且回调已绑定后，
+同 session 的后续递增帧才置 `motion_allowed=true`。
 在第三个终端按 Ctrl-C，会先令 Nav2 Twist 归零，再请求取消 Action；第一、二条进程继续
-运行。干净退出只会在 Nav2/Action 所有权均已释放后发布 lease=false 并撤销临时停车锁。
+运行。干净退出只会在 Nav2/Action 所有权均已释放后，用同 session 的更新序号发布
+`active=false,motion_allowed=false` 并撤销诊断停车信号。
 键盘/手柄走独立人工分支，不受自动 lease 或 autonomy_stop 封锁；若真实
 TraverseObstacle 失联，仍必须先硬件急停或停服，不能把自动速度锁当作关节急停。
 
 速度门的 lease 状态含义：没有自主任务时为 UNOWNED，普通 RViz/Nav2 自动候选可正常使用；
-任务心跳新鲜时为 ACTIVE；任务异常消失超过 0.8 s 后为 EXPIRED，缓存 Twist 被清空且自动
-候选锁住。ACTIVE 未超时且任务确认 Nav2/Traverse 所有权已释放时，lease=false 可正常回到
-UNOWNED。EXPIRED 会拒绝迟到 true；因话题是不带 session 的 Bool，任意 false 也不能证明旧
-所有者已释放。先人工确认外部控制器已停，再重启 navigation_speed_gate/核心栈清除锁存，
+任务心跳新鲜时为 ACTIVE，但仍只有当前 session 的 `motion_allowed=true` 才放行；任务异常
+消失超过 0.8 s 后为 EXPIRED，缓存 Twist 被清空且自动候选锁住。ACTIVE 只接受当前 session 的严格
+递增序号；异 session、重复/回退序号和匿名 `/navigation/autonomy_stop=false` 都不解锁。干净
+`active=false` 只能释放匹配 session。EXPIRED 拒绝所有消息；先人工确认外部控制器已停，再重启
+navigation_speed_gate/核心栈清除锁存，
 之后才能启动新自主任务。可随时检查：
 
   ros2 topic echo /navigation/autonomy_lease
@@ -488,7 +494,8 @@ T 字形台阶、限高杆、直角绕杆区、砂砾与碎木坑或高墙。仅
 
 `/perception/front_obstacle_name` 是可变中文 UI，不能作为自动任务输入。机器逻辑使用
 `/terrain/navigation_safety` 与 `/traversal/guidance` 中同一观测的 Header、粗类型和稳定
-英文 `semantic_id`；两条消息必须时间接近、类别与 ID 一致。投影到 map 时按该 Header 的
+英文 `semantic_id`；两条消息的 `sec/nanosec/frame_id`、类别与 ID 必须精确一致，不会用
+“时间接近”的两帧拼成 Action。投影到 map 时按该 Header 的
 传感器采样时刻查询历史 TF，只有 `tf2_echo` 能看到当前最新 TF 并不能证明历史投影有效。
 
 当前识别回归基线：宽台阶/木桥不会再因占据多数而把入口反报成坑；蓝白限高杆可由多个
@@ -510,6 +517,8 @@ LaserScan；顶视图默认跟随 base_link，地图仍固定在 map 坐标，�
 得到点云尺度确认。
 
 Nav2 只会在雷达角度/样本/frame、里程计时间/frame/协方差和定位 TF 全部有效且源时间新鲜后激活。
+健康节点每个周期都重算 scan/odom Header 年龄，不会让缓存旧帧由回调接收时间续期；
+Nav2/slam_toolbox 生命周期服务也有 2 s 墙钟看门狗、代次隔离和迟到回调拒绝。
 tf2 缓存里能查到旧变换不代表健康；`/diagnostics` 的 `tf_age_seconds` 持续增大或显示
 `unavailable` 时，先修 map -> odom / odom -> base_link 发布者和仿真/系统时钟。
 自主任务同样订阅该健康信号：失健康时暂停并保存精确 Nav2 目标，恢复稳定后继续，而不是
@@ -600,12 +609,14 @@ LB 必须在摇杆回中时按下才会解锁；带量按下会被拒绝，需�
 点云缺失、解码/TF 失败或中央地面走廊没有连续低位回波时必须保持 UNKNOWN 和
 speed_limit=0。无回波既不是坑洞证据，也不是 CLEAR 证据；只有中央通道的实测地面覆盖
 达到距离、横向覆盖和最大空隙要求，且数据持续新鲜，才允许 CLEAR 和 speed_limit=1。
+已看到远障碍时，每帧仍对默认 0.80 m 滚动前视内、直到障碍前缘前一格的接近走廊执行同一
+检查；更远盲带在机器人接近并进入该窗口后变为 UNKNOWN。
 当前源完成解码与 TF 后才取得所有权；当前源失败进入短暂 cooldown 后，健康备用点云可接管，
 切源、时钟回拨或地面先验过期/连续冲突会清除旧先验。
 越障目标在远处先低速 APPROACH/ALIGN，进入 1.20 m 交接区后为 READY 且速度归零；
 普通/矮 POLE 由 Nav2 低速绕行，只有高度≥0.45 m 且语义确认为直角绕杆赛项时才进入 Action。
-相机证据不能触发腿部动作。Safety 与 Guidance 必须有递增非零 Header、同一观测 frame、
-相同 `semantic_id`/粗类型，默认时间差不超过 0.05 s；任何历史 TF 或语义一致性失败均
+相机证据不能触发腿部动作。Safety 与 Guidance 必须有递增非零 Header、精确相同的
+`sec/nanosec/frame_id`、相同 `semantic_id`/粗类型；任何历史 TF 或语义一致性失败均
 fail-closed。`/navigation/healthy` 为 false 或断流时速度门也保持零。只有点云时使用
 `vision:=false`，默认仍走强类型 `/terrain/features_stamped`；旧
 `/terrain/features` 数组仅在 YAML 参数显式设为 `legacy_features_enabled=true` 时用于旧 bag
@@ -734,12 +745,13 @@ build/install/log、Gazebo、Xbox 或 tools。源码放入目标工作空间 `sr
 该命令由本项目启动 SLAM、Nav2、OpenCV、点云、融合和安全决策。目标已有底盘速度仲裁器时
 追加 `speed_gate:=false`；此时 Wakula 不发布 `/cmd_vel`，目标仲裁器必须订阅
 `/cmd_vel_smoothed` 作为自动候选，并同时消费 `/terrain/navigation_safety`、
-`/navigation/healthy`、`/navigation/autonomy_stop`、`/navigation/autonomy_lease` 和
+`/navigation/healthy`、强类型 `/navigation/autonomy_lease`、`/navigation/autonomy_stop` 和
 `/teleop/emergency_stop` 后唯一发布
-`/cmd_vel`。autonomy_stop 是临时自动停车锁，autonomy_lease 表示自主进程的所有权/存活；
-两者都只封锁自动候选，不封锁独立人工分支，也不会关闭本项目 SLAM/Nav2。lease 过期后
-必须确认旧所有者已停，再重启 navigation_speed_gate/核心栈（外部实现则重启其仲裁器）。
-现有 Bool 合同不带 session，EXPIRED 后不能由新任务发 true 或任意 false 强行复位。
+`/cmd_vel`。autonomy_lease 是 `{session_id, sequence, active, motion_allowed}` 的易失所有权/
+运动许可心跳；目标仲裁器只能用当前 session 严格递增的 `motion_allowed=true` 放行自动候选。
+`autonomy_stop=true` 是额外停车否决，匿名 false 不是解锁证据。两者都不封锁独立人工分支，
+也不会关闭本项目 SLAM/Nav2。lease 过期后必须确认旧所有者已停，再重启
+navigation_speed_gate/核心栈（外部实现则重启其仲裁器）。
 `teleop/emergency_stop=true` 则必须覆盖人工和自动候选、清空旧 Twist 并持续零；解除后等
 新命令。它仍不是硬件急停，真机安全层必须另有实体急停和执行器断能能力。
 自主越障另需真机运动控制提供 `/traverse_obstacle` 服务端。详细复制、构建、启动和验收步骤

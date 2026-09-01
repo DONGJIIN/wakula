@@ -70,7 +70,7 @@ FK/IK、站立步态、全身控制或真实越障动作；这些内容等真机
 决策、速度超时门、未知地图前沿探索、Nav2 越障入口接近、`TraverseObstacle` Action 编排、
 Xbox 手柄适配、独立比赛场地、强类型真机对接合同、rosbag 离线评估和全栈长时间回归工具：
 9 个 ROS 2 包已完成全量构建；当前 `colcon test-result --all --verbose` 基线为
-**514 tests、0 errors、0 failures、0 skipped**，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
+**550 tests、0 errors、0 failures、0 skipped**，并提供一键启动、独立停止、对接检查和 CI。URDF 只用于 RViz 外形与
 传感器 TF 占位，
 不能视为运动学或整机控制已完成。
 详细清单与开发顺序见 `quickstart.txt`。
@@ -227,7 +227,8 @@ wakula/
   细长色柱也可提示立柱。无颜色的单条横边或
   闭合大框不能独立判为横杆/墙，避免地平线、台阶正面和场地边界误报。候选相机还会先检查
   frame、时间戳、宽高、步长、数据长度和 CvBridge 编码；同一来源的重复/乱序帧不会刷新
-  心跳或贡献多帧投票，无效或过期主话题不会阻止备用源。
+  心跳或贡献多帧投票，Image Header 间隔超时即使回调突发到达也会清空旧投票。
+  未来时间戳最多容忍 0.10 s，无效、转换失败或过期主话题不会阻止备用源。
 - `terrain_analyzer`：将点云转换到 `base_link`，以稳健高度栅格、连通域和异常原始回波支撑量
   估计台阶、坡度、坑洞、墙、悬空横杆和立柱；近场地面锚定避免宽台阶/桥面反报为坑，
   平面残差区分连续坡面与离散踏面；同帧出现多个结构时先选择前向通道内最近的有效正/负
@@ -236,7 +237,11 @@ wakula/
   active source 的健康租约。解码失败、全 NaN 或缺 TF 的来源进入短暂 cooldown 并释放所有权，
   健康备用点云可接管。切源、rosbag/Gazebo 时钟回拨、地面先验过期或连续整体高度冲突都会
   清除旧先验。正前方中央通道没有足够地面回波时输出 `UNKNOWN/invalid` 并停车：无回波既
-  不是坑洞证据，也不是可通行证据；`CLEAR` 必须满足连续地面覆盖、最大缺口和横向覆盖率。
+  不是坑洞证据，也不是可通行证据。`CLEAR` 的每个纵向切片必须同时具有中心、左侧和右侧
+  地面支撑，并满足最大缺口和横向覆盖率；即使已看到远处 STEP/PIT/WALL/BAR/POLE，每帧
+  也会在默认 0.80 m 滚动安全前视内
+  检查到 `min(0.80 m, 障碍前缘前一格)` 的接近走廊。远处盲带会在机器人接近并进入该窗口时
+  触发 UNKNOWN 停车，不能被远墙掩盖。点云和相机来源同样只容忍 0.10 s 未来时间。
 - `perception_fusion`：在小队列中全局寻找时间戳最接近的相机/点云对；相机断流时在
   0.25 s 后退化为纯点云结果；视觉框还必须与前向通道相交，点云始终掌握尺度权限。
   当前没有 CameraInfo/外参投影关联，因此 `vision_confirmed=true` 只在视觉类别与点云类别
@@ -291,21 +296,28 @@ wakula/
   提前消耗补扫、恢复或回访状态。任务使用观测时间戳查询历史 TF，并严格配对 Safety/
   Guidance 的 frame、stamp、粗类型和 `semantic_id`；不会把相邻时刻或中文名称拼成一个
   Action。`/navigation/healthy` 为 false 或超时会锁住并取消 Nav2，但保留原目标且不增加
-  失败/冷却次数，只有健康连续稳定后才恢复。自主所有权通过易失 lease 发送；进程崩溃或
-  DDS 断开会让速度门锁住自动分支，而不会永久封住键盘/手柄人工分支。
-  lease 状态为 UNOWNED/ACTIVE/EXPIRED：ACTIVE 未超时且任务确认所有权释放时，
-  false 可回到 UNOWNED；一旦心跳断流进入 EXPIRED，由于 Bool 无 session，任意 false 或
-  迟到 true 都不解锁。确认旧所有者已停后必须重启 navigation_speed_gate/核心栈清除锁存。
+  失败/冷却次数，只有健康连续稳定后才恢复。自主所有权通过易失的强类型
+  `AutonomyLease(session_id, sequence, active, motion_allowed)` 发送；进程崩溃或 DDS 断开会让
+  速度门锁住自动分支，而不会永久封住键盘/手柄人工分支。
+  lease 状态为 UNOWNED/ACTIVE/EXPIRED：新 session 首帧只确认所有权且强制停车；只有同一
+  session 严格递增的后续帧才能以 `motion_allowed=true` 放行已接受且可监控结果的 Nav2
+  目标，或以 `active=false` 清洁释放。旧进程的迟到 release/停车 false、重复/回退序号和异
+  session 消息均不能解锁。一旦断流进入 EXPIRED，确认旧所有者已停后必须重启
+  navigation_speed_gate/核心栈清除锁存。`/navigation/autonomy_stop=true` 仍是额外停车否决；
+  匿名 false 不再解锁，唯一放行依据是同 session 有序的 `motion_allowed` 。
   硬截止后若 Nav2/Traverse 所有权可确认释放，终态为 `INCOMPLETE_STOP`；若响应或
   取消结果超时而无法确认，终态为 `INCOMPLETE_STOP_OWNERSHIP_FAULT`。两者都不计完成；
   后者必须处理外部控制器并使用硬件急停。`/navigation/autonomy_stop` 只锁自主速度分支，
   不是整机急停，也不得无条件封锁独立人工分支。
   算法不读取 Gazebo 模型名或 world 坐标。
 - `navigation_health_monitor`：运行期检查 `/scan`、`/odom`、TF、扫描结构、frame、位置/航向
-  协方差以及里程计位置/航向突跳；最新组合 `map -> base_link` 的动态源时间也必须新鲜，TF 发布者冻结后不会
-  因缓存仍可查询而继续判健康。跳变会锁存到连续稳定样本确认恢复，输入断流则重新发布 false。
+  协方差以及里程计位置/航向突跳；每个健康周期同时重算 DDS 接收龄和 scan/odom Header
+  源时间龄，驱动重发缓存旧帧不会给心跳续期。最新组合 `map -> base_link` 的动态源时间
+  也必须新鲜，TF 发布者冻结后不会因缓存仍可查询而继续判健康。跳变会锁存到连续稳定
+  样本确认恢复，输入断流则重新发布 false。
 - `nav2_readiness_monitor`：复用同一数据合同，等待有效 `/scan`、`/odom` 和定位 TF 后激活 Nav2；
   生命周期服务名、传感器话题、frame、超时和扫描合同会在建立服务客户端前统一校验。
+  STARTUP/GetState/ChangeState 请求具有墙钟截止、generation 隔离和迟到回调拒绝，服务失联不会永久卡住激活/恢复标志。
 - `navigation_speed_gate`：检查 Nav2 命令、地形评估和导航健康心跳，任一失效立即输出零速；
   直行要求前/后雷达扇区具备连续有效覆盖，任何转向按近 360° 机身扫掠检查。当前只接受
   `linear.x + angular.z`，启用全向侧移前必须按真实 footprint 重做方向安全门。
@@ -459,9 +471,10 @@ ros2 launch slam slam.launch.py robot_model:=false sensor_profile:=ros_default
 其余包。已有机器人继续拥有传感器驱动、`/odom`、TF、底盘安全和关节控制；本算法不接管
 这些模块。若目标已有 `/cmd_vel` 仲裁器，启动感知链时必须设置 `speed_gate:=false`；此时
 Wakula 不发布 `/cmd_vel`，目标仲裁器必须把 `/cmd_vel_smoothed` 接成“自动速度候选”，同时
-消费 `/terrain/navigation_safety`、`/navigation/healthy`、`/navigation/autonomy_stop`、
-`/navigation/autonomy_lease` 和 `/teleop/emergency_stop`，实现速度限制、断流、雷达与
-硬件急停后再唯一发布 `/cmd_vel`。`autonomy_stop`/lease 只封锁自动候选，不能覆盖人工
+消费 `/terrain/navigation_safety`、`/navigation/healthy`、强类型 `/navigation/autonomy_lease`、
+`/navigation/autonomy_stop` 和 `/teleop/emergency_stop`，实现速度限制、断流、雷达与
+硬件急停后再唯一发布 `/cmd_vel`。目标仲裁器必须复制 session/sequence/motion_allowed 状态机；
+匿名 `autonomy_stop=false` 只是诊断兼容信号，不得用于放行。lease 只封锁自动候选，不能覆盖人工
 分支；teleop 软件停车请求覆盖全部候选，但仍不替代实体急停。若采用本项目速度门，则 Nav2 必须按
 `/cmd_vel_nav → /cmd_vel_smoothed → /cmd_vel` 串联，禁止两个节点同时发布最终 `/cmd_vel`。
 
@@ -592,8 +605,9 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
-`bootstrap.sh` 会先确认 ROS 自带的 `ament_python`，再让 rosdep 解析其余全部依赖；只跳过
-Noble rosdep 数据库没有系统映射的这一项，不会用 `-r` 掩盖其他未知依赖。
+`bootstrap.sh` 会直接确认 colcon 的 `ament_python` 构建扩展可导入，再让
+rosdep 解析全部运行依赖。`ament_python` 只是 `package.xml` 的构建类型，
+不是可由 `ros2 pkg prefix` 查找的包；脚本不使用 `-r` 或 `--skip-keys` 掩盖任何未知依赖。
 
 视觉仅依赖 `python3-opencv`、`python3-numpy` 和 `ros-jazzy-cv-bridge`，不会加载模型，
 默认 5 Hz、最大 576 像素宽；点云默认 5 Hz，TF 前最多 40000 点、几何分析最多 12000 点，
@@ -657,6 +671,13 @@ Twist，避免旧 Nav2 目标与新目标同时拥有速度权；外部关节控
 `stack_regression` 现按明确 executable 白名单统计完整核心进程，报告 terrain/fused 消息的
 Header age p50/p95/max、进程启停和每轮闭合数据完整性；延迟预算仅产生软告警，RK3588
 硬指标仍须在目标板上按温度、RMW 和是否启动 RViz 单独验收。
+
+同日的独立反例复审又锁定了“无回波带后的远墙”、Action 截止与 4 Hz timer 之间的
+回调竞态、旧任务迟到 release 释放新 owner、里程计/Header 缓存续命、生命周期 Future 永不完成
+以及 Gazebo `PREPARING` 阻塞自身 `/odom` 回调等边界。现在每帧滚动安全前视中的障碍接近
+走廊也必须连续可见；
+Action 响应/结果回调自身复核墙钟截止；自主所有权与运动许可改为同一有序强类型消息；
+SLAM 周期性重算源 Header 年龄并对生命周期服务使用有界代次。
 
 可复现长测（会让 Gazebo 测试狗运动，真机不得运行）：
 
@@ -1305,8 +1326,10 @@ ros2 run quadruped_tools perception_bag_evaluator BAG目录 \
   扫描兜底，减少速度链上的额外进程和所有权歧义；该扫描不参与全局避障或越障分类。
 - 若设置 `speed_gate:=false`，上述最后一段不存在：目标机器人的 twist_mux/安全层必须把
   `/cmd_vel_smoothed` 接成自动候选，同时消费 NavigationSafety、navigation/healthy、
-  autonomy_stop、autonomy_lease 和 teleop emergency_stop，并实现命令超时、雷达/硬件
-  急停后唯一发布 `/cmd_vel`。autonomy_stop/lease 只封锁自动候选；teleop 软件停车覆盖
+  强类型 autonomy_lease、autonomy_stop 和 teleop emergency_stop，并实现命令超时、雷达/硬件
+  急停后唯一发布 `/cmd_vel`。自动候选只能由当前 session 严格递增的
+  `active=true,motion_allowed=true` 放行，匿名 autonomy_stop=false 不是解锁证据。lease 只封锁自动候选；
+  teleop 软件停车覆盖
   全部候选，但不能替代实体急停。
 
 规划命令或地形决策心跳任意一项超时，速度门都会发布零速度。这只是导航软件层的失效

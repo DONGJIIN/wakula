@@ -145,6 +145,7 @@ def test_navigation_health_parameters_are_versioned_with_nav2():
     assert readiness["slam_lifecycle_node"] == "/slam_toolbox"
     assert readiness["slam_recovery_period"] >= 1.0
     assert readiness["slam_recovery_startup_grace"] >= 3.0
+    assert 0.1 <= readiness["service_request_timeout"] <= 5.0
     readiness_source = (
         PACKAGE_ROOT / "slam" / "nav2_readiness_monitor.py"
     ).read_text(encoding="utf-8")
@@ -573,6 +574,18 @@ def test_record_bag_resolves_profiles_without_editing_the_script():
     assert "record_topic=/oak/rgb/image_raw" in result.stdout
     assert "record_topic=/oak/stereo/points" in result.stdout
     assert "record_topic=/oak/rgb/camera_info" in result.stdout
+
+
+def test_replay_bag_bootstraps_ros_and_workspace_in_a_fresh_terminal():
+    """Bag replay must resolve ros2 and first-party message types without manual source."""
+    repository_root = PACKAGE_ROOT.parents[1]
+    source = (repository_root / "scripts" / "replay_bag.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "source /opt/ros/jazzy/setup.bash" in source
+    assert 'source "${workspace_dir}/install/setup.bash"' in source
+    assert source.index("set -u") > source.index("source /opt/ros/jazzy/setup.bash")
+    assert "exec ros2 bag play" in source
 
 
 def test_readiness_monitor_does_not_start_without_localization_tf():

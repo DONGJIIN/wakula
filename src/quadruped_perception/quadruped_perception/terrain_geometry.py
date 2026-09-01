@@ -269,6 +269,13 @@ def _clear_corridor_coverage(
     coordinates = np.floor(supported[:, :2] / size).astype(np.int32)
     # At least this many distinct lateral cells must support each x slice.  Requiring a fraction of
     # the physical corridor keeps the rule invariant when grid_cell_size changes during tuning.
+    # A count alone is insufficient, however: with the default 0.50 m-wide corridor, three cells
+    # packed into a 0.15 m strip along one side satisfy the 25% count while most of the body path is
+    # still unobserved.  Therefore every longitudinal slice that claims ground must also contain a
+    # central return and reach into both lateral halves.  ``half_width / 2`` is deliberately derived
+    # from the existing physical corridor rather than a new sensor-specific magic number; one or
+    # two missing outer cells remain acceptable, while a wall edge or narrow side ledge cannot
+    # authorize the complete walking corridor.
     expected_lateral_bins = max(1, int(math.floor(2.0 * half_width / size)) + 1)
     minimum_lateral_bins = max(
         1,
@@ -279,15 +286,27 @@ def _clear_corridor_coverage(
             )
         ),
     )
+    center_half_width = min(half_width, size)
+    flank_reach = min(half_width, max(size * 0.5, half_width * 0.5))
     occupied = np.zeros(total_bins, dtype=bool)
     for x_index in np.unique(coordinates[:, 0]):
         relative_index = int(x_index) - first_bin
         if not 0 <= relative_index < total_bins:
             continue
-        lateral_count = len(
-            np.unique(coordinates[coordinates[:, 0] == x_index, 1])
+        slice_mask = coordinates[:, 0] == x_index
+        lateral_count = len(np.unique(coordinates[slice_mask, 1]))
+        lateral_positions = supported[slice_mask, 1]
+        center_supported = bool(
+            np.any(np.abs(lateral_positions) <= center_half_width)
         )
-        occupied[relative_index] = lateral_count >= minimum_lateral_bins
+        left_supported = bool(np.any(lateral_positions <= -flank_reach))
+        right_supported = bool(np.any(lateral_positions >= flank_reach))
+        occupied[relative_index] = bool(
+            lateral_count >= minimum_lateral_bins
+            and center_supported
+            and left_supported
+            and right_supported
+        )
 
     coverage_score = float(np.count_nonzero(occupied)) / float(total_bins)
     # Include leading/trailing gaps: seeing only the toes, or ground beyond a large missing strip,
@@ -733,9 +752,10 @@ def analyze_terrain_geometry(
     positive_supported = False
     narrow_positive_supported = False
     selected_anomaly_echoes = 0
+    selected_front_distance = float("inf")
     if candidates:
         (
-            _,
+            selected_front_distance,
             _,
             selected_kind,
             selected_region,
@@ -765,6 +785,39 @@ def analyze_terrain_geometry(
                 min_region_points,
             )
             narrow_positive_supported = bool(selected_narrow)
+
+        # A supported obstacle echo is not evidence that the floor between the robot and that
+        # obstacle was observed.  An absorptive/deep pit can create a no-return band while a wall,
+        # step, or pit bottom farther ahead still produces excellent returns.  Without this guard
+        # the selected obstacle branch bypassed the CLEAR-only coverage check and could authorize
+        # Nav2 to approach across UNKNOWN ground inside the configured safety lookahead.
+        #
+        # Check from the ROI near edge through the shorter of the configured lookahead and one grid
+        # cell before the selected front.  The obstacle itself naturally occludes/replaces floor
+        # returns and must not be required to contain ground.  A very close obstacle whose front is
+        # already in the first ROI cell remains a valid hazard observation; there is no positive-
+        # length approach segment for Nav2 to approve in that case.
+        approach_required_distance = min(
+            float(clear_ground_required_distance),
+            float(selected_front_distance) - max(0.02, float(cell_size)),
+        )
+        if approach_required_distance > (
+            float(clear_ground_start_x) + 0.5 * max(0.02, float(cell_size))
+        ):
+            approach_coverage_valid, _ = _clear_corridor_coverage(
+                cells,
+                ground_mask,
+                cell_size=cell_size,
+                corridor_half_width=clear_ground_corridor_half_width,
+                start_x=clear_ground_start_x,
+                required_distance=approach_required_distance,
+                maximum_gap=clear_ground_max_gap,
+                minimum_lateral_fraction=clear_ground_min_lateral_fraction,
+            )
+            if not approach_coverage_valid:
+                # UNKNOWN is intentionally distinct from PIT: missing XYZ returns cannot reveal
+                # whether the cause was a hole, black material, range limit, or sensor failure.
+                return GeometryEstimate(valid_points=len(points))
 
     if negative_supported:
         selected = cells[negative_region]

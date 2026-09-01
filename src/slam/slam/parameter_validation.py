@@ -53,6 +53,7 @@ READINESS_PARAMETER_NAMES = (
     "slam_lifecycle_node",
     "slam_recovery_period",
     "slam_recovery_startup_grace",
+    "service_request_timeout",
 )
 
 
@@ -173,4 +174,5 @@ def validate_nav2_readiness_parameters(values: Mapping[str, object]) -> None:
     _positive(values, "slam_recovery_period", errors)
     if _number(values, "slam_recovery_startup_grace", errors) < 0.0:
         errors.append("slam_recovery_startup_grace must be >= 0")
+    _positive(values, "service_request_timeout", errors)
     _raise("Nav2 readiness", errors)

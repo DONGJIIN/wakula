@@ -5,7 +5,6 @@
   <description>Terrain safety assessment and a fail-closed Nav2 speed limit gate.</description>
   <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

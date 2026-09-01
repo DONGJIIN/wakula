@@ -344,6 +344,7 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("min_valid_points", 30)
         self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("source_failure_cooldown", 2.0)
+        self.declare_parameter("source_future_tolerance", 0.10)
         self.declare_parameter("source_geometry_failure_frames", 5)
         self.declare_parameter("ground_prior_max_age", 3.0)
         self.declare_parameter("ground_prior_max_consecutive_conflicts", 3)
@@ -420,6 +421,9 @@ class TerrainAnalyzer(Node):
         )
         self.source_failure_cooldown = max(
             0.1, float(self.get_parameter("source_failure_cooldown").value)
+        )
+        self.source_future_tolerance = float(
+            self.get_parameter("source_future_tolerance").value
         )
         self.source_geometry_failure_frames = int(
             self.get_parameter("source_geometry_failure_frames").value
@@ -573,6 +577,7 @@ class TerrainAnalyzer(Node):
             msg.header,
             now_seconds,
             self.source_switch_timeout,
+            self.source_future_tolerance,
         ):
             self.get_logger().warning(
                 f"Ignoring stale/future PointCloud2 from {source}",

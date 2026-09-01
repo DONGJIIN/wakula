@@ -6,9 +6,11 @@ are also protected against regression without requiring Gazebo or sensor hardwar
 """
 
 import time
+from pathlib import Path
 
 import pytest
 import rclpy
+import yaml
 from rclpy.duration import Duration
 from sensor_msgs.msg import Image
 from sensor_msgs_py import point_cloud2
@@ -21,7 +23,10 @@ from quadruped_interfaces.msg import FusedObstacle, TerrainFeatures, VisionObsta
 from quadruped_perception.perception_fusion import PerceptionFusion
 from quadruped_perception.terrain_analyzer import TerrainAnalyzer
 from quadruped_perception.terrain_geometry import CLEAR, GeometryEstimate
-from quadruped_perception.vision_obstacle_detector import VisionObstacleDetector
+from quadruped_perception.vision_obstacle_detector import (
+    ObstacleEvidence,
+    VisionObstacleDetector,
+)
 
 
 @pytest.fixture
@@ -104,7 +109,7 @@ def _image(node, encoding="bgr8"):
 
 
 def test_all_perception_nodes_accept_the_shipped_default_contract(ros_context):
-    """Construct camera, cloud, and fusion nodes without Gazebo or physical sensors."""
+    """Construct all nodes and keep direct-run defaults identical to the shipped YAML."""
     nodes = []
     try:
         nodes.extend((VisionObstacleDetector(), TerrainAnalyzer(), PerceptionFusion()))
@@ -113,6 +118,26 @@ def test_all_perception_nodes_accept_the_shipped_default_contract(ros_context):
             "terrain_analyzer",
             "perception_fusion",
         }
+        config_root = Path(__file__).parents[1] / "config"
+        terrain_config = yaml.safe_load(
+            (config_root / "terrain.yaml").read_text(encoding="utf-8")
+        )
+        vision_config = yaml.safe_load(
+            (config_root / "vision.yaml").read_text(encoding="utf-8")
+        )
+        expected = {
+            "terrain_analyzer": terrain_config["terrain_analyzer"]["ros__parameters"],
+            "vision_obstacle_detector": vision_config["vision_obstacle_detector"][
+                "ros__parameters"
+            ],
+            "perception_fusion": vision_config["perception_fusion"]["ros__parameters"],
+        }
+        for node in nodes:
+            for name, yaml_value in expected[node.get_name()].items():
+                runtime_value = node.get_parameter(name).value
+                if isinstance(runtime_value, (list, tuple)):
+                    runtime_value = list(runtime_value)
+                assert runtime_value == yaml_value, name
     finally:
         for node in reversed(nodes):
             node.destroy_node()
@@ -263,6 +288,37 @@ def test_invalid_preferred_sensors_do_not_block_healthy_fallbacks(ros_context):
     finally:
         terrain.destroy_node()
         vision.destroy_node()
+
+
+def test_future_dated_preferred_sensors_cannot_lock_out_current_backups(ros_context):
+    """A source rejected downstream at +200 ms must never own perception arbitration."""
+    terrain = TerrainAnalyzer()
+    vision = VisionObstacleDetector()
+    try:
+        future_cloud = _cloud(terrain, _flat_ground_points())
+        future_cloud.header.stamp = (
+            rclpy.time.Time.from_msg(future_cloud.header.stamp)
+            + Duration(seconds=0.20)
+        ).to_msg()
+        terrain.cloud_callback(future_cloud, "/camera/depth/points")
+        assert terrain.active_topic is None
+        current_cloud = _cloud(terrain, _flat_ground_points())
+        terrain.cloud_callback(current_cloud, "/camera/depth/color/points")
+        assert terrain.active_topic == "/camera/depth/color/points"
+
+        future_image = _image(vision)
+        future_image.header.stamp = (
+            rclpy.time.Time.from_msg(future_image.header.stamp)
+            + Duration(seconds=0.20)
+        ).to_msg()
+        vision.image_callback(future_image, "/camera/image_raw")
+        assert vision.active_topic is None
+        current_image = _image(vision)
+        vision.image_callback(current_image, "/camera/color/image_raw")
+        assert vision.active_topic == "/camera/color/image_raw"
+    finally:
+        vision.destroy_node()
+        terrain.destroy_node()
 
 
 def test_point_cloud_decode_or_tf_failure_releases_source_for_healthy_backup(ros_context):
@@ -466,6 +522,35 @@ def test_image_conversion_failure_cools_source_and_allows_backup_or_retry(ros_co
         assert vision.active_topic == backup_source
         vision.processing_callback()
         assert vision.last_processed_stamp is not None
+    finally:
+        vision.destroy_node()
+
+
+def test_camera_header_gap_resets_history_even_when_buffered_callbacks_are_bursting(
+    ros_context,
+):
+    """Exposure-time discontinuity, not just receive silence, invalidates visual votes."""
+    vision = VisionObstacleDetector()
+    topic = "/camera/image_raw"
+    try:
+        newest = _image(vision)
+        newest_time = rclpy.time.Time.from_msg(newest.header.stamp)
+        buffered_old = _image(vision)
+        buffered_old.header.stamp = (
+            newest_time - Duration(seconds=1.0)
+        ).to_msg()
+        vision.image_callback(buffered_old, topic)
+        # Model a stable result already accumulated from the old exposure epoch.  The next callback
+        # arrives immediately, as happens when DDS/executor drains a buffer after a stall, but its
+        # source Header jumps farther than history_reset_timeout (0.75 s).
+        vision.evidence_history.extend(
+            [ObstacleEvidence("poles", 0.8, 0.5, 0.5, 0.2, 0.4)] * 3
+        )
+        assert len(vision.evidence_history) == 3
+        vision.image_callback(newest, topic)
+        assert vision.active_topic == topic
+        assert not vision.evidence_history
+        assert vision.latest_frame == (newest, topic)
     finally:
         vision.destroy_node()
 

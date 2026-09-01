@@ -73,9 +73,13 @@ def test_vision_validation_reports_all_related_mistakes_at_once():
         ("max_temporal_size_jitter", 0.009),
         ("max_temporal_size_jitter", 1.001),
         ("history_reset_timeout", 0.09),
+        ("history_reset_timeout", 5.01),
         ("source_switch_timeout", 0.09),
+        ("source_switch_timeout", 30.01),
         ("source_failure_cooldown", 0.09),
         ("source_failure_cooldown", 30.01),
+        ("source_future_tolerance", -0.001),
+        ("source_future_tolerance", 0.101),
     ),
 )
 def test_vision_validation_rejects_values_the_node_would_silently_clip(
@@ -200,6 +204,8 @@ def test_terrain_validation_rejects_inverted_roi_and_thresholds():
         ("ground_percentile", 0.41),
         ("source_switch_timeout", 0.09),
         ("source_failure_cooldown", 0.09),
+        ("source_future_tolerance", -0.001),
+        ("source_future_tolerance", 0.101),
         ("source_geometry_failure_frames", 1),
         ("source_geometry_failure_frames", 31),
         ("ground_prior_max_age", 0.19),
@@ -229,6 +235,22 @@ def test_terrain_validation_rejects_roi_narrower_than_clear_ground_corridor():
     values["lateral_half_width"] = 0.0
     with pytest.raises(ValueError, match="clear_ground_corridor_half_width"):
         validate_terrain_parameters(values)
+
+
+@pytest.mark.parametrize("node_name", ("vision_obstacle_detector", "terrain_analyzer"))
+@pytest.mark.parametrize("value", (0.0, 0.10))
+def test_sensor_future_tolerance_accepts_only_navigation_safe_boundaries(
+    node_name, value
+):
+    """Perception may equal or tighten, but never exceed, NavigationSafety's 100 ms window."""
+    if node_name == "vision_obstacle_detector":
+        values = deepcopy(_parameters("vision.yaml", node_name))
+        validator = validate_vision_parameters
+    else:
+        values = deepcopy(_parameters("terrain.yaml", node_name))
+        validator = validate_terrain_parameters
+    values["source_future_tolerance"] = value
+    validator(values)
 
 
 def test_terrain_validation_rejects_nonportable_frame_and_impossible_point_gates():

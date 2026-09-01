@@ -318,3 +318,7 @@ nav2_readiness_monitor:
     slam_lifecycle_node: /slam_toolbox
     slam_recovery_period: 2.0
     slam_recovery_startup_grace: 4.0
+    # Wall-clock deadline for each Nav2/slam_toolbox lifecycle service request.
+    # Increase only when rosbag measurements show healthy service replies exceed 2 s;
+    # a larger value also delays recovery from a server that vanished after discovery.
+    service_request_timeout: 2.0

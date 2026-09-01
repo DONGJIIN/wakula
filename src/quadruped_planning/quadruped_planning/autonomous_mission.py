@@ -19,13 +19,14 @@ from math import atan2, ceil, cos, degrees, floor, hypot, isfinite, pi, sin
 import signal
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav2_msgs.action import NavigateToPose
 from quadruped_interfaces.action import TraverseObstacle
-from quadruped_interfaces.msg import NavigationSafety, TraversalGuidance
+from quadruped_interfaces.msg import AutonomyLease, NavigationSafety, TraversalGuidance
 from quadruped_planning.parameter_validation import validate_mission_parameters
 from quadruped_planning.terrain_safety_assessor import classify_front_obstacle
 from quadruped_planning.time_utils import ros_clock_moved_backward
@@ -1914,6 +1915,11 @@ class AutonomousMission(Node):
     """可运行时启停的探索—对正—越障状态机。"""
 
     def __init__(self, **node_kwargs):
+        """创建任务节点并集中加载接口、参数、所有权状态与运行期缓存。
+
+        部署默认值仍以 ``config/autonomous_mission.yaml`` 为调参入口；这里的声明值是
+        YAML 缺失时的受测试回退。新增参数必须同时更新 YAML、验证器和默认一致性测试。
+        """
         super().__init__("autonomous_mission", **node_kwargs)
         defaults = {
             "autostart": False, "map_timeout": 2.0, "guidance_timeout": 1.0,
@@ -2163,14 +2169,21 @@ class AutonomousMission(Node):
         self.autonomy_stop_pub = self.create_publisher(
             Bool, "/navigation/autonomy_stop", stop_qos
         )
-        self.autonomy_stop_pub.publish(Bool(data=True))
         # Volatile lease distinguishes an absent autonomy process (ordinary RViz/Nav2 is
         # allowed) from a process that acquired ownership and then died (fail-closed).
+        # Identity + a strictly increasing sequence prevent a delayed release from an old
+        # process from unlocking the current process during a fast restart.
         self.autonomy_lease_pub = self.create_publisher(
-            Bool,
+            AutonomyLease,
             "/navigation/autonomy_lease",
             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
         )
+        self.autonomy_session_id = uuid4().hex
+        self.autonomy_lease_sequence = 0
+        # Ownership and motion permission are separate states inside one ordered message.
+        # A new process claims the branch stopped; only an accepted, result-monitored
+        # NavigateToPose response may set this true.
+        self.autonomy_motion_allowed = False
         # 非接近型 Nav2 目标需要先转离正前方障碍时，地形限速可能仍为零。任务节点只发布
         # 带心跳的“允许提取纯 yaw”布尔量；速度门会删除全部线速度并执行健康/雷达急停。
         # 这不是速度指令，Gazebo 和真机均继续使用同一标准 Nav2 -> /cmd_vel 链路。
@@ -2184,8 +2197,14 @@ class AutonomousMission(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.enabled = bool(self.params["autostart"])
         if self.enabled:
-            self.autonomy_lease_pub.publish(Bool(data=True))
+            # Acquisition is atomically stopped.  The anonymous compatibility topic is
+            # published afterwards and can only add another veto at the gate.
+            self._publish_autonomy_lease(True, motion_allowed=False)
+            self.autonomy_stop_pub.publish(Bool(data=True))
         else:
+            # Diagnostic state only: the gate deliberately ignores anonymous false as an
+            # unlock.  Because no true was published by this idle session, ordinary
+            # RViz/Nav2 remains UNOWNED and available.
             self.autonomy_stop_pub.publish(Bool(data=False))
         self.state = "WAITING_FOR_INPUTS" if self.enabled else "IDLE"
         self.map_msg = None
@@ -2398,13 +2417,34 @@ class AutonomousMission(Node):
             self.last_inventory_log_time = now
 
     def _publish_immediate_stop(self) -> None:
-        """确定性锁住 Nav2 Twist；不冒充外部关节控制器的硬件急停。"""
+        """Atomically revoke this session's Nav2 permit, then publish the legacy veto.
+
+        The typed lease is sent first so a delayed anonymous ``autonomy_stop=false`` from
+        another process cannot reopen the branch.  This method does not claim ownership
+        for an idle mission and does not impersonate the external leg controller's
+        hardware emergency stop.
+        """
         self.rotation_recovery_pub.publish(Bool(data=False))
+        self.autonomy_motion_allowed = False
+        if self._autonomy_owner_active():
+            self._publish_autonomy_lease(True, motion_allowed=False)
         self.autonomy_stop_pub.publish(Bool(data=True))
 
-    def _publish_autonomy_lease(self, active: bool) -> None:
-        """Refresh or explicitly release this process's Nav2 ownership lease."""
-        self.autonomy_lease_pub.publish(Bool(data=bool(active)))
+    def _publish_autonomy_lease(
+        self, active: bool, motion_allowed: Optional[bool] = None
+    ) -> None:
+        """Publish one strictly ordered ownership/permission sample for this session."""
+        if motion_allowed is not None:
+            self.autonomy_motion_allowed = bool(motion_allowed)
+        if not active:
+            self.autonomy_motion_allowed = False
+        self.autonomy_lease_sequence += 1
+        message = AutonomyLease()
+        message.session_id = self.autonomy_session_id
+        message.sequence = self.autonomy_lease_sequence
+        message.active = bool(active)
+        message.motion_allowed = bool(active and self.autonomy_motion_allowed)
+        self.autonomy_lease_pub.publish(message)
 
     def _autonomy_owner_active(self) -> bool:
         """Keep the lease while a live/unknown Action may still own robot motion."""
@@ -2427,7 +2467,7 @@ class AutonomousMission(Node):
         a new command and cannot replay the mission's final velocity.
         """
         self._publish_immediate_stop()
-        self._publish_autonomy_lease(False)
+        self._publish_autonomy_lease(False, motion_allowed=False)
         self.autonomy_stop_pub.publish(Bool(data=False))
 
     def _map_callback(self, msg):
@@ -2562,18 +2602,24 @@ class AutonomousMission(Node):
         """
         expected_frame = str(self.params["observation_frame"])
         stamp = header_stamp_seconds(msg.header)
-        if (
-            not navigation_safety_is_well_formed(msg)
-            or not observation_header_is_well_formed(msg.header, expected_frame)
-        ):
+        # Header identity/order is the outer transport contract.  A malformed Header has
+        # no trustworthy ordering information: revoke the cached payload but do not move
+        # the watermark.  For a canonical newer Header, consume its stamp *before*
+        # validating payload fields.  Thus a NaN/contradictory sample revokes authority
+        # and a delayed older valid packet cannot resurrect the superseded observation.
+        if not observation_header_is_well_formed(msg.header, expected_frame):
             self.last_safety = None
             self.safety_received = 0.0
             return
         if self.last_safety_stamp is not None and stamp <= self.last_safety_stamp:
-            # A delayed DDS sample cannot overwrite newer geometry.  Keeping the newer
-            # valid sample is safer than converting harmless reordering into a false pulse.
+            # Once a stamp is consumed, every duplicate/regression is ignored regardless
+            # of payload validity; it can neither clear nor refresh the current snapshot.
             return
         self.last_safety_stamp = stamp
+        if not navigation_safety_is_well_formed(msg):
+            self.last_safety = None
+            self.safety_received = 0.0
+            return
         self.last_safety = msg
         self.safety_received = time.monotonic()
 
@@ -3251,27 +3297,36 @@ class AutonomousMission(Node):
         return planar_pose_from_transform(transform)
 
     def _guidance_callback(self, msg):
+        """接收严格递增的强类型引导，并让坏帧立即撤销旧交接证据。
+
+        本回调只保存观测；Safety/Guidance 的精确 Header、语义和地图空间一致性会在
+        ``_validated_traverse_snapshot`` 中作为同一个 Action 边界再次原子验证。
+        """
         stamp = header_stamp_seconds(msg.header)
-        if (
-            self.last_guidance_stamp is not None
-            and stamp is not None
-            and stamp <= self.last_guidance_stamp
-        ):
-            # Ignore delayed frames so alternating DDS delivery cannot roll identity back.
+        expected_frame = str(self.params["observation_frame"])
+        # Mirror the Safety transport boundary exactly.  A canonical newer timestamp is
+        # consumed even when the payload is invalid, preventing an older valid Guidance
+        # packet from regaining authority after a newer NaN/contradictory observation.
+        # A malformed Header still revokes the cache but cannot advance the watermark.
+        if not observation_header_is_well_formed(msg.header, expected_frame):
+            self.guidance = None
+            self.guidance_received = 0.0
+            self.obstacle_signature, self.obstacle_frames = None, 0
             return
         if (
-            not guidance_is_well_formed(msg)
-            or not observation_header_is_well_formed(
-                msg.header, str(self.params["observation_frame"])
-            )
+            self.last_guidance_stamp is not None
+            and stamp <= self.last_guidance_stamp
         ):
+            # Duplicate/regressing good or bad payloads cannot affect the latest epoch.
+            return
+        self.last_guidance_stamp = stamp
+        if not guidance_is_well_formed(msg):
             # 明确的坏帧必须立即撤销旧确认；不能仅等待 guidance_timeout，否则上一帧
             # 合法 READY 仍可能在传感器刚损坏时继续参与入口交接。
             self.guidance = None
             self.guidance_received = 0.0
             self.obstacle_signature, self.obstacle_frames = None, 0
             return
-        self.last_guidance_stamp = stamp
         self.guidance = msg
         self.guidance_received = time.monotonic()
         position = self._obstacle_position(msg)
@@ -3459,6 +3514,11 @@ class AutonomousMission(Node):
         ) <= float(self.params["obstacle_lock_radius"])
 
     def _fresh_target(self):
+        """返回当前可接近的障碍目标；任一新鲜性或身份守卫失败即返回 ``None``。
+
+        返回值只是 Nav2 接近候选，不是越障许可。真正发送 TraverseObstacle 前仍会用
+        最新 Safety/Guidance、观测时刻 TF 和入口包络重建不可变快照。
+        """
         msg = self.guidance
         if (
             msg is None
@@ -4009,13 +4069,12 @@ class AutonomousMission(Node):
             # never bypasses the live spatial/type/distance/alignment gates in
             # ``_nav_result``; it only preserves which obstacle those gates refer to.
             obstacle_id = resolved_id
-        # 只有 ActionClient 真正返回 Future 后才提交本地状态。server 未 ready 或同步
-        # 发送失败时，调用方据 False 保留补扫次数、恢复动作和回访冷却，不虚构已执行。
-        # This is the sole transition that reopens the mission's Nav2 velocity branch.
-        # cmd_vel_gate clears its cached Twist on the true->false stop edge, therefore only
-        # commands generated after this new goal request can reach the robot.
-        self._publish_autonomy_lease(True)
-        self.autonomy_stop_pub.publish(Bool(data=False))
+        # Claim the session and keep the speed latch closed throughout the request/response
+        # handshake.  An unrelated Nav2 goal may already exist when autonomy starts; opening
+        # here would let that old controller publish motion before this request is accepted
+        # and its result Future is observable.  Only _nav_goal_response may unlock after it
+        # has installed both the exact handle and a generation-bound result callback.
+        self._publish_immediate_stop()
         try:
             future = self.nav_client.send_goal_async(goal)
         except Exception as exc:
@@ -4052,6 +4111,11 @@ class AutonomousMission(Node):
         return True
 
     def _nav_goal_response(self, future, generation: Optional[int] = None):
+        """处理 Nav2 Goal 响应，并在安装句柄前执行代次和硬截止检查。
+
+        只有句柄已接受、result Future 已绑定且健康条件仍成立时才发布运动许可。晚到
+        accepted 句柄会尽力取消；无法确认远端所有权时转入锁存故障而非继续规划。
+        """
         token = self.nav_generation if generation is None else int(generation)
         if token != self.nav_generation:
             try:
@@ -4060,6 +4124,12 @@ class AutonomousMission(Node):
                 return
             self._cancel_late_action_handle(late_handle, "Nav2")
             return
+        # The 4 Hz timer is not a strict boundary: an over-deadline response callback can
+        # be queued just before the watchdog timer, or the executor itself can be delayed.
+        # Enforce the same monotonic deadline inside the callback before installing a
+        # handle.  A late accepted goal is cancelled best-effort and ownership remains
+        # fault-latched because the remote controller may already have started it.
+        response_started = self.nav_send_started
         self.nav_send_pending = False
         self.nav_send_started = 0.0
         deadline_now = time.monotonic()
@@ -4067,6 +4137,20 @@ class AutonomousMission(Node):
             self._enforce_hard_deadline(deadline_now)
         elif self._work_deadline_reached(deadline_now):
             self._begin_return_phase(deadline_now)
+        if timeout_reached(
+            response_started,
+            deadline_now,
+            float(self.params["action_response_timeout"]),
+        ):
+            try:
+                late_handle = future.result()
+            except Exception:
+                late_handle = None
+            self._cancel_late_action_handle(late_handle, "Nav2 timed-out")
+            self._enter_action_ownership_fault(
+                "Nav2 goal response arrived after its monotonic deadline"
+            )
+            return
         try:
             handle = future.result()
             response_error = ""
@@ -4164,8 +4248,32 @@ class AutonomousMission(Node):
             self._enter_action_ownership_fault(
                 "Nav2 accepted a goal whose result could not be monitored"
             )
+            return
+        # This is the only transition that reopens the mission's Nav2 speed branch.
+        # Check state again because an already-complete test/in-process Future may run its
+        # result callback synchronously from add_done_callback and release this handle.
+        if (
+            token == self.nav_generation
+            and self.nav_handle is handle
+            and not self.nav_cancel_pending
+            and not self.action_ownership_fault
+            and self.enabled
+            and not self.hard_deadline_active
+            and (
+                not self.return_phase_requested
+                or self._return_phase_nav_purpose(self.nav_purpose)
+            )
+            and self._navigation_health_is_stable(time.monotonic())
+        ):
+            self._publish_autonomy_lease(True, motion_allowed=True)
+            self.autonomy_stop_pub.publish(Bool(data=False))
 
     def _nav_result(self, future, generation: Optional[int] = None):
+        """收敛 Nav2 终态并按原目的选择完成、恢复、返航或越障交接路径。
+
+        Future 异常时不能证明远端已停车；晚于本地 Goal 截止才到达的终态即使可读，也按
+        任务期限拒绝继续推进。此函数还负责阻止旧代次结果污染新目标和任务账本。
+        """
         token = self.nav_generation if generation is None else int(generation)
         if token != self.nav_generation:
             return
@@ -4197,6 +4305,21 @@ class AutonomousMission(Node):
         cancel_reason = self.nav_cancel_reason
         obstacle_position = self.nav_obstacle_position
         approach_initial_id = self.nav_obstacle_id
+        nav_execution_timed_out = timeout_reached(
+            self.nav_started,
+            deadline_now,
+            float(self.params["goal_timeout"]),
+        )
+        if nav_execution_timed_out:
+            # The terminal callback may win an executor scheduling race against the 4 Hz
+            # timeout timer.  Ownership is now released, so no communication fault is
+            # needed, but a late SUCCEEDED/ABORTED result must not authorize an obstacle
+            # handoff that the monotonic execution deadline had already revoked.
+            status = GoalStatus.STATUS_CANCELED
+            cancel_reason = "timeout"
+            self.get_logger().warning(
+                "Ignoring Nav2 terminal status received after goal_timeout"
+            )
         self.nav_handle, self.nav_target, self.nav_cancel_pending = None, None, False
         self.nav_goal_pose = None
         self.nav_cancel_started = 0.0
@@ -4671,6 +4794,12 @@ class AutonomousMission(Node):
         ), ""
 
     def _start_traverse(self, guidance) -> bool:
+        """在 Nav2 已锁止后，从最新同步观测构造并提交一个 TraverseObstacle Goal。
+
+        ``guidance`` 仅表示排队身份；Goal 的 Header、入口几何和地形量全部重新取自同一
+        新鲜 Safety/Guidance 快照。返回 ``True`` 只表示请求已可监控地提交，不表示接管或
+        越障已经成功。
+        """
         # Defensive ownership boundary: every production caller should already be in
         # HANDOFF, but a direct/test/integration call must never start Traverse while
         # cached Nav2 velocity remains unlocked.
@@ -5006,6 +5135,11 @@ class AutonomousMission(Node):
     def _traverse_goal_response(
         self, future, generation: Optional[int] = None
     ):
+        """处理越障 Goal 响应，并建立反馈/结果监视或安全拒绝迟到句柄。
+
+        Action 响应超过期限、Future 异常或代次不匹配时绝不进入 TRAVERSING。accepted
+        句柄只有在结果回调成功绑定后才被视为可监控的运动所有者。
+        """
         token = self.traverse_generation if generation is None else int(generation)
         if token != self.traverse_generation:
             try:
@@ -5014,6 +5148,7 @@ class AutonomousMission(Node):
                 return
             self._cancel_late_action_handle(late_handle, "TraverseObstacle")
             return
+        response_started = self.traverse_send_started
         self.traverse_send_pending = False
         self.traverse_send_started = 0.0
         deadline_now = time.monotonic()
@@ -5021,6 +5156,22 @@ class AutonomousMission(Node):
             self._enforce_hard_deadline(deadline_now)
         elif self._work_deadline_reached(deadline_now):
             self._begin_return_phase(deadline_now)
+        if timeout_reached(
+            response_started,
+            deadline_now,
+            float(self.params["action_response_timeout"]),
+        ):
+            try:
+                late_handle = future.result()
+            except Exception:
+                late_handle = None
+            self._cancel_late_action_handle(
+                late_handle, "TraverseObstacle timed-out"
+            )
+            self._enter_action_ownership_fault(
+                "TraverseObstacle goal response arrived after its monotonic deadline"
+            )
+            return
         try:
             handle = future.result()
             response_error = ""
@@ -5066,6 +5217,9 @@ class AutonomousMission(Node):
             )
             return
         self.traverse_handle = handle
+        # Response latency has its own hard watchdog.  Start the controller execution
+        # budget only after acceptance, then enforce it again in the result callback.
+        self.traverse_started = time.monotonic()
         # The response handshake is bounded separately.  Do not subtract DDS/service
         # latency from the controller's full progress window, but also do not erase a
         # legitimate feedback sample that arrived before this callback was scheduled.
@@ -5129,6 +5283,11 @@ class AutonomousMission(Node):
         feedback_proved_stabilizing = self._traverse_feedback_proves_stabilizing()
         feedback_invalid = bool(self.traverse_feedback_invalid)
         cancel_reason = str(self.traverse_cancel_reason)
+        traversal_execution_timed_out = timeout_reached(
+            self.traverse_started,
+            deadline_now,
+            float(self.params["traversal_timeout"]),
+        )
         try:
             wrapped_status = int(getattr(wrapped, "status", 0))
             action_result = getattr(wrapped, "result", None)
@@ -5142,6 +5301,7 @@ class AutonomousMission(Node):
             and controller_succeeded
             and feedback_proved_stabilizing
             and not cancel_reason
+            and not traversal_execution_timed_out
         )
         controller_message = (
             str(getattr(action_result, "message", ""))
@@ -5227,6 +5387,7 @@ class AutonomousMission(Node):
             "controller result/ROS Action status/feedback did not prove success"
             + (" (invalid feedback protocol)" if feedback_invalid else "")
             + (f" (cancel={cancel_reason})" if cancel_reason else "")
+            + (" (traversal_timeout exceeded)" if traversal_execution_timed_out else "")
             + (f" ({controller_message})" if controller_message else ""),
         )
 
@@ -5385,6 +5546,12 @@ class AutonomousMission(Node):
             )
 
     def _tick(self):
+        """推进任务有限状态机，同时维护健康、截止期限和运动所有权不变量。
+
+        每个周期先处理 ROS 时钟回拨和安全心跳，再评估硬截止、Action watchdog、感知与
+        地图条件，最后最多提交一个状态转移或远端请求。HANDOFF/TRAVERSING/VERIFY 期间
+        Nav2 Twist 始终锁住；只有已接受且结果可监控的 Nav2 Goal 才获得运动许可。
+        """
         ros_now = self.get_clock().now()
         if ros_clock_moved_backward(ros_now, self.last_ros_clock_time):
             self._reset_observation_epoch(ros_now)
@@ -6124,6 +6291,7 @@ class AutonomousMission(Node):
 
 
 def main(args=None):
+    """运行独立任务进程，并在信号退出时有界取消已知的远端运动所有者。"""
     # 自主导航是独立进程，Ctrl-C/launch SIGTERM 必须先取消远端 Nav2 Action，不能让
     # rclpy 默认 handler 先关闭 context，否则任务节点退出后机器人仍可能执行旧目标。
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)

@@ -5,7 +5,6 @@
   <description>Unified launch package for quadruped autonomy.</description>
   <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>quadruped_description</exec_depend>

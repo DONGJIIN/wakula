@@ -1,5 +1,6 @@
 """ROS node-construction and watchdog tests for planning parameter contracts."""
 
+from copy import deepcopy
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,12 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
 from quadruped_interfaces.action import TraverseObstacle
-from quadruped_interfaces.msg import NavigationSafety, TerrainFeatures, TraversalGuidance
+from quadruped_interfaces.msg import (
+    AutonomyLease,
+    NavigationSafety,
+    TerrainFeatures,
+    TraversalGuidance,
+)
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -95,12 +101,24 @@ class FakeGoalHandle:
         return self.result_future
 
 
+class BrokenResultHandle(FakeGoalHandle):
+    """Accepted goal whose result ownership cannot be monitored."""
+
+    def get_result_async(self):
+        raise RuntimeError("result future unavailable")
+
+
 class RecordingPublisher:
     def __init__(self):
         self.values = []
 
     def publish(self, message):
-        self.values.append(bool(message.data))
+        value = (
+            message.data
+            if hasattr(message, "data")
+            else message.active
+        )
+        self.values.append(bool(value))
 
 
 class MessageRecordingPublisher:
@@ -111,6 +129,38 @@ class MessageRecordingPublisher:
 
     def publish(self, message):
         self.messages.append(message)
+
+
+class LeaseRecordingPublisher:
+    """Record the complete atomic autonomy contract instead of only ``active``."""
+
+    def __init__(self):
+        self.samples = []
+
+    def publish(self, message):
+        self.samples.append(
+            (
+                str(message.session_id),
+                int(message.sequence),
+                bool(message.active),
+                bool(message.motion_allowed),
+            )
+        )
+
+
+def autonomy_lease(
+    session_id: str,
+    sequence: int,
+    active: bool,
+    motion_allowed: bool = False,
+) -> AutonomyLease:
+    """Build one explicit lease sample for ownership-ordering tests."""
+    message = AutonomyLease()
+    message.session_id = session_id
+    message.sequence = sequence
+    message.active = active
+    message.motion_allowed = motion_allowed
+    return message
 
 
 def valid_wall_guidance():
@@ -421,11 +471,24 @@ def test_speed_gate_distinguishes_absent_released_and_expired_mission_lease(
         gate.publish_safe_command()
         assert output.messages[-1].linear.x == pytest.approx(0.2)
 
-        # A live mission explicitly acquires the branch and must refresh the lease.
-        gate.autonomy_lease_callback(Bool(data=True))
+        # Acquisition itself is stopped even when a stale first packet asks for motion.
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 1, True, motion_allowed=True)
+        )
         gate.cmd_callback(command)
         gate.publish_safe_command()
         assert gate.autonomy_lease_state == "ACTIVE"
+        assert not gate.autonomy_motion_allowed
+        assert output.messages[-1].linear.x == 0.0
+
+        # Only a later ordered permit from the exact owner can open the branch, and the
+        # permit edge clears the cached pre-acceptance Twist.
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 2, True, motion_allowed=True)
+        )
+        gate.cmd_callback(command)
+        gate.publish_safe_command()
+        assert gate.autonomy_motion_allowed
         assert output.messages[-1].linear.x == pytest.approx(0.2)
 
         # Process heartbeat interruption clears its old Twist and latches fail-closed.
@@ -438,14 +501,15 @@ def test_speed_gate_distinguishes_absent_released_and_expired_mission_lease(
         gate.cmd_callback(command)
         # A delayed packet or a newly restarted mission can only send true; neither proves
         # that the old Nav2 goal stopped, so EXPIRED must remain latched.
-        gate.autonomy_lease_callback(Bool(data=True))
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 3, True, motion_allowed=True)
+        )
         gate.publish_safe_command()
         assert gate.autonomy_lease_state == "EXPIRED"
         assert output.messages[-1].linear.x == 0.0
 
-        # Bool carries no session/generation.  A delayed false from the failed owner is
-        # no more trustworthy than delayed true and must not unlock EXPIRED.
-        gate.autonomy_lease_callback(Bool(data=False))
+        # Even a newer matching release cannot prove ownership after expiry.
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 4, False))
         gate.publish_safe_command()
         assert gate.autonomy_lease_state == "EXPIRED"
         assert output.messages[-1].linear.x == 0.0
@@ -469,27 +533,90 @@ def test_speed_gate_accepts_only_a_fresh_active_clean_lease_release(ros_context)
     command = Twist()
     command.linear.x = 0.3
     try:
-        gate.autonomy_lease_callback(Bool(data=True))
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 1, True))
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 2, True, motion_allowed=True)
+        )
         gate.cmd_callback(command)
-        gate.autonomy_lease_callback(Bool(data=False))
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 3, False))
         assert gate.autonomy_lease_state == "UNOWNED"
         # The ownership edge clears cached motion; a later ordinary Nav2 client must
         # produce a new Twist, preserving the existing clean Ctrl-C behavior.
         assert gate.last_cmd_time is None
 
-        gate.autonomy_lease_callback(Bool(data=True))
+        gate.autonomy_lease_callback(autonomy_lease("mission-b", 1, True))
         gate.last_autonomy_lease_time = (
             gate.get_clock().now() - Duration(seconds=1.0)
         )
-        gate.autonomy_lease_callback(Bool(data=False))
+        gate.autonomy_lease_callback(autonomy_lease("mission-b", 2, False))
         assert gate.autonomy_lease_state == "EXPIRED"
         assert gate.last_cmd_time is None
     finally:
         gate.destroy_node()
 
 
-def test_speed_gate_stop_unlock_cannot_replay_old_twist(ros_context):
-    """cancel/handoff true->false must wait for a post-unlock Nav2 command."""
+def test_speed_gate_lease_session_rejects_old_release_replay_and_bad_sequence(
+    ros_context,
+):
+    """One old process can neither release nor reacquire a newer process's branch."""
+    gate = NavigationSpeedGate(
+        parameter_overrides=[Parameter("require_emergency_scan", value=False)]
+    )
+    try:
+        # Empty identity and zero sequence are not acquisition heartbeats.
+        gate.autonomy_lease_callback(autonomy_lease("", 1, True))
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 0, True))
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 1, False, motion_allowed=True)
+        )
+        assert gate.autonomy_lease_state == "UNOWNED"
+
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 1, True, motion_allowed=True)
+        )
+        assert gate.autonomy_lease_state == "ACTIVE"
+        assert gate.autonomy_lease_session == "mission-a"
+        assert not gate.autonomy_motion_allowed
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 2, True, motion_allowed=True)
+        )
+        assert gate.autonomy_motion_allowed
+
+        # A duplicate/replayed same-session release and another session's newer release
+        # are both ignored.  Only the exact owner with a strictly newer sequence may end.
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 2, False))
+        gate.autonomy_lease_callback(autonomy_lease("old-process", 9, False))
+        assert gate.autonomy_lease_state == "ACTIVE"
+        assert gate.autonomy_lease_session == "mission-a"
+        assert gate.autonomy_motion_allowed
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 3, False))
+        assert gate.autonomy_lease_state == "UNOWNED"
+
+        # A delayed heartbeat older than the clean release remains below the retained
+        # high-water mark and cannot reacquire UNOWNED.
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 2, True, motion_allowed=True)
+        )
+        assert gate.autonomy_lease_state == "UNOWNED"
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-b", 1, True, motion_allowed=True)
+        )
+        assert gate.autonomy_lease_state == "ACTIVE"
+        assert gate.autonomy_lease_session == "mission-b"
+        assert not gate.autonomy_motion_allowed
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-b", 2, True, motion_allowed=True)
+        )
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 4, False))
+        assert gate.autonomy_lease_state == "ACTIVE"
+        assert gate.autonomy_lease_session == "mission-b"
+        assert gate.autonomy_motion_allowed
+    finally:
+        gate.destroy_node()
+
+
+def test_speed_gate_anonymous_stop_false_cannot_unlock_or_replay_old_twist(ros_context):
+    """Only an ordered permit may clear the legacy stop and cached command."""
     gate = NavigationSpeedGate(
         parameter_overrides=[Parameter("require_emergency_scan", value=False)]
     )
@@ -505,11 +632,21 @@ def test_speed_gate_stop_unlock_cannot_replay_old_twist(ros_context):
         assert output.messages[-1].linear.x == pytest.approx(0.3)
 
         gate.autonomy_stop_callback(Bool(data=True))
+        # A delayed false from any old process is anonymous and must not clear the veto.
         gate.autonomy_stop_callback(Bool(data=False))
+        gate.cmd_callback(command)
         gate.publish_safe_command()
         assert output.messages[-1].linear.x == 0.0
-        assert gate.last_cmd_time is None
+        assert gate.external_stop
 
+        # First session contact acquires stopped.  The second same-session message is the
+        # authenticated permit and clears both the legacy veto and cached pre-permit Twist.
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 1, True))
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 2, True, motion_allowed=True)
+        )
+        assert not gate.external_stop
+        assert gate.last_cmd_time is None
         gate.cmd_callback(command)
         gate.publish_safe_command()
         assert output.messages[-1].linear.x == pytest.approx(0.3)
@@ -527,7 +664,10 @@ def test_speed_gate_clock_rewind_clears_old_epoch_authority(ros_context):
     command = Twist()
     command.linear.x = 0.4
     try:
-        gate.autonomy_lease_callback(Bool(data=True))
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 1, True))
+        gate.autonomy_lease_callback(
+            autonomy_lease("mission-a", 2, True, motion_allowed=True)
+        )
         gate.limit_callback(Float32(data=1.0))
         gate.health_callback(Bool(data=True))
         gate.cmd_callback(command)
@@ -542,7 +682,7 @@ def test_speed_gate_clock_rewind_clears_old_epoch_authority(ros_context):
         gate.last_clock_time = gate.get_clock().now() + Duration(seconds=5.0)
         gate.publish_safe_command()
         assert gate.autonomy_lease_state == "EXPIRED"
-        gate.autonomy_lease_callback(Bool(data=False))
+        gate.autonomy_lease_callback(autonomy_lease("mission-a", 3, False))
         assert gate.autonomy_lease_state == "EXPIRED"
     finally:
         gate.destroy_node()
@@ -684,6 +824,111 @@ def test_out_of_order_typed_observations_cannot_mix_obstacle_identity(ros_contex
         mission._navigation_safety_callback(older_safety)
         assert mission.last_safety is newest_safety
         assert mission.last_safety.semantic_id == "high_wall"
+    finally:
+        mission.destroy_node()
+
+
+def test_newer_bad_payload_consumes_both_header_watermarks_and_blocks_older_pair(
+    ros_context,
+):
+    """A superseded valid pair cannot regain authority after a newer malformed sample."""
+    mission = AutonomousMission()
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    try:
+        guidance_10 = valid_wall_guidance()
+        safety_10 = valid_wall_safety()
+        guidance_10.header.stamp.sec = 10
+        safety_10.header.stamp.sec = 10
+        mission._guidance_callback(guidance_10)
+        mission._navigation_safety_callback(safety_10)
+
+        guidance_bad_12 = deepcopy(guidance_10)
+        safety_bad_12 = deepcopy(safety_10)
+        guidance_bad_12.header.stamp.sec = 12
+        safety_bad_12.header.stamp.sec = 12
+        guidance_bad_12.distance = float("nan")
+        safety_bad_12.obstacle_height = float("nan")
+        mission._guidance_callback(guidance_bad_12)
+        mission._navigation_safety_callback(safety_bad_12)
+        assert mission.last_guidance_stamp == 12.0
+        assert mission.last_safety_stamp == 12.0
+        assert mission.guidance is None
+        assert mission.last_safety is None
+
+        # A delayed valid pair and a repaired duplicate of the consumed bad stamp are both
+        # stale transport samples.  Neither may refresh receive time or restore authority.
+        for stamp in (11, 12):
+            delayed_guidance = deepcopy(guidance_10)
+            delayed_safety = deepcopy(safety_10)
+            delayed_guidance.header.stamp.sec = stamp
+            delayed_safety.header.stamp.sec = stamp
+            mission._guidance_callback(delayed_guidance)
+            mission._navigation_safety_callback(delayed_safety)
+        assert mission.last_guidance_stamp == 12.0
+        assert mission.last_safety_stamp == 12.0
+        assert mission.guidance is None
+        assert mission.last_safety is None
+
+        guidance_13 = deepcopy(guidance_10)
+        safety_13 = deepcopy(safety_10)
+        guidance_13.header.stamp.sec = 13
+        safety_13.header.stamp.sec = 13
+        mission._guidance_callback(guidance_13)
+        mission._navigation_safety_callback(safety_13)
+        assert mission.guidance is guidance_13
+        assert mission.last_safety is safety_13
+        assert mission._latest_navigation_safety(
+            time.monotonic(), mission.guidance
+        ) is safety_13
+    finally:
+        mission.destroy_node()
+
+
+def test_bad_observation_header_revokes_cache_without_advancing_watermark(
+    ros_context,
+):
+    """An unorderable Header fails closed but cannot poison the source watermark."""
+    mission = AutonomousMission()
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    try:
+        guidance_20 = valid_wall_guidance()
+        safety_20 = valid_wall_safety()
+        guidance_20.header.stamp.sec = 20
+        safety_20.header.stamp.sec = 20
+        mission._guidance_callback(guidance_20)
+        mission._navigation_safety_callback(safety_20)
+
+        bad_guidance_header = deepcopy(guidance_20)
+        bad_safety_header = deepcopy(safety_20)
+        bad_guidance_header.header.frame_id = "/base_link"
+        bad_safety_header.header.stamp.sec = 0
+        bad_safety_header.header.stamp.nanosec = 0
+        mission._guidance_callback(bad_guidance_header)
+        mission._navigation_safety_callback(bad_safety_header)
+        assert mission.guidance is None
+        assert mission.last_safety is None
+        assert mission.last_guidance_stamp == 20.0
+        assert mission.last_safety_stamp == 20.0
+
+        # Since the invalid Header carried no ordering authority, the next genuinely newer
+        # canonical pair recovers normally; an older pair remains below the prior watermark.
+        guidance_19 = deepcopy(guidance_20)
+        safety_19 = deepcopy(safety_20)
+        guidance_19.header.stamp.sec = 19
+        safety_19.header.stamp.sec = 19
+        mission._guidance_callback(guidance_19)
+        mission._navigation_safety_callback(safety_19)
+        assert mission.guidance is None
+        assert mission.last_safety is None
+
+        guidance_21 = deepcopy(guidance_20)
+        safety_21 = deepcopy(safety_20)
+        guidance_21.header.stamp.sec = 21
+        safety_21.header.stamp.sec = 21
+        mission._guidance_callback(guidance_21)
+        mission._navigation_safety_callback(safety_21)
+        assert mission.guidance is guidance_21
+        assert mission.last_safety is safety_21
     finally:
         mission.destroy_node()
 
@@ -847,6 +1092,8 @@ def test_nav_send_watchdog_locks_speed_and_late_response_cannot_restore_goal(
     pending = PendingFuture()
     client = FakeActionClient(False, pending)
     mission.nav_client = client
+    lease = LeaseRecordingPublisher()
+    mission.autonomy_lease_pub = lease
     try:
         pose = mission._make_pose(1.0, 0.0, 0.0)
         generation = mission.nav_generation
@@ -869,12 +1116,62 @@ def test_nav_send_watchdog_locks_speed_and_late_response_cannot_restore_goal(
         assert not mission.nav_send_pending
         assert mission.nav_generation > old_generation
         assert mission.completed_semantics == []
+        assert lease.samples
+        assert all(not motion_allowed for *_prefix, motion_allowed in lease.samples)
 
         late_handle = FakeGoalHandle()
         pending.complete(late_handle)
         assert late_handle.cancel_calls == 1
         assert mission.nav_handle is None
         assert mission.action_ownership_fault
+    finally:
+        mission.destroy_node()
+
+
+@pytest.mark.parametrize("action_kind", ["nav", "traverse"])
+def test_goal_response_callback_itself_rejects_response_after_watchdog_deadline(
+    ros_context,
+    action_kind,
+):
+    """A response queued before the 4 Hz timer cannot bypass its monotonic deadline."""
+    mission = AutonomousMission()
+    mission.enabled = True
+    install_stable_navigation_health(mission)
+    pending = PendingFuture()
+    client = FakeActionClient(True, pending)
+    lease = LeaseRecordingPublisher()
+    mission.autonomy_lease_pub = lease
+    try:
+        if action_kind == "nav":
+            mission.nav_client = client
+            assert mission._send_nav_goal(
+                mission._make_pose(1.0, 0.0, 0.0), "frontier"
+            )
+            mission.nav_send_started = (
+                time.monotonic()
+                - float(mission.params["action_response_timeout"])
+                - 0.1
+            )
+        else:
+            mission.traverse_client = client
+            guidance = install_fresh_wall_handoff(mission)
+            assert mission._start_traverse(guidance)
+            mission.traverse_send_started = (
+                time.monotonic()
+                - float(mission.params["action_response_timeout"])
+                - 0.1
+            )
+
+        late_handle = FakeGoalHandle()
+        pending.complete(late_handle)
+        assert late_handle.cancel_calls == 1
+        assert mission.action_ownership_fault
+        assert mission.state == "ACTION_COMMUNICATION_FAULT"
+        assert mission.nav_handle is None
+        assert mission.traverse_handle is None
+        assert mission.completed_semantics == []
+        assert lease.samples
+        assert all(not motion_allowed for *_prefix, motion_allowed in lease.samples)
     finally:
         mission.destroy_node()
 
@@ -1035,6 +1332,8 @@ def test_cancel_locks_autonomous_speed_until_matching_result(ros_context):
     install_stable_navigation_health(mission)
     publisher = RecordingPublisher()
     mission.autonomy_stop_pub = publisher
+    lease = LeaseRecordingPublisher()
+    mission.autonomy_lease_pub = lease
     mission.nav_generation = 4
     mission.nav_handle = FakeGoalHandle()
     mission.enabled = True
@@ -1052,11 +1351,18 @@ def test_cancel_locks_autonomous_speed_until_matching_result(ros_context):
         assert not mission.nav_cancel_pending
 
         mission.state = "EXPLORING"
-        mission.nav_client = FakeActionClient(True)
+        nav_client = FakeActionClient(True)
+        mission.nav_client = nav_client
         assert mission._send_nav_goal(
             mission._make_pose(1.0, 0.0, 0.0), "frontier"
         )
+        # Request/response is still stopped; only an accepted handle with an installed
+        # result callback opens the branch.
+        assert publisher.values[-1] is True
+        assert lease.samples[-1][3] is False
+        nav_client.future.complete(FakeGoalHandle())
         assert publisher.values[-1] is False
+        assert lease.samples[-1][3] is True
     finally:
         mission.destroy_node()
 
@@ -1095,15 +1401,20 @@ def test_handoff_traversal_and_verification_never_unlock_nav2(ros_context):
 def test_idle_or_restarted_mission_cannot_clear_an_expired_owner(ros_context):
     """Only the verified clean-release method may publish lease=false."""
     mission = AutonomousMission()
-    lease = RecordingPublisher()
+    lease = LeaseRecordingPublisher()
     mission.autonomy_lease_pub = lease
     mission.enabled = False
     mission.action_ownership_fault = False
     try:
         mission._tick()
-        assert lease.values == []
+        assert lease.samples == []
         mission._release_autonomy_owner()
-        assert lease.values == [False]
+        assert len(lease.samples) == 1
+        session_id, sequence, active, motion_allowed = lease.samples[0]
+        assert session_id == mission.autonomy_session_id
+        assert sequence > 0
+        assert not active
+        assert not motion_allowed
     finally:
         mission.destroy_node()
 
@@ -1124,6 +1435,38 @@ def test_traverse_send_exception_is_caught_and_cannot_mark_obstacle_complete(
         assert mission.pending_traverse is None
     finally:
         mission.destroy_node()
+
+
+def test_nav_send_or_result_monitor_failure_never_publishes_motion_permit(ros_context):
+    """Unknown delivery and an unobservable accepted handle both remain stopped."""
+    for failure_mode in ("send", "result_monitor"):
+        mission = AutonomousMission()
+        mission.enabled = True
+        install_stable_navigation_health(mission)
+        lease = LeaseRecordingPublisher()
+        mission.autonomy_lease_pub = lease
+        try:
+            if failure_mode == "send":
+                mission.nav_client = FakeActionClient(
+                    True, exception=RuntimeError("DDS writer failed")
+                )
+                assert not mission._send_nav_goal(
+                    mission._make_pose(1.0, 0.0, 0.0), "frontier"
+                )
+            else:
+                client = FakeActionClient(True)
+                mission.nav_client = client
+                assert mission._send_nav_goal(
+                    mission._make_pose(1.0, 0.0, 0.0), "frontier"
+                )
+                client.future.complete(BrokenResultHandle())
+            assert mission.action_ownership_fault
+            assert lease.samples
+            assert all(
+                not motion_allowed for *_prefix, motion_allowed in lease.samples
+            )
+        finally:
+            mission.destroy_node()
 
 
 def test_traverse_final_gate_rejects_stale_or_mismatched_live_inputs(ros_context):
@@ -1612,6 +1955,71 @@ def test_valid_terminal_feedback_allows_independent_crossing_verification(ros_co
         assert mission.traversal_verification.semantic_id == "high_wall"
         assert mission.completed_semantics == []
         assert mission.state == "VERIFYING_TRAVERSAL_RESULT"
+    finally:
+        mission.destroy_node()
+
+
+def test_traverse_result_callback_rejects_success_after_execution_timeout(
+    ros_context,
+):
+    """A late terminal result cannot win a scheduling race against the 4 Hz timer."""
+    mission = AutonomousMission()
+    client = FakeActionClient(True)
+    mission.traverse_client = client
+    try:
+        guidance = install_fresh_wall_handoff(mission)
+        assert mission._start_traverse(guidance)
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_PREPARING, 0.1)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_TRAVERSING, 0.5)
+        )
+        client.publish_feedback(
+            _traverse_feedback(TraverseObstacle.Feedback.STATE_STABILIZING, 1.0)
+        )
+        mission.traverse_started = (
+            time.monotonic()
+            - float(mission.params["traversal_timeout"])
+            - 0.1
+        )
+        handle.result_future.complete(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(success=True, message="late stable landing"),
+        ))
+        assert mission.traversal_verification is None
+        assert mission.completed_semantics == []
+        assert mission.state == "RECOVERY"
+    finally:
+        mission.destroy_node()
+
+
+def test_nav_result_callback_rejects_success_after_execution_timeout(ros_context):
+    """A Nav2 success received after goal_timeout is handled as a failed target."""
+    mission = AutonomousMission()
+    mission.enabled = True
+    install_stable_navigation_health(mission)
+    client = FakeActionClient(True)
+    mission.nav_client = client
+    try:
+        assert mission._send_nav_goal(
+            mission._make_pose(1.0, 0.0, 0.0), "frontier"
+        )
+        handle = FakeGoalHandle()
+        client.future.complete(handle)
+        mission.nav_started = (
+            time.monotonic() - float(mission.params["goal_timeout"]) - 0.1
+        )
+        handle.result_future.complete(
+            SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED)
+        )
+        assert mission.nav_handle is None
+        assert mission.nav_target is None
+        assert (1.0, 0.0) in mission.blocked_frontiers
+        assert mission.pending_traverse is None
+        assert mission.completed_semantics == []
     finally:
         mission.destroy_node()
 

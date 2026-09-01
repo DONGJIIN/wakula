@@ -58,6 +58,14 @@ DEFAULT_ODOMETRY_HISTORY_DURATION = 2.0
 DEFAULT_ODOMETRY_HISTORY_MAX_SAMPLES = 256
 DEFAULT_ODOMETRY_SNAPSHOT_MAX_GAP = 0.15
 
+# A finish pose is a synchronization contract, not merely a TF cache lookup.  Once the
+# simulator returns the model home, the localization transform must advance beyond both
+# the pose-service commit and the first home odometry sample, and must still be current.
+# One second matches the navigation health timeout while leaving several SLAM update
+# periods at the shipped rates.  This remains local to the Gazebo-only benchmark helper.
+BENCHMARK_FINISH_MAX_TF_AGE = 1.0
+BENCHMARK_FINISH_FUTURE_TOLERANCE = 0.10
+
 # This is the simulation controller's explicit capability table, not a perception
 # compatibility table.  The mission may preserve a semantic name while its near-field
 # classifier briefly reports a coarser type, but ``action_type_for_semantic`` must
@@ -247,6 +255,22 @@ def next_benchmark_target(completed_ids):
         if obstacle_id not in completed:
             return obstacle_id
     return "__home__"
+
+
+def benchmark_ledger_transition(previous_ids, completed_ids):
+    """Return ``(changed, reset, next_target)`` for one mission-ledger sample.
+
+    The Gazebo backend is intentionally allowed to outlive the independent autonomous
+    launch.  A newly started mission first publishes an empty transient-local ledger;
+    that empty set is therefore a real session reset, not a message to discard.  The
+    simulator still never invents completion: it only chooses the next observation pose
+    from the ledger supplied by the core mission.
+    """
+    previous = frozenset(str(item) for item in previous_ids)
+    completed = frozenset(str(item) for item in completed_ids)
+    if completed == previous:
+        return False, False, ""
+    return True, not previous.issubset(completed), next_benchmark_target(completed)
 
 
 def yaw_from_odometry(msg: Odometry) -> float:
@@ -909,16 +933,23 @@ class SimTraverseObstacle(Node):
         )
         self.odom_history = deque(maxlen=history_capacity)
         self.latest_odom = None
+        self.odom_sample_sequence = 0
+        # Action execution, odometry, services and stop callbacks share a re-entrant
+        # group.  ENTRY_PREPARING blocks briefly in its closed-loop execute callback;
+        # re-entrancy lets another executor thread deliver the /odom and Action cancel
+        # callbacks it needs.  ``stop_state_lock`` still serializes goal admission and
+        # the irreversible SetEntityPose safety boundary.
+        self.sim_callback_group = ReentrantCallbackGroup()
         self.create_subscription(
             Odometry,
             str(self.get_parameter("odometry_topic").value),
             self._odom_callback,
             10,
+            callback_group=self.sim_callback_group,
         )
         # Timer -> asynchronous SetEntityPose must be re-entrant: with the default
         # mutually-exclusive group the timer blocks its own service response until
         # the 0.30 s wall-clock deadline, so benchmark staging silently retries forever.
-        self.sim_callback_group = ReentrantCallbackGroup()
         pose_service = gazebo_pose_service(
             self.get_parameter("world_name").value,
             self.get_parameter("pose_service").value,
@@ -981,6 +1012,11 @@ class SimTraverseObstacle(Node):
             PoseStamped, "/autonomy/finish_pose", finish_qos
         )
         self.benchmark_finish_pending_after = 0.0
+        self.benchmark_finish_min_odom_sequence = 0
+        self.benchmark_finish_min_tf_stamp = None
+        self.benchmark_finish_commit_stamp = None
+        self.benchmark_finish_home_odom_stamp = None
+        self.benchmark_finish_expected_pose = None
         inventory_qos = QoSProfile(depth=1)
         inventory_qos.reliability = ReliabilityPolicy.RELIABLE
         inventory_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -1012,6 +1048,7 @@ class SimTraverseObstacle(Node):
             execute_callback=self.execute,
             goal_callback=self.goal_callback,
             cancel_callback=lambda _: CancelResponse.ACCEPT,
+            callback_group=self.sim_callback_group,
         )
         self.get_logger().warning(
             "SIMULATION ONLY TraverseObstacle adapter active; no leg dynamics"
@@ -1052,6 +1089,7 @@ class SimTraverseObstacle(Node):
             ):
                 self.odom_history.popleft()
             self.latest_odom = msg
+            self.odom_sample_sequence += 1
 
     def _completed_obstacles_callback(self, msg):
         """Queue a new observation station only after the core ledger changes.
@@ -1067,19 +1105,30 @@ class SimTraverseObstacle(Node):
             completed = frozenset(str(item) for item in payload.get("ids", []))
         except (json.JSONDecodeError, AttributeError, TypeError):
             return
-        if not completed or completed == self.last_completed_ids:
-            return
-        if not self.last_completed_ids.issubset(completed):
-            # Mission restart or ledger reset: update the baseline but do not move a
-            # model on stale transient-local data from the previous run.
-            self.last_completed_ids = completed
+        changed, reset, next_target = benchmark_ledger_transition(
+            self.last_completed_ids, completed
+        )
+        if not changed:
             return
         self.last_completed_ids = completed
         self.active_benchmark_target = ""
-        self.pending_benchmark_target = next_benchmark_target(completed)
+        self.pending_benchmark_target = next_target
         self.pending_benchmark_deadline = time.monotonic() + max(
             0.0, float(self.get_parameter("benchmark_staging_delay").value)
         )
+        if reset:
+            # The independent mission launch has begun a new session.  Cancel every
+            # finish-pose latch from the old run and actively restage the first pending
+            # observation instead of skipping one completion after restart.
+            self.benchmark_finish_pending_after = 0.0
+            self.benchmark_finish_min_odom_sequence = 0
+            self.benchmark_finish_min_tf_stamp = None
+            self.benchmark_finish_commit_stamp = None
+            self.benchmark_finish_home_odom_stamp = None
+            self.benchmark_finish_expected_pose = None
+            self.get_logger().warning(
+                "SIMULATION ONLY benchmark ledger reset; starting a new session"
+            )
 
     def _benchmark_staging_tick(self):
         """Move to the next sensor observation pose without claiming task success."""
@@ -1116,10 +1165,22 @@ class SimTraverseObstacle(Node):
             self.pending_benchmark_target = target
             self.pending_benchmark_deadline = time.monotonic() + 0.50
             return
+        precommit_odom_sequence = 0
+        precommit_tf_stamp = None
+        if target == "__home__":
+            with self.odom_history_lock:
+                precommit_odom_sequence = self.odom_sample_sequence
+            precommit_tf_stamp = self._latest_map_base_stamp()
         if not self._set_model_pose(*pose):
             self.pending_benchmark_target = target
             self.pending_benchmark_deadline = time.monotonic() + 0.50
             return
+        # The service response is the earliest point at which the home pose commit is
+        # known to have succeeded.  Even when no TF was available before the request,
+        # this ROS-clock sample provides a non-optional lower bound for later TF data.
+        # A transform already cached before/while the request was in flight must not be
+        # published as the map coordinate of the newly committed home pose.
+        commit_ros_stamp = self.get_clock().now().nanoseconds * 1.0e-9
         self._stop()
         self.active_benchmark_target = target if target != "__home__" else ""
         self.benchmark_hint_ready_at = time.monotonic() + max(
@@ -1128,25 +1189,101 @@ class SimTraverseObstacle(Node):
         )
         if target == "__home__":
             # Give odometry and SLAM one settling interval to observe SetEntityPose;
-            # TF lookup below retries without blocking if the transform is absent.
+            # publication below additionally requires both streams to advance beyond
+            # their pre-commit samples, so a cached pre-home TF cannot become finish.
             self.benchmark_finish_pending_after = self.benchmark_hint_ready_at
+            self.benchmark_finish_min_odom_sequence = precommit_odom_sequence
+            self.benchmark_finish_min_tf_stamp = precommit_tf_stamp
+            self.benchmark_finish_commit_stamp = (
+                commit_ros_stamp
+                if isfinite(commit_ros_stamp) and commit_ros_stamp > 0.0
+                else None
+            )
+            self.benchmark_finish_home_odom_stamp = None
+            self.benchmark_finish_expected_pose = pose
         self.get_logger().warning(
             f"SIMULATION ONLY benchmark staged at {target}: "
             f"({pose[0]:.2f}, {pose[1]:.2f}, {pose[2]:.2f})"
         )
 
-    def _publish_benchmark_finish_if_ready(self):
-        """Bind physical Gazebo home to its post-teleport map coordinate once."""
-        if (
-            self.benchmark_finish_pending_after <= 0.0
-            or time.monotonic() < self.benchmark_finish_pending_after
-        ):
-            return
+    def _latest_map_base_stamp(self):
+        """Return the newest valid map→base_link TF stamp, or ``None``."""
         try:
             transform = self.tf_buffer.lookup_transform(
                 "map", "base_link", RosTime()
             )
         except TransformException:
+            return None
+        if header_stamp_error(transform.header):
+            return None
+        stamp = _header_stamp_seconds(transform.header)
+        return stamp if isfinite(stamp) and stamp > 0.0 else None
+
+    def _publish_benchmark_finish_if_ready(self):
+        """Bind Gazebo home to a map pose only after post-commit odom and TF arrive."""
+        if (
+            self.benchmark_finish_pending_after <= 0.0
+            or time.monotonic() < self.benchmark_finish_pending_after
+        ):
+            return
+        expected = self.benchmark_finish_expected_pose
+        if expected is None:
+            return
+        with self.odom_history_lock:
+            odom_sequence = self.odom_sample_sequence
+            odom = self.latest_odom
+        # Sequence, rather than only Header seconds, proves this callback ran after the
+        # SetEntityPose response even if Gazebo publishes two samples at one sim tick.
+        if odom is None or odom_sequence <= self.benchmark_finish_min_odom_sequence:
+            return
+        odom_sample = planar_pose_sample_from_odometry(odom)
+        if odom_sample is None:
+            return
+        if (
+            hypot(odom_sample.x - expected[0], odom_sample.y - expected[1]) > 0.25
+            or abs(normalize_angle(odom_sample.yaw - expected[2])) > 0.35
+        ):
+            return
+        # Latch the first validated post-commit home odometry stamp.  Updating this on
+        # every timer tick could keep moving the lower bound ahead of a slower SLAM TF
+        # forever; one immutable sample proves the odometry stream observed the commit.
+        if self.benchmark_finish_home_odom_stamp is None:
+            self.benchmark_finish_home_odom_stamp = float(odom_sample.stamp)
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "map", "base_link", RosTime()
+            )
+        except TransformException:
+            return
+        if header_stamp_error(transform.header):
+            return
+        transform_stamp = _header_stamp_seconds(transform.header)
+        minimum_tf_candidates = tuple(
+            stamp
+            for stamp in (
+                self.benchmark_finish_min_tf_stamp,
+                self.benchmark_finish_commit_stamp,
+                self.benchmark_finish_home_odom_stamp,
+            )
+            if stamp is not None and isfinite(stamp) and stamp > 0.0
+        )
+        minimum_tf_stamp = (
+            max(minimum_tf_candidates) if minimum_tf_candidates else None
+        )
+        now_seconds = self.get_clock().now().nanoseconds * 1.0e-9
+        tf_age = now_seconds - transform_stamp
+        if (
+            not isfinite(transform_stamp)
+            or transform_stamp <= 0.0
+            or minimum_tf_stamp is None
+            or transform_stamp <= minimum_tf_stamp + 1.0e-9
+            or not isfinite(now_seconds)
+            or not (
+                -BENCHMARK_FINISH_FUTURE_TOLERANCE
+                <= tf_age
+                <= BENCHMARK_FINISH_MAX_TF_AGE
+            )
+        ):
             return
         translation = transform.transform.translation
         rotation = transform.transform.rotation
@@ -1159,6 +1296,11 @@ class SimTraverseObstacle(Node):
         finish.pose.orientation = rotation
         self.benchmark_finish_pub.publish(finish)
         self.benchmark_finish_pending_after = 0.0
+        self.benchmark_finish_min_odom_sequence = 0
+        self.benchmark_finish_min_tf_stamp = None
+        self.benchmark_finish_commit_stamp = None
+        self.benchmark_finish_home_odom_stamp = None
+        self.benchmark_finish_expected_pose = None
         self.get_logger().warning(
             "SIMULATION ONLY finish contract synchronized after staging home"
         )

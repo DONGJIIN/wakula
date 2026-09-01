@@ -115,6 +115,9 @@ vision_obstacle_detector:
     # 元数据合法但 cv_bridge 无法转换实际像素时隔离该来源。备用相机可立即接管；只有
     # 一个相机时在冷却结束后自动重试。调小可加快驱动恢复，过小会让坏编码高频反复抢占。
     source_failure_cooldown: 2.0
+    # 与下游 NavigationSafety 的未来时间戳合同一致；超过 100 ms 应修复相机时钟同步，
+    # 不能靠放宽容差让未来帧持续占用来源锁。
+    source_future_tolerance: 0.10
     # ---------- 场地颜色标定 ----------
     # OpenCV HSV 范围；必须针对实际相机、曝光和比赛场馆用 rosbag 重新标定。
     orange_hsv_lower: [5, 80, 70]

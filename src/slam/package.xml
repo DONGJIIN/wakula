@@ -6,8 +6,6 @@
   <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
@@ -28,6 +26,8 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>quadruped_bringup</exec_depend>
+  <!-- slam.launch.py resolves the perception package's installed config files directly. -->
+  <exec_depend>quadruped_perception</exec_depend>
   <exec_depend>quadruped_planning</exec_depend>
   <!-- Gazebo 不是核心/真机运行依赖。仿真 TraverseObstacle 后端只由
        quadruped_gazebo 自己的 launch 启动；本包永远只运行标准 Action 客户端。 -->

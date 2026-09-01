@@ -76,6 +76,10 @@ class Nav2ReadinessMonitor(Node):
         self.declare_parameter("slam_lifecycle_node", "/slam_toolbox")
         self.declare_parameter("slam_recovery_period", 2.0)
         self.declare_parameter("slam_recovery_startup_grace", 4.0)
+        # ROS service futures have no built-in response deadline.  A lifecycle manager
+        # which disappears after discovery must therefore be bounded here, otherwise
+        # one never-completing future can hold Nav2 inactive until the process restarts.
+        self.declare_parameter("service_request_timeout", 2.0)
         # Readiness owns lifecycle activation, so invalid topics/frames must stop here rather
         # than leave Nav2 waiting forever with a misleading "missing input" message.
         validate_nav2_readiness_parameters(
@@ -97,6 +101,9 @@ class Nav2ReadinessMonitor(Node):
         )
         self.slam_recovery_startup_grace = max(
             0.0, float(self.get_parameter("slam_recovery_startup_grace").value)
+        )
+        self.service_request_timeout = max(
+            0.1, float(self.get_parameter("service_request_timeout").value)
         )
         self.sensor_timeout = max(
             0.1, float(self.get_parameter("sensor_timeout").value)
@@ -136,9 +143,17 @@ class Nav2ReadinessMonitor(Node):
         self.odom_jump = False
         self.last_scan_time = None
         self.last_odom_time = None
+        self.last_scan_source_stamp = None
+        self.last_odom_source_stamp = None
         self.startup_requested = False
         self.startup_complete = False
+        self.startup_request_generation = 0
+        self.startup_request_deadline = 0.0
+        self.startup_request_future = None
         self.slam_recovery_pending = False
+        self.slam_recovery_generation = 0
+        self.slam_recovery_deadline = 0.0
+        self.slam_recovery_future = None
         self.last_slam_recovery_time = None
         # 启动宽限必须使用墙钟。仿真 /clock 可能在节点刚创建时已经运行数分钟，若用
         # ROS 时间会把启动年龄误算成数分钟并立刻与 launch 自带生命周期事件竞争。
@@ -182,6 +197,10 @@ class Nav2ReadinessMonitor(Node):
         now = self.get_clock().now()
         self.scan_received = True
         self.last_scan_time = now
+        self.last_scan_source_stamp = (
+            int(msg.header.stamp.sec),
+            int(msg.header.stamp.nanosec),
+        )
         self.scan_valid = (
             source_stamp_is_current(
                 msg.header.stamp.sec,
@@ -206,6 +225,10 @@ class Nav2ReadinessMonitor(Node):
         now = self.get_clock().now()
         self.odom_received = True
         self.last_odom_time = now
+        self.last_odom_source_stamp = (
+            int(msg.header.stamp.sec),
+            int(msg.header.stamp.nanosec),
+        )
         self.odom_valid = source_stamp_is_current(
             msg.header.stamp.sec,
             msg.header.stamp.nanosec,
@@ -226,23 +249,136 @@ class Nav2ReadinessMonitor(Node):
             odometry_yaw(msg),
         )
 
-    def _sensor_is_fresh(self, stamp) -> bool:
-        """按节点 ROS 时钟判断输入是否仍在启动允许窗口内。"""
-        if stamp is None:
+    def _sensor_is_fresh(self, receipt_stamp, source_stamp=None) -> bool:
+        """按 ROS 时钟同时检查 DDS 心跳和消息 Header 的当前年龄。
+
+        Header 在回调时有效不代表半秒后的生命周期检查仍有效。每个周期重算源年龄可
+        拒绝晚到或重复的缓存帧；接收时刻则独立拒绝完全断流的驱动。
+        """
+        if receipt_stamp is None:
             return False
-        age = (self.get_clock().now() - stamp).nanoseconds / 1e9
-        return 0.0 <= age <= self.sensor_timeout
+        now = self.get_clock().now()
+        age = (now - receipt_stamp).nanoseconds / 1e9
+        if not 0.0 <= age <= self.sensor_timeout:
+            return False
+        if source_stamp is None:
+            return True
+        return source_stamp_is_current(
+            source_stamp[0],
+            source_stamp[1],
+            now.nanoseconds * 1e-9,
+            self.sensor_timeout,
+            self.future_stamp_tolerance,
+        )
+
+    @staticmethod
+    def _cancel_pending_future(future) -> None:
+        """Best-effort cancel a client future without depending on RMW behavior."""
+        if future is None:
+            return
+        try:
+            if future.done():
+                return
+            future.cancel()
+        except Exception:
+            # Some client implementations cannot recall a request already sent to the
+            # server.  Generation checks below still isolate its eventual late reply.
+            pass
+
+    def _invalidate_startup_request(self, future=None) -> None:
+        """Invalidate one startup generation and release its retry guard."""
+        stale = self.startup_request_future if future is None else future
+        self.startup_request_generation += 1
+        self.startup_request_future = None
+        self.startup_request_deadline = 0.0
+        self.startup_requested = False
+        self._cancel_pending_future(stale)
+
+    def _invalidate_slam_recovery_request(self, future=None) -> None:
+        """Invalidate one SLAM recovery generation and release its retry guard."""
+        stale = self.slam_recovery_future if future is None else future
+        self.slam_recovery_generation += 1
+        self._finish_slam_recovery_request()
+        self._cancel_pending_future(stale)
+
+    def _expire_service_requests(self, now_monotonic=None) -> None:
+        """Release lifecycle guards whose asynchronous response deadline elapsed.
+
+        Deadlines use wall time because a paused bag or Gazebo clock must not prevent a
+        DDS/service liveness timeout.  Incrementing the generation *before* cancellation
+        makes callbacks from an old request harmless even when the middleware delivers a
+        response after a retry has already begun.
+        """
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        if (
+            self.startup_requested
+            and self.startup_request_deadline > 0.0
+            and now >= self.startup_request_deadline
+        ):
+            self._invalidate_startup_request()
+            self.get_logger().error(
+                "Nav2 startup service timed out; readiness will retry safely"
+            )
+        if (
+            self.slam_recovery_pending
+            and self.slam_recovery_deadline > 0.0
+            and now >= self.slam_recovery_deadline
+        ):
+            self._invalidate_slam_recovery_request()
+            self.get_logger().warning(
+                "slam_toolbox lifecycle service timed out; recovery will retry"
+            )
+
+    def _request_nav2_startup(self) -> bool:
+        """Send one bounded STARTUP request; return whether it was registered."""
+        self.startup_requested = True
+        self.startup_request_generation += 1
+        generation = self.startup_request_generation
+        request = ManageLifecycleNodes.Request()
+        request.command = ManageLifecycleNodes.Request.STARTUP
+        try:
+            future = self.lifecycle_client.call_async(request)
+        except Exception as exc:
+            self.startup_requested = False
+            self.startup_request_deadline = 0.0
+            self.startup_request_future = None
+            self.get_logger().error(f"Unable to send Nav2 startup request: {exc}")
+            return False
+        self.startup_request_future = future
+        self.startup_request_deadline = (
+            time.monotonic() + self.service_request_timeout
+        )
+        try:
+            future.add_done_callback(
+                lambda completed, request_generation=generation: self._startup_response(
+                    completed, request_generation
+                )
+            )
+        except Exception as exc:
+            # A request may already be in flight even though callback registration
+            # failed.  Invalidate its generation before cancellation/retry.
+            self._invalidate_startup_request(future)
+            self.get_logger().error(
+                f"Unable to monitor Nav2 startup request: {exc}"
+            )
+            return False
+        return True
 
     def _check_readiness(self) -> None:
         """仅在 scan、odom 和 map→base_link TF 同时就绪时启动 Nav2。"""
+        self._expire_service_requests()
         if self.startup_requested:
             return
         # 不只检查“曾经收到”，还检查传感器正在持续更新。
-        scan_ready = self.scan_valid and self._sensor_is_fresh(self.last_scan_time)
+        scan_ready = self.scan_valid and self._sensor_is_fresh(
+            self.last_scan_time, self.last_scan_source_stamp
+        )
         odom_ready = (
             self.odom_valid
             and not self.odom_jump
-            and self._sensor_is_fresh(self.last_odom_time)
+            and self._sensor_is_fresh(
+                self.last_odom_time, self.last_odom_source_stamp
+            )
         )
         try:
             transform = self.tf_buffer.lookup_transform(
@@ -286,12 +422,8 @@ class Nav2ReadinessMonitor(Node):
             )
             return
         # 由 lifecycle manager 按固定顺序配置和激活全部 Nav2 节点。
-        self.startup_requested = True
-        request = ManageLifecycleNodes.Request()
-        request.command = ManageLifecycleNodes.Request.STARTUP
-        future = self.lifecycle_client.call_async(request)
-        future.add_done_callback(self._startup_response)
-        self.get_logger().info("Inputs ready; requesting Nav2 activation")
+        if self._request_nav2_startup():
+            self.get_logger().info("Inputs ready; requesting Nav2 activation")
 
     def _recover_slam_if_needed(self) -> None:
         """Advance a stalled local ``slam_toolbox`` to active, one step at a time."""
@@ -311,28 +443,85 @@ class Nav2ReadinessMonitor(Node):
             return
         self.slam_recovery_pending = True
         self.last_slam_recovery_time = now
-        future = self.slam_get_state_client.call_async(GetState.Request())
-        future.add_done_callback(self._slam_state_response)
+        self.slam_recovery_generation += 1
+        generation = self.slam_recovery_generation
+        try:
+            future = self.slam_get_state_client.call_async(GetState.Request())
+        except Exception as exc:
+            self._finish_slam_recovery_request()
+            self.get_logger().warning(
+                f"Unable to send slam_toolbox state request: {exc}"
+            )
+            return
+        self.slam_recovery_future = future
+        self.slam_recovery_deadline = (
+            time.monotonic() + self.service_request_timeout
+        )
+        try:
+            future.add_done_callback(
+                lambda completed, request_generation=generation: self._slam_state_response(
+                    completed, request_generation
+                )
+            )
+        except Exception as exc:
+            self._invalidate_slam_recovery_request(future)
+            self.get_logger().warning(
+                f"Unable to monitor slam_toolbox state request: {exc}"
+            )
 
-    def _slam_state_response(self, future) -> None:
+    def _slam_state_response(self, future, generation=None) -> None:
         """Read lifecycle state and request only the next safe startup transition."""
+        if generation is not None and generation != self.slam_recovery_generation:
+            return
+        if (
+            self.slam_recovery_deadline > 0.0
+            and time.monotonic() >= self.slam_recovery_deadline
+        ):
+            self._invalidate_slam_recovery_request(future)
+            self.get_logger().warning(
+                "Ignoring late slam_toolbox state response after its deadline"
+            )
+            return
         try:
             response = future.result()
             transition_id = slam_transition_for_state(response.current_state.id)
         except Exception as exc:
-            self.slam_recovery_pending = False
+            self._finish_slam_recovery_request()
             self.get_logger().warning(f"Unable to inspect slam_toolbox state: {exc}")
             return
         if transition_id is None:
-            self.slam_recovery_pending = False
+            self._finish_slam_recovery_request()
             return
         if not self.slam_change_state_client.service_is_ready():
-            self.slam_recovery_pending = False
+            self._finish_slam_recovery_request()
             return
         request = ChangeState.Request()
         request.transition.id = int(transition_id)
-        future = self.slam_change_state_client.call_async(request)
-        future.add_done_callback(self._slam_transition_response)
+        try:
+            future = self.slam_change_state_client.call_async(request)
+        except Exception as exc:
+            self._finish_slam_recovery_request()
+            self.get_logger().warning(
+                f"Unable to send slam_toolbox transition request: {exc}"
+            )
+            return
+        self.slam_recovery_future = future
+        self.slam_recovery_deadline = (
+            time.monotonic() + self.service_request_timeout
+        )
+        active_generation = self.slam_recovery_generation
+        try:
+            future.add_done_callback(
+                lambda completed, request_generation=active_generation: (
+                    self._slam_transition_response(completed, request_generation)
+                )
+            )
+        except Exception as exc:
+            self._invalidate_slam_recovery_request(future)
+            self.get_logger().warning(
+                f"Unable to monitor slam_toolbox transition request: {exc}"
+            )
+            return
         transition_name = (
             "configure"
             if transition_id == Transition.TRANSITION_CONFIGURE
@@ -342,8 +531,25 @@ class Nav2ReadinessMonitor(Node):
             f"map TF is absent; requesting slam_toolbox {transition_name} recovery"
         )
 
-    def _slam_transition_response(self, future) -> None:
+    def _finish_slam_recovery_request(self) -> None:
+        """Clear the currently active SLAM request without changing its generation."""
+        self.slam_recovery_future = None
+        self.slam_recovery_deadline = 0.0
+        self.slam_recovery_pending = False
+
+    def _slam_transition_response(self, future, generation=None) -> None:
         """Release the recovery guard so the next timer can verify actual state."""
+        if generation is not None and generation != self.slam_recovery_generation:
+            return
+        if (
+            self.slam_recovery_deadline > 0.0
+            and time.monotonic() >= self.slam_recovery_deadline
+        ):
+            self._invalidate_slam_recovery_request(future)
+            self.get_logger().warning(
+                "Ignoring late slam_toolbox transition response after its deadline"
+            )
+            return
         try:
             response = future.result()
             if not response.success:
@@ -351,10 +557,23 @@ class Nav2ReadinessMonitor(Node):
         except Exception as exc:
             self.get_logger().error(f"slam_toolbox lifecycle recovery failed: {exc}")
         finally:
-            self.slam_recovery_pending = False
+            self._finish_slam_recovery_request()
 
-    def _startup_response(self, future) -> None:
+    def _startup_response(self, future, generation=None) -> None:
         """处理 lifecycle STARTUP 服务结果，并允许失败后重试。"""
+        if generation is not None and generation != self.startup_request_generation:
+            return
+        if (
+            self.startup_request_deadline > 0.0
+            and time.monotonic() >= self.startup_request_deadline
+        ):
+            self._invalidate_startup_request(future)
+            self.get_logger().error(
+                "Ignoring late Nav2 startup response after its deadline"
+            )
+            return
+        self.startup_request_future = None
+        self.startup_request_deadline = 0.0
         try:
             response = future.result()
         except Exception as exc:

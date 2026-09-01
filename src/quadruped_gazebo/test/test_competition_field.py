@@ -7,11 +7,17 @@
 import importlib.util
 import math
 from pathlib import Path
+from threading import Event, Thread
+import time
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TransformStamped, Twist
+from nav_msgs.msg import Odometry
 import pytest
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
 from std_msgs.msg import Bool
 import yaml
 
@@ -124,6 +130,69 @@ def test_sim_traversal_backend_is_one_shot_and_yields_cpu():
     # The Gazebo helper may emulate a standard fused sensor contract. Completion remains
     # exclusively owned by the autonomous mission after Action/posterior checks.
     assert 'create_publisher(\n            String, "/autonomy/completed_obstacles"' not in backend
+
+
+def test_preparing_action_can_receive_odometry_while_action_group_is_busy():
+    """Production callback groups must let PREPARING close its live odom loop.
+
+    The blocking timer deliberately occupies the exact callback group used by the Action
+    execute callback.  A real two-thread executor must still deliver /odom through that
+    production re-entrant group; a structural assertion alone would not catch an
+    executor wiring regression.
+    """
+    module = _load_sim_traverse_module("sim_traverse_callback_groups")
+    rclpy.init()
+    backend = module.SimTraverseObstacle()
+    driver = Node("sim_traverse_callback_group_driver")
+    publisher = driver.create_publisher(Odometry, "/odom", 10)
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(backend)
+    executor.add_node(driver)
+    blocking_started = Event()
+    release_block = Event()
+    timer_holder = {}
+
+    def occupy_action_group():
+        timer_holder["timer"].cancel()
+        blocking_started.set()
+        release_block.wait(timeout=1.0)
+
+    timer_holder["timer"] = backend.create_timer(
+        0.001,
+        occupy_action_group,
+        callback_group=backend.server.callback_group,
+    )
+    spin_thread = Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    try:
+        assert backend.server.callback_group is backend.sim_callback_group
+        odom_subscription = next(
+            subscription
+            for subscription in backend.subscriptions
+            if subscription.topic_name == "/odom"
+        )
+        assert odom_subscription.callback_group is backend.sim_callback_group
+        assert blocking_started.wait(timeout=0.5)
+
+        message = Odometry()
+        message.header.stamp = driver.get_clock().now().to_msg()
+        message.header.frame_id = "odom"
+        message.child_frame_id = "base_link"
+        message.pose.pose.orientation.w = 1.0
+        deadline = time.monotonic() + 0.6
+        while backend.latest_odom is None and time.monotonic() < deadline:
+            publisher.publish(message)
+            time.sleep(0.02)
+        assert backend.latest_odom is not None
+    finally:
+        release_block.set()
+        executor.shutdown(timeout_sec=1.0)
+        spin_thread.join(timeout=1.0)
+        executor.remove_node(driver)
+        executor.remove_node(backend)
+        driver.destroy_node()
+        backend.destroy_node()
+        rclpy.shutdown()
 
 
 def _load_sim_traverse_module(name="sim_traverse_contract"):
@@ -572,6 +641,105 @@ def test_benchmark_stations_follow_central_world_layout():
         pose = module.benchmark_observation_pose(obstacle_id, layouts)
         assert pose is not None
         assert module.pose_inside_arena(*pose[:2], 7.0, 3.0, 0.35)
+
+
+def test_benchmark_empty_ledger_starts_a_new_independent_mission_session():
+    """Restarting only command three must not retain command one's old progress."""
+    module = _load_sim_traverse_module("sim_traverse_benchmark_session")
+    previous = module.BENCHMARK_TASK_ORDER[:3]
+    changed, reset, target = module.benchmark_ledger_transition(previous, [])
+    assert changed
+    assert reset
+    assert target == module.BENCHMARK_TASK_ORDER[0]
+
+    changed, reset, target = module.benchmark_ledger_transition(
+        previous, module.BENCHMARK_TASK_ORDER[:4]
+    )
+    assert changed
+    assert not reset
+    assert target == module.BENCHMARK_TASK_ORDER[4]
+
+    assert module.benchmark_ledger_transition([], []) == (False, False, "")
+
+
+def test_benchmark_finish_waits_for_post_commit_odometry_and_tf():
+    """Missing precommit TF must not let an old positive TF become the finish pose."""
+    module = _load_sim_traverse_module("sim_traverse_finish_freshness")
+    rclpy.init()
+    backend = module.SimTraverseObstacle()
+
+    class RecordingPublisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    class TransformBuffer:
+        def __init__(self, stamp_seconds, x=0.0):
+            self.stamp_seconds = stamp_seconds
+            self.x = x
+
+        def lookup_transform(self, *_args, **_kwargs):
+            transform = TransformStamped()
+            transform.header.stamp.sec = int(self.stamp_seconds)
+            transform.header.stamp.nanosec = int(
+                (self.stamp_seconds - int(self.stamp_seconds)) * 1.0e9
+            )
+            transform.header.frame_id = "map"
+            transform.child_frame_id = "base_link"
+            transform.transform.translation.x = self.x
+            transform.transform.rotation.w = 1.0
+            return transform
+
+    original_publisher = backend.benchmark_finish_pub
+    recorder = RecordingPublisher()
+    backend.benchmark_finish_pub = recorder
+    now_seconds = backend.get_clock().now().nanoseconds * 1.0e-9
+    commit_stamp = now_seconds - 0.20
+    home_odom_stamp = now_seconds - 0.10
+    backend.benchmark_finish_pending_after = time.monotonic() - 1.0
+    backend.benchmark_finish_expected_pose = (1.0, 2.0, 0.0)
+    backend.benchmark_finish_min_odom_sequence = 5
+    # Reproduce the edge found in review: the precommit lookup returned no TF, so the
+    # commit ROS time is the only initial lower bound.  A merely positive old TF must
+    # still be rejected rather than published as the new home map coordinate.
+    backend.benchmark_finish_min_tf_stamp = None
+    backend.benchmark_finish_commit_stamp = commit_stamp
+    backend.benchmark_finish_home_odom_stamp = None
+    odom = Odometry()
+    odom.header.stamp.sec = int(home_odom_stamp)
+    odom.header.stamp.nanosec = int(
+        (home_odom_stamp - int(home_odom_stamp)) * 1.0e9
+    )
+    odom.header.frame_id = "odom"
+    odom.child_frame_id = "base_link"
+    odom.pose.pose.position.x = 1.0
+    odom.pose.pose.position.y = 2.0
+    odom.pose.pose.orientation.w = 1.0
+    backend.latest_odom = odom
+    try:
+        backend.odom_sample_sequence = 5
+        backend.tf_buffer = TransformBuffer(now_seconds - 0.05)
+        backend._publish_benchmark_finish_if_ready()
+        assert not recorder.messages
+
+        backend.odom_sample_sequence = 6
+        backend.tf_buffer = TransformBuffer(commit_stamp - 0.50, x=99.0)
+        backend._publish_benchmark_finish_if_ready()
+        assert not recorder.messages
+
+        # Once localization advances beyond both the commit and the first new home odom
+        # sample, the same pending contract recovers and publishes exactly once.
+        backend.tf_buffer = TransformBuffer(now_seconds - 0.05, x=1.0)
+        backend._publish_benchmark_finish_if_ready()
+        assert len(recorder.messages) == 1
+        assert recorder.messages[0].pose.position.x == pytest.approx(1.0)
+        assert backend.benchmark_finish_pending_after == 0.0
+    finally:
+        backend.benchmark_finish_pub = original_publisher
+        backend.destroy_node()
+        rclpy.shutdown()
 
 
 def test_benchmark_contracts_cover_every_task_without_claiming_completion():

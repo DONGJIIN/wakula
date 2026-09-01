@@ -44,12 +44,12 @@ def test_python_package_metadata_matches_its_manifest():
         assert f'maintainer_email="{EXPECTED_EMAIL}"' in source, setup_file
         assert f'license="{EXPECTED_LICENSE}"' in source, setup_file
 
-        # Keep the declared ament_python build type and its workspace build-tool
-        # dependency together.  This repository deliberately supports the existing
-        # colcon/ROS installation even though some rosdep indexes omit that key.
+        # ``ament_python`` is a colcon build type, not a ROS package/rosdep key.  Keep it
+        # only in ``export/build_type``; declaring it as buildtool_depend makes rosdep
+        # fail on a clean Ubuntu 24.04 installation.
         manifest = ET.parse(setup_file.with_name('package.xml')).getroot()
         assert manifest.findtext('export/build_type') == 'ament_python', setup_file
-        assert 'ament_python' in {
+        assert 'ament_python' not in {
             node.text for node in manifest.findall('buildtool_depend')
         }, setup_file
 
@@ -73,6 +73,7 @@ def test_slam_manifest_declares_direct_launch_and_plugin_dependencies():
         'nav2_navfn_planner',
         'nav2_planner',
         'nav2_velocity_smoother',
+        'quadruped_perception',
         'ros2topic',
     }
     assert expected <= dependencies
@@ -95,10 +96,15 @@ def test_coverage_artifacts_are_ignored_without_ignoring_vscode_configuration():
     assert '.vscode/' not in ignored
 
 
-def test_bootstrap_explains_the_only_rosdep_skip_and_does_not_hide_other_errors():
+def test_bootstrap_checks_colcon_build_support_and_hides_no_rosdep_errors():
     bootstrap = (REPOSITORY_ROOT / 'scripts' / 'bootstrap.sh').read_text(
         encoding='utf-8'
     )
-    assert 'ros2 pkg prefix ament_python' in bootstrap
-    assert '--skip-keys ament_python' in bootstrap
-    assert ' -r ' not in bootstrap
+    assert 'colcon_ros.task.ament_python.build' in bootstrap
+    assert 'ros2 pkg prefix ament_python' not in bootstrap
+    commands = '\n'.join(
+        line for line in bootstrap.splitlines()
+        if not line.lstrip().startswith('#')
+    )
+    assert '--skip-keys' not in commands
+    assert ' -r ' not in commands

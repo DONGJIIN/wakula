@@ -5,7 +5,6 @@
   <description>Fail-safe Xbox Twist adapter with an isolated autonomy process switch.</description>
   <maintainer email="2724596499@qq.com">DONGJIN</maintainer>
   <license>Apache-2.0</license>
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>joy</exec_depend>
   <exec_depend>launch</exec_depend>

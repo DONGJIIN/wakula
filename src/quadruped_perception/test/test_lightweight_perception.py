@@ -627,12 +627,49 @@ def _dense_floor(z=0.0):
     return np.asarray(rows, dtype=np.float64)
 
 
+def _one_sided_corridor_floor():
+    """模拟机身走廊大面积无回波、仅左侧窄条仍看到地面的危险反例。
+
+    默认中央走廊宽 0.50 m。这里在走廊内只保留 ``y=+0.10..+0.25 m`` 的三格回波；旧实现
+    只检查横向格数，三格恰好达到 25% 门限，因而会把机身中心和右侧均未知的区域误判为
+    CLEAR。走廊外的点保留，用来证明失败来自横向安全合同而不是整帧点数或地面拟合不足。
+    """
+    floor = _dense_floor()
+    inside_body_corridor = np.abs(floor[:, 1]) <= 0.251
+    retained_left_strip = (floor[:, 1] >= 0.10) & (floor[:, 1] <= 0.251)
+    return floor[(~inside_body_corridor) | retained_left_strip]
+
+
 def test_clear_requires_normal_continuous_ground_through_body_corridor():
     """密集平地应通过中央通道可见性门，并保留高 CLEAR 置信度。"""
     result = analyze_terrain_geometry(_dense_floor())
     assert result.valid
     assert result.obstacle_type == CLEAR
     assert result.confidence > 0.95
+
+
+def test_clear_rejects_ground_returns_packed_into_only_one_corridor_side():
+    """一侧窄地面条带不能代表完整机身通道，哪怕横向格数刚好达到比例门。"""
+    result = analyze_terrain_geometry(_one_sided_corridor_floor())
+    assert not result.valid
+    assert result.obstacle_type == UNKNOWN
+
+
+def test_clear_accepts_bilateral_ground_with_small_calibrated_dropouts():
+    """中心及左右仍有支撑时，少量外沿丢点和短纵向缺帧应保持可通行。"""
+    floor = _dense_floor()
+    short_longitudinal_gap = (
+        (floor[:, 0] >= 0.50)
+        & (floor[:, 0] <= 0.55)
+        & (np.abs(floor[:, 1]) <= 0.251)
+    )
+    missing_outer_strip = (floor[:, 1] >= -0.251) & (floor[:, 1] <= -0.20)
+    result = analyze_terrain_geometry(
+        floor[~(short_longitudinal_gap | missing_outer_strip)]
+    )
+    assert result.valid
+    assert result.obstacle_type == CLEAR
+    assert 0.0 < result.confidence < 1.0
 
 
 def test_clear_fails_closed_for_complete_no_return_band_in_central_corridor():
@@ -656,6 +693,105 @@ def test_clear_fails_closed_when_all_ground_ahead_of_near_patch_is_missing():
     result = analyze_terrain_geometry(near_only)
     assert not result.valid
     assert result.obstacle_type == UNKNOWN
+
+
+def test_obstacle_echo_beyond_no_return_band_cannot_bypass_approach_coverage():
+    """A distant STEP/PIT/WALL must not authorize motion across UNKNOWN ground.
+
+    This is deliberately stronger than the CLEAR regression above.  The old implementation only
+    checked corridor coverage in the final CLEAR branch, so adding excellent obstacle echoes after
+    exactly the same blind band changed UNKNOWN into a high-confidence hazard with an approach
+    distance.  Nav2 could then be asked to drive across the unobserved band toward that object.
+    """
+    floor = _dense_floor()
+    missing_band = (
+        (floor[:, 0] >= 0.40)
+        & (floor[:, 0] <= 0.75)
+        & (np.abs(floor[:, 1]) <= 0.25)
+    )
+    observed_floor = floor[~missing_band]
+    obstacles = (
+        np.asarray(
+            [
+                (x, y, 0.11 + noise)
+                for x in np.arange(0.95, 1.16, 0.04)
+                for y in np.arange(-0.18, 0.19, 0.04)
+                for noise in (-0.002, 0.0, 0.002)
+            ]
+        ),
+        np.asarray(
+            [
+                (x, y, -0.14 + noise)
+                for x in np.arange(0.95, 1.16, 0.04)
+                for y in np.arange(-0.18, 0.19, 0.04)
+                for noise in (-0.002, 0.0, 0.002)
+            ]
+        ),
+        np.asarray(
+            [
+                (x, y, z)
+                for x in (0.99, 1.01)
+                for y in np.arange(-0.35, 0.36, 0.035)
+                for z in np.arange(0.02, 0.35, 0.02)
+            ]
+        ),
+    )
+    for obstacle in obstacles:
+        result = analyze_terrain_geometry(np.vstack((observed_floor, obstacle)))
+        assert not result.valid
+        assert result.obstacle_type == UNKNOWN
+        assert result.pit_depth == 0.0
+
+
+@pytest.mark.parametrize(
+    ("front_start", "front_stop"),
+    (
+        (0.40, 0.57),
+        (0.95, 1.16),
+    ),
+    ids=("near_step", "far_step"),
+)
+def test_step_approach_rejects_ground_returns_on_only_one_corridor_side(
+    front_start, front_stop
+):
+    """近/远台阶回波均不能让 Nav2 横穿只在机身一侧可见的接近走廊。"""
+    step = np.asarray(
+        [
+            (x, y, 0.11 + noise)
+            for x in np.arange(front_start, front_stop, 0.04)
+            for y in np.arange(-0.18, 0.19, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((_one_sided_corridor_floor(), step))
+    )
+    assert not result.valid
+    assert result.obstacle_type == UNKNOWN
+
+
+def test_obstacle_before_later_blind_band_only_requires_its_approach_segment():
+    """Floor hidden behind a near hazard must not erase the hazard already in front of it."""
+    floor = _dense_floor()
+    later_missing_band = (
+        (floor[:, 0] >= 0.75)
+        & (floor[:, 0] <= 1.05)
+        & (np.abs(floor[:, 1]) <= 0.25)
+    )
+    near_step = np.asarray(
+        [
+            (x, y, 0.11 + noise)
+            for x in np.arange(0.40, 0.57, 0.04)
+            for y in np.arange(-0.18, 0.19, 0.04)
+            for noise in (-0.002, 0.0, 0.002)
+        ]
+    )
+    result = analyze_terrain_geometry(
+        np.vstack((floor[~later_missing_band], near_step))
+    )
+    assert result.valid
+    assert result.obstacle_type == STEP
+    assert result.distance < 0.60
 
 
 def test_clear_confidence_includes_tolerated_ground_coverage_dropout():
@@ -931,7 +1067,9 @@ def test_occluding_wall_top_cannot_become_ground_and_invert_into_pit():
     assert result.ground_height < 0.03
     assert result.pit_depth < 0.03
 
-    # 最坏情况下墙顶完全遮住地面；连续运行时上一 CLEAR 帧的地面高度仍能恢复墙。
+    # 最坏情况下只剩墙顶且整个 approach corridor 都没有当前回波。旧地面高度仍可帮助
+    # 核心理解“这是凸起而不是坑”，但一个标量高度先验不能证明机器人到墙前的每个位置
+    # 仍有地面；新的 fail-closed 合同因此必须输出 UNKNOWN，而不是批准 Nav2 接近。
     prior_only = analyze_terrain_geometry(
         wall_top,
         ground_height_prior=0.0,
@@ -939,9 +1077,9 @@ def test_occluding_wall_top_cannot_become_ground_and_invert_into_pit():
         min_region_cells=3,
         min_region_points=12,
     )
-    assert prior_only.valid
-    assert prior_only.obstacle_type == WALL
-    assert prior_only.ground_height < 0.03
+    assert not prior_only.valid
+    assert prior_only.obstacle_type == UNKNOWN
+    assert prior_only.pit_depth == 0.0
 
 
 def test_grid_ground_segmentation_detects_competition_height_bar_clearance():

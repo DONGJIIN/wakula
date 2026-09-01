@@ -57,6 +57,7 @@ VISION_PARAMETER_NAMES = (
     "history_reset_timeout",
     "source_switch_timeout",
     "source_failure_cooldown",
+    "source_future_tolerance",
     "orange_hsv_lower",
     "orange_hsv_upper",
     "blue_hsv_lower",
@@ -86,6 +87,7 @@ TERRAIN_PARAMETER_NAMES = (
     "min_valid_points",
     "source_switch_timeout",
     "source_failure_cooldown",
+    "source_future_tolerance",
     "source_geometry_failure_frames",
     "ground_prior_max_age",
     "ground_prior_max_consecutive_conflicts",
@@ -295,10 +297,13 @@ def validate_vision_parameters(values: Mapping[str, object]) -> None:
         _range(values, name, 0.01, 1.0, errors)
     _range(values, "temporal_match_ratio", 0.0, 1.0, errors)
     _range(values, "min_temporal_iou", 0.0, 1.0, errors)
-    for name in ("history_reset_timeout", "source_switch_timeout"):
-        if _number(values, name, errors) < 0.10:
-            errors.append(f"{name} must be >= 0.10")
+    _range(values, "history_reset_timeout", 0.10, 5.0, errors)
+    _range(values, "source_switch_timeout", 0.10, 30.0, errors)
     _range(values, "source_failure_cooldown", 0.10, 30.0, errors)
+    # NavigationSafety rejects observations more than 100 ms in the future.  Perception source
+    # arbitration may be stricter but never looser, or an unusable future-dated primary stream can
+    # retain ownership and suppress a healthy backup indefinitely.
+    _range(values, "source_future_tolerance", 0.0, 0.10, errors)
     for prefix in ("orange", "blue"):
         lower = _hsv_triplet(values, f"{prefix}_hsv_lower", errors)
         upper = _hsv_triplet(values, f"{prefix}_hsv_upper", errors)
@@ -384,6 +389,7 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
     grid_cell_size = _number(values, "grid_cell_size", errors)
     _range(values, "source_switch_timeout", 0.10, 30.0, errors)
     _range(values, "source_failure_cooldown", 0.10, 30.0, errors)
+    _range(values, "source_future_tolerance", 0.0, 0.10, errors)
     # A single sparse frame is common while the body pitches or a depth camera changes exposure.
     # Requiring at least two consecutive failures prevents source flapping by construction; the
     # upper bound limits how long a geometrically useless preferred source may suppress a backup.

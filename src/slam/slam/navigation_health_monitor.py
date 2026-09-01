@@ -386,6 +386,12 @@ class NavigationHealthMonitor(Node):
         )
         self.last_scan_time = None
         self.last_odom_time = None
+        # Reception time catches a silent DDS publisher.  Header time catches a driver
+        # which is still delivering buffered/duplicated samples.  Both clocks are kept:
+        # checking the Header only inside the callback would let a sample that arrived
+        # just inside ``sensor_timeout`` remain healthy for almost a second timeout.
+        self.last_scan_source_stamp = None
+        self.last_odom_source_stamp = None
         self.scan_valid = False
         self.odom_valid = False
         self.odom_jump_filter = OdometryJumpFilter(
@@ -408,8 +414,12 @@ class NavigationHealthMonitor(Node):
         self.create_timer(0.1, self.evaluate)
 
     def scan_callback(self, msg: LaserScan) -> None:
-        """缓存激光有效率判定和接收时间。"""
+        """缓存激光结构、接收时刻和不可变的传感器采样时刻。"""
         now = self.get_clock().now()
+        self.last_scan_source_stamp = (
+            int(msg.header.stamp.sec),
+            int(msg.header.stamp.nanosec),
+        )
         stamp_valid = source_stamp_is_current(
             msg.header.stamp.sec,
             msg.header.stamp.nanosec,
@@ -434,8 +444,12 @@ class NavigationHealthMonitor(Node):
         self.last_scan_time = now
 
     def odom_callback(self, msg: Odometry) -> None:
-        """缓存里程计有限性、协方差、跳变判定和接收时间。"""
+        """缓存里程计合同、接收时刻和不可变的传感器采样时刻。"""
         now = self.get_clock().now()
+        self.last_odom_source_stamp = (
+            int(msg.header.stamp.sec),
+            int(msg.header.stamp.nanosec),
+        )
         xy = (float(msg.pose.pose.position.x), float(msg.pose.pose.position.y))
         stamp_valid = source_stamp_is_current(
             msg.header.stamp.sec,
@@ -459,11 +473,28 @@ class NavigationHealthMonitor(Node):
         )
         self.last_odom_time = now
 
-    def _fresh(self, stamp) -> bool:
-        """判断输入是否未超过配置的健康超时。"""
-        return stamp is not None and 0.0 <= (
-            self.get_clock().now() - stamp
+    def _fresh(self, receipt_stamp, source_stamp=None) -> bool:
+        """同时判断 DDS 接收心跳和消息 Header 是否仍在健康窗口内。
+
+        ``receipt_stamp`` 防止发布者退出；``source_stamp`` 防止驱动反复发送缓存帧。
+        后者必须在每次健康周期重新计算，不能只在回调到达时计算一次。可选默认值仅
+        保留给旧的纯单元测试；在线调用始终显式传入两种时间。
+        """
+        now = self.get_clock().now()
+        receipt_fresh = receipt_stamp is not None and 0.0 <= (
+            now - receipt_stamp
         ).nanoseconds / 1e9 <= self.timeout
+        if not receipt_fresh:
+            return False
+        if source_stamp is None:
+            return True
+        return source_stamp_is_current(
+            source_stamp[0],
+            source_stamp[1],
+            now.nanoseconds * 1e-9,
+            self.timeout,
+            self.future_stamp_tolerance,
+        )
 
     def evaluate(self) -> None:
         """汇总传感器、TF 和漂移检查并发布健康状态。"""
@@ -494,8 +525,10 @@ class NavigationHealthMonitor(Node):
         except TransformException:
             tf_valid = False
         checks, failed = navigation_failures(
-            self.scan_valid and self._fresh(self.last_scan_time),
-            self.odom_valid and self._fresh(self.last_odom_time),
+            self.scan_valid
+            and self._fresh(self.last_scan_time, self.last_scan_source_stamp),
+            self.odom_valid
+            and self._fresh(self.last_odom_time, self.last_odom_source_stamp),
             tf_valid,
             self.odom_jump,
         )

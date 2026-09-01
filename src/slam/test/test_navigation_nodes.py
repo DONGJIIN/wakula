@@ -7,6 +7,7 @@ transient-local health publication, and watchdog expiry are tested without Gazeb
 
 import math
 import time
+from types import SimpleNamespace
 
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import TransformStamped
@@ -132,6 +133,287 @@ def test_readiness_wires_yaw_covariance_and_jump_into_activation_gate(ros_contex
         monitor._odom_callback(uncertain)
         assert not monitor.odom_valid
         assert monitor.odom_jump
+    finally:
+        monitor.destroy_node()
+
+
+@pytest.mark.parametrize(
+    ("node_factory", "freshness_method"),
+    (
+        (NavigationHealthMonitor, "_fresh"),
+        (Nav2ReadinessMonitor, "_sensor_is_fresh"),
+    ),
+)
+def test_sensor_freshness_rechecks_source_header_age_each_cycle(
+    ros_context, node_factory, freshness_method
+):
+    """A fresh callback receipt must not extend the older Header deadline."""
+    monitor = node_factory(
+        parameter_overrides=[Parameter("sensor_timeout", value=0.25)]
+    )
+    try:
+        now = monitor.get_clock().now()
+        # Reception happened now, while this source sample is already older than the
+        # configured deadline.  The periodic gate must inspect both values rather than
+        # granting a second full timeout from callback arrival.
+        old_source_nanoseconds = now.nanoseconds - 300_000_000
+        old_source = (
+            old_source_nanoseconds // 1_000_000_000,
+            old_source_nanoseconds % 1_000_000_000,
+        )
+        assert getattr(monitor, freshness_method)(now)
+        assert not getattr(monitor, freshness_method)(now, old_source)
+    finally:
+        monitor.destroy_node()
+
+
+def test_periodic_health_and_readiness_gates_use_cached_source_stamps(ros_context):
+    """Online timer paths, not only helpers, must pass both sensor time domains."""
+    health = NavigationHealthMonitor()
+    readiness = Nav2ReadinessMonitor()
+    try:
+        now = health.get_clock().now()
+        health.scan_valid = True
+        health.odom_valid = True
+        health.last_scan_time = now
+        health.last_odom_time = now
+        health.last_scan_source_stamp = (11, 12)
+        health.last_odom_source_stamp = (21, 22)
+        health_calls = []
+        health._fresh = (
+            lambda receipt, source=None: health_calls.append((receipt, source))
+            or False
+        )
+        health.evaluate()
+        assert [source for _receipt, source in health_calls] == [
+            (11, 12),
+            (21, 22),
+        ]
+
+        now = readiness.get_clock().now()
+        readiness.scan_valid = True
+        readiness.odom_valid = True
+        readiness.odom_jump = False
+        readiness.last_scan_time = now
+        readiness.last_odom_time = now
+        readiness.last_scan_source_stamp = (31, 32)
+        readiness.last_odom_source_stamp = (41, 42)
+        readiness_calls = []
+        readiness._sensor_is_fresh = (
+            lambda receipt, source=None: readiness_calls.append((receipt, source))
+            or False
+        )
+        readiness._check_readiness()
+        assert [source for _receipt, source in readiness_calls] == [
+            (31, 32),
+            (41, 42),
+        ]
+    finally:
+        readiness.destroy_node()
+        health.destroy_node()
+
+
+class _PendingFuture:
+    """Small future double which records timeout cancellation."""
+
+    def __init__(self):
+        self.cancelled = False
+
+    def done(self):
+        return False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class _CompletedFuture:
+    """Return one response to exercise late-callback generation isolation."""
+
+    def __init__(self, response):
+        self.response = response
+
+    def result(self):
+        return self.response
+
+
+class _CallbackRegistrationFailure(_PendingFuture):
+    """Represent a middleware future that rejects callback registration."""
+
+    def add_done_callback(self, _callback):
+        raise RuntimeError("callback registration failed")
+
+
+class _RaisingClient:
+    """Service client double whose send path fails synchronously."""
+
+    @staticmethod
+    def service_is_ready():
+        return True
+
+    @staticmethod
+    def call_async(_request):
+        raise RuntimeError("service send failed")
+
+
+class _ReturningClient:
+    """Service client double returning one supplied future."""
+
+    def __init__(self, future):
+        self.future = future
+
+    @staticmethod
+    def service_is_ready():
+        return True
+
+    def call_async(self, _request):
+        return self.future
+
+
+class _CountingClient(_ReturningClient):
+    """Record whether a late state reply incorrectly sends a transition."""
+
+    def __init__(self, future=None):
+        super().__init__(future)
+        self.calls = 0
+
+    def call_async(self, _request):
+        self.calls += 1
+        return self.future
+
+
+def test_readiness_service_timeouts_release_guards_and_ignore_late_replies(ros_context):
+    """A vanished lifecycle server cannot permanently wedge either request guard."""
+    monitor = Nav2ReadinessMonitor()
+    try:
+        startup_future = _PendingFuture()
+        monitor.startup_requested = True
+        monitor.startup_request_generation = 4
+        monitor.startup_request_deadline = 10.0
+        monitor.startup_request_future = startup_future
+
+        recovery_future = _PendingFuture()
+        monitor.slam_recovery_pending = True
+        monitor.slam_recovery_generation = 8
+        monitor.slam_recovery_deadline = 10.0
+        monitor.slam_recovery_future = recovery_future
+
+        monitor._expire_service_requests(now_monotonic=11.0)
+        assert not monitor.startup_requested
+        assert not monitor.slam_recovery_pending
+        assert startup_future.cancelled
+        assert recovery_future.cancelled
+        assert monitor.startup_request_generation == 5
+        assert monitor.slam_recovery_generation == 9
+
+        # The old service may still reply after middleware cancellation.  Its captured
+        # generation must not mark Nav2 active or clear a newer recovery request.
+        monitor._startup_response(
+            _CompletedFuture(SimpleNamespace(success=True)), generation=4
+        )
+        monitor.slam_recovery_pending = True
+        monitor.slam_recovery_future = object()
+        monitor._slam_transition_response(
+            _CompletedFuture(SimpleNamespace(success=True)), generation=8
+        )
+        assert not monitor.startup_complete
+        assert monitor.slam_recovery_pending
+    finally:
+        monitor.destroy_node()
+
+
+def test_readiness_service_dispatch_errors_never_leave_a_pending_guard(ros_context):
+    """Synchronous send/registration exceptions fail closed and remain retryable."""
+    monitor = Nav2ReadinessMonitor()
+    try:
+        monitor.lifecycle_client = _RaisingClient()
+        assert not monitor._request_nav2_startup()
+        assert not monitor.startup_requested
+
+        startup_future = _CallbackRegistrationFailure()
+        monitor.lifecycle_client = _ReturningClient(startup_future)
+        assert not monitor._request_nav2_startup()
+        assert not monitor.startup_requested
+        assert startup_future.cancelled
+
+        monitor.node_started_monotonic = time.monotonic() - 10.0
+        monitor.last_slam_recovery_time = None
+        monitor.slam_get_state_client = _RaisingClient()
+        monitor._recover_slam_if_needed()
+        assert not monitor.slam_recovery_pending
+
+        state_future = _CallbackRegistrationFailure()
+        monitor.last_slam_recovery_time = None
+        monitor.slam_get_state_client = _ReturningClient(state_future)
+        monitor._recover_slam_if_needed()
+        assert not monitor.slam_recovery_pending
+        assert state_future.cancelled
+
+        unconfigured = SimpleNamespace(
+            current_state=SimpleNamespace(id=1)
+        )
+        monitor.slam_recovery_pending = True
+        monitor.slam_recovery_generation += 1
+        generation = monitor.slam_recovery_generation
+        monitor.slam_change_state_client = _RaisingClient()
+        monitor._slam_state_response(
+            _CompletedFuture(unconfigured), generation=generation
+        )
+        assert not monitor.slam_recovery_pending
+
+        transition_future = _CallbackRegistrationFailure()
+        monitor.slam_recovery_pending = True
+        monitor.slam_recovery_generation += 1
+        generation = monitor.slam_recovery_generation
+        monitor.slam_change_state_client = _ReturningClient(transition_future)
+        monitor._slam_state_response(
+            _CompletedFuture(unconfigured), generation=generation
+        )
+        assert not monitor.slam_recovery_pending
+        assert transition_future.cancelled
+    finally:
+        monitor.destroy_node()
+
+
+def test_readiness_callbacks_reject_responses_past_wall_deadline(
+    ros_context, monkeypatch
+):
+    """A late reply cannot exploit the interval before the next timeout timer tick."""
+    monitor = Nav2ReadinessMonitor()
+    try:
+        monkeypatch.setattr(
+            "slam.nav2_readiness_monitor.time.monotonic", lambda: 11.0
+        )
+        monitor.startup_requested = True
+        monitor.startup_request_generation = 2
+        monitor.startup_request_deadline = 10.0
+        monitor._startup_response(
+            _CompletedFuture(SimpleNamespace(success=True)), generation=2
+        )
+        assert not monitor.startup_complete
+        assert not monitor.startup_requested
+        assert monitor.startup_request_generation == 3
+
+        transition_client = _CountingClient()
+        monitor.slam_change_state_client = transition_client
+        monitor.slam_recovery_pending = True
+        monitor.slam_recovery_generation = 5
+        monitor.slam_recovery_deadline = 10.0
+        unconfigured = SimpleNamespace(current_state=SimpleNamespace(id=1))
+        monitor._slam_state_response(
+            _CompletedFuture(unconfigured), generation=5
+        )
+        assert transition_client.calls == 0
+        assert not monitor.slam_recovery_pending
+        assert monitor.slam_recovery_generation == 6
+
+        monitor.slam_recovery_pending = True
+        monitor.slam_recovery_generation = 7
+        monitor.slam_recovery_deadline = 10.0
+        monitor._slam_transition_response(
+            _CompletedFuture(SimpleNamespace(success=True)), generation=7
+        )
+        assert not monitor.slam_recovery_pending
+        assert monitor.slam_recovery_generation == 8
     finally:
         monitor.destroy_node()
 

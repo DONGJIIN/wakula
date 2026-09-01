@@ -35,9 +35,15 @@ def header_contract_valid(header) -> bool:
 
 
 def source_stamp_is_plausible(
-    header, now_seconds: float, maximum_age: float, future_tolerance: float = 0.25
+    header, now_seconds: float, maximum_age: float, future_tolerance: float = 0.10
 ) -> bool:
-    """Reject replayed/future samples so stale traffic cannot refresh source ownership."""
+    """Reject replayed/future samples so stale traffic cannot refresh source ownership.
+
+    The 100 ms defensive default matches the navigation safety consumer.  A producer accepted by
+    source arbitration must not later be rejected solely because perception used a wider future
+    window; otherwise that unusable high-rate source can keep a healthy backup locked out.
+    Online nodes pass their validated YAML value explicitly so the contract remains auditable.
+    """
     stamp = float(header.stamp.sec) + float(header.stamp.nanosec) * 1e-9
     values = (stamp, now_seconds, maximum_age, future_tolerance)
     if not header_contract_valid(header) or not all(isfinite(value) for value in values):

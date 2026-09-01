@@ -13,7 +13,7 @@ from math import isfinite, pi
 
 import rclpy
 from geometry_msgs.msg import Twist
-from quadruped_interfaces.msg import TraversalGuidance
+from quadruped_interfaces.msg import AutonomyLease, TraversalGuidance
 
 from quadruped_planning.parameter_validation import (
     SPEED_GATE_PARAMETER_NAMES,
@@ -33,6 +33,35 @@ from std_msgs.msg import Bool, Float32
 DIFFERENTIAL_UNUSED_AXIS_TOLERANCE = 1e-6
 DEFAULT_SCAN_MIN_VALID_RATIO = 0.80
 DEFAULT_SCAN_MAX_INVALID_GAP_ANGLE = 0.20
+MAX_LEASE_SESSION_LENGTH = 128
+
+
+def autonomy_lease_is_well_formed(message: AutonomyLease) -> bool:
+    """Validate the identity/ordering fields before they affect ownership.
+
+    ``session_id`` is deliberately opaque, but it must be a single canonical token so
+    whitespace-only or accidentally concatenated IDs cannot become distinct owners in
+    logs and state.  ``uint64`` prevents negative wire values; the explicit positive
+    check reserves zero as "uninitialised".  Invalid messages are ignored and therefore
+    cannot refresh an ACTIVE owner: a broken publisher will still expire fail-closed.
+    """
+    try:
+        session_id = str(message.session_id)
+        sequence = int(message.sequence)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    active = bool(message.active)
+    motion_allowed = bool(message.motion_allowed)
+    return bool(
+        session_id
+        and session_id == session_id.strip()
+        and len(session_id) <= MAX_LEASE_SESSION_LENGTH
+        and not any(character.isspace() for character in session_id)
+        and sequence > 0
+        # A released owner cannot simultaneously grant autonomous motion.  Reject the
+        # complete contradictory sample before its sequence reaches the high-water mark.
+        and (active or not motion_allowed)
+    )
 
 
 def twist_components_are_finite(command: Twist) -> bool:
@@ -433,6 +462,9 @@ class NavigationSpeedGate(Node):
             else 0.0
         )
         self.latest_cmd = Twist()
+        # ``/navigation/autonomy_stop`` remains a transient-local compatibility/diagnostic
+        # veto.  Its anonymous false payload is never sufficient to unlock this gate; only
+        # an ordered AutonomyLease permit or clean release may clear the latch.
         self.external_stop = False
         # 启动阶段没有任何输入可被视为新鲜。使用 None 而不是构造时刻，避免在首个
         # command/assessment 到来前出现一个仅由默认值决定的伪心跳窗口。
@@ -448,9 +480,14 @@ class NavigationSpeedGate(Node):
         self.last_rotation_recovery_time = None
         # UNOWNED: 自主任务从未取得或已明确释放，普通 RViz/Nav2 Goal 可以工作。
         # ACTIVE: 自主任务拥有 Nav2，必须持续刷新 true。
-        # EXPIRED: owner 消失，锁存停车。Bool 没有 session/generation，因此迟到
-        # true/false 都无法证明旧 owner 已停止；只有重启本速度门/核心栈才回到 UNOWNED。
+        # EXPIRED: owner 消失，锁存停车；只有重启本速度门/核心栈才回到 UNOWNED。
+        # 每个进程使用独立 session，严格递增 sequence。这样旧进程迟到的 false 不会
+        # 释放新 owner，重复/回退的 heartbeat 也不能延长许可窗口。
         self.autonomy_lease_state = "UNOWNED"
+        self.autonomy_lease_session = ""
+        self.autonomy_lease_sequence = 0
+        self.autonomy_motion_allowed = False
+        self.autonomy_lease_high_watermarks = {}
         self.last_autonomy_lease_time = None
         self.last_clock_time = self.get_clock().now()
 
@@ -482,7 +519,7 @@ class NavigationSpeedGate(Node):
         # Lease 必须是 volatile 心跳：不能让前一次已退出任务的 transient-local true
         # 在下一次 SLAM 启动后继续授权。只有新进程持续刷新 true 才能放行 Nav2 分支。
         self.create_subscription(
-            Bool,
+            AutonomyLease,
             "/navigation/autonomy_lease",
             self.autonomy_lease_callback,
             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
@@ -519,50 +556,100 @@ class NavigationSpeedGate(Node):
         self.last_health_time = self.get_clock().now()
 
     def autonomy_stop_callback(self, msg: Bool) -> None:
-        """锁止/解锁 Nav2 自主速度链，并在所有权边界清除旧 Twist。
+        """Apply the legacy anonymous topic only as an additional stop veto.
 
-        ``true`` 到达时旧 Nav2 目标可能还在 cancel；``true -> false`` 只表示任务即将
-        提交一个新目标。两种边界都清掉缓存，确保解锁后必须收到新目标产生的新 Twist，
-        不能重放交接前的最后一条速度。人工话题不经过本节点，因此不受此锁影响。
+        A delayed ``false`` from an old mission process cannot identify which session it
+        belongs to.  It is therefore ignored: an ordered same-session
+        :class:`AutonomyLease` motion permit is the only autonomous unlock boundary.
+        ``true`` remains useful to dashboards and older launch helpers and always clears
+        cached Nav2 intent immediately.  Keyboard/gamepad candidates bypass this node.
         """
-        requested_stop = bool(msg.data)
-        if requested_stop or requested_stop != self.external_stop:
+        if bool(msg.data):
             self._clear_motion_intent()
-        self.external_stop = requested_stop
+            self.external_stop = True
 
-    def autonomy_lease_callback(self, msg: Bool) -> None:
-        """接收自主任务所有权心跳，区分普通 Nav2 与失联任务。
+    def autonomy_lease_callback(self, msg: AutonomyLease) -> None:
+        """Apply one session-scoped autonomous ownership heartbeat.
 
-        没有任务 owner 时无需心跳，因此核心 SLAM 单独启动仍可执行 RViz/Nav2 Goal。
-        ``true`` 首次取得 owner。只有 ACTIVE 且心跳仍新鲜时收到的
-        ``false`` 才是可信的清洁释放（正常 Ctrl-C 路径）。owner 过期后 Bool 中没有
-        session/generation 可供区分迟到数据，所以 EXPIRED 中的 true/false 都必须忽略，
-        锁存直到 ``navigation_speed_gate``/核心栈重启。
+        No owner means ordinary RViz/Nav2 goals remain available without a heartbeat.
+        ACTIVE accepts only a strictly newer message from the exact current session;
+        another process therefore cannot release or silently replace it.  High-water
+        marks are retained after a clean release so delayed heartbeats cannot reacquire
+        UNOWNED.  Once an owner expires, no message can prove its remote Action stopped,
+        so EXPIRED remains latched until the speed gate/core stack is restarted.
         """
-        active = bool(msg.data)
+        if not autonomy_lease_is_well_formed(msg):
+            return
+        session_id = str(msg.session_id)
+        sequence = int(msg.sequence)
+        active = bool(msg.active)
+        motion_allowed = bool(msg.motion_allowed)
         previous = self.autonomy_lease_state
         now = self.get_clock().now()
-        if not active:
-            if previous == "EXPIRED":
-                return
-            if previous == "ACTIVE" and not ros_age_is_fresh(
-                now, self.last_autonomy_lease_time, self.autonomy_lease_timeout
-            ):
-                self.autonomy_lease_state = "EXPIRED"
-                self._clear_motion_intent()
-                self.last_autonomy_lease_time = None
-                return
-            if previous == "ACTIVE":
-                self._clear_motion_intent()
-            self.autonomy_lease_state = "UNOWNED"
+
+        # Expiry is evaluated before interpreting even a correctly formed release.  A
+        # late packet cannot retroactively turn unknown remote ownership into a clean one.
+        if previous == "ACTIVE" and not ros_age_is_fresh(
+            now, self.last_autonomy_lease_time, self.autonomy_lease_timeout
+        ):
+            self.autonomy_lease_state = "EXPIRED"
+            self.autonomy_motion_allowed = False
+            self._clear_motion_intent()
             self.last_autonomy_lease_time = None
+            previous = "EXPIRED"
+        if previous == "EXPIRED":
             return
+
+        previous_sequence = int(
+            self.autonomy_lease_high_watermarks.get(session_id, 0)
+        )
+        if sequence <= previous_sequence:
+            # Duplicate or reordered packets neither refresh nor release an owner.
+            return
+        self.autonomy_lease_high_watermarks[session_id] = sequence
+
         if previous == "UNOWNED":
+            if not active:
+                # Remember the release sequence to reject older delayed heartbeats, but
+                # do not manufacture ownership for a session that was never active here.
+                return
             self._clear_motion_intent()
             self.autonomy_lease_state = "ACTIVE"
-        elif previous == "EXPIRED":
-            # Delayed packets from the failed owner are not a recovery handshake.
+            self.autonomy_lease_session = session_id
+            self.autonomy_lease_sequence = sequence
+            # First contact proves identity/ownership only.  Requiring a second ordered
+            # sample prevents a delayed one-shot ``motion_allowed=true`` from an old
+            # discovery epoch from both acquiring and moving in a single packet.
+            self.autonomy_motion_allowed = False
+            self.last_autonomy_lease_time = now
             return
+
+        # ACTIVE is single-owner: a different session is remembered only for ordering
+        # and otherwise ignored.  In particular, old_session:false cannot release the
+        # current process during a fast restart or overlapping DDS discovery window.
+        if session_id != self.autonomy_lease_session:
+            return
+        self.autonomy_lease_sequence = sequence
+        if not active:
+            self._clear_motion_intent()
+            self.autonomy_lease_state = "UNOWNED"
+            self.autonomy_lease_session = ""
+            self.autonomy_motion_allowed = False
+            self.last_autonomy_lease_time = None
+            # This is an authenticated clean release.  Ordinary RViz/Nav2 may use the
+            # now-unowned branch after producing a fresh Twist.
+            self.external_stop = False
+            return
+        if motion_allowed != self.autonomy_motion_allowed:
+            # Both stop and permit edges drop the previous controller sample.  A newly
+            # permitted goal must produce a Twist after its accepted/result-monitored
+            # Action boundary; a revoked goal cannot coast on its last cached sample.
+            self._clear_motion_intent()
+        self.autonomy_motion_allowed = motion_allowed
+        if motion_allowed:
+            # Clear a diagnostic stop only through this authenticated ordered permit.
+            # Anonymous ``autonomy_stop=false`` packets never reach this transition.
+            self.external_stop = False
         self.last_autonomy_lease_time = now
 
     def scan_callback(self, msg: LaserScan) -> None:
@@ -609,8 +696,12 @@ class NavigationSpeedGate(Node):
         self.last_scan_time = None
         if self.autonomy_lease_state != "UNOWNED":
             self.autonomy_lease_state = "EXPIRED"
+            self.autonomy_motion_allowed = False
         else:
             self.autonomy_lease_state = "UNOWNED"
+            self.autonomy_lease_session = ""
+            self.autonomy_lease_sequence = 0
+            self.autonomy_motion_allowed = False
         self.last_autonomy_lease_time = None
         self.last_clock_time = now
         self.get_logger().warning(
@@ -646,8 +737,15 @@ class NavigationSpeedGate(Node):
         )
         if self.autonomy_lease_state == "ACTIVE" and not lease_fresh:
             self.autonomy_lease_state = "EXPIRED"
+            self.autonomy_motion_allowed = False
             self._clear_motion_intent()
-        autonomy_authorized = self.autonomy_lease_state in ("UNOWNED", "ACTIVE")
+        autonomy_authorized = bool(
+            self.autonomy_lease_state == "UNOWNED"
+            or (
+                self.autonomy_lease_state == "ACTIVE"
+                and self.autonomy_motion_allowed
+            )
+        )
         # 每 50 ms 重新计算，而不是沿用上一条非零速度，防止失联后继续走。
         output = gated_twist(
             self.latest_cmd,

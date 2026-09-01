@@ -950,6 +950,7 @@ class VisionObstacleDetector(Node):
         self.declare_parameter("history_reset_timeout", 0.75)
         self.declare_parameter("source_switch_timeout", 2.0)
         self.declare_parameter("source_failure_cooldown", 2.0)
+        self.declare_parameter("source_future_tolerance", 0.10)
         self.declare_parameter("orange_hsv_lower", [5, 80, 70])
         self.declare_parameter("orange_hsv_upper", [25, 255, 255])
         self.declare_parameter("blue_hsv_lower", [90, 70, 50])
@@ -1071,6 +1072,9 @@ class VisionObstacleDetector(Node):
         )
         self.source_failure_cooldown = max(
             0.1, float(self.get_parameter("source_failure_cooldown").value)
+        )
+        self.source_future_tolerance = float(
+            self.get_parameter("source_future_tolerance").value
         )
         self.evidence_history = deque(maxlen=history_size)
         kernel_size = max(1, int(self.get_parameter("morphology_size").value))
@@ -1204,7 +1208,10 @@ class VisionObstacleDetector(Node):
             not image_message_contract_valid(msg, bytes_per_pixel)
             or not encoding_valid
             or not source_stamp_is_plausible(
-                msg.header, now_seconds, self.source_switch_timeout
+                msg.header,
+                now_seconds,
+                self.source_switch_timeout,
+                self.source_future_tolerance,
             )
         ):
             self.get_logger().warning(
@@ -1240,7 +1247,11 @@ class VisionObstacleDetector(Node):
                 throttle_duration_sec=2.0,
             )
             return
-        if (
+        source_stamp_seconds = (
+            float(msg.header.stamp.sec)
+            + float(msg.header.stamp.nanosec) * 1e-9
+        )
+        receive_gap_requires_reset = (
             not new_source_session
             and self.last_active_image_time is not None
             and temporal_history_requires_reset(
@@ -1248,15 +1259,34 @@ class VisionObstacleDetector(Node):
                 now_seconds,
                 self.history_reset_timeout,
             )
-        ):
-            # 同一相机恢复也不能沿用断流前的障碍票数；必须重新积累 confirmation_frames。
+        )
+        header_gap_requires_reset = (
+            not new_source_session
+            and self.last_received_source_stamp is not None
+            and temporal_history_requires_reset(
+                self.last_received_source_stamp,
+                source_stamp_seconds,
+                self.history_reset_timeout,
+            )
+        )
+        if receive_gap_requires_reset or header_gap_requires_reset:
+            # The receive clock catches a physically silent camera.  Header time independently
+            # catches buffered frames drained in a burst after an executor/network stall: their
+            # callbacks can be milliseconds apart even though the exposures are seconds apart.
+            # Either discontinuity invalidates the assumption behind multi-frame voting, so the
+            # recovered stream must accumulate ``confirmation_frames`` from scratch.
             self.evidence_history.clear()
             self.last_processed_stamp = None
-            self.get_logger().warning("Camera stream gap; reset visual history")
-        self.last_received_source_stamp = (
-            float(msg.header.stamp.sec)
-            + float(msg.header.stamp.nanosec) * 1e-9
-        )
+            reason = (
+                "source Header gap"
+                if header_gap_requires_reset
+                else "receive-time gap"
+            )
+            self.get_logger().warning(
+                f"Camera {reason}; reset visual history",
+                throttle_duration_sec=2.0,
+            )
+        self.last_received_source_stamp = source_stamp_seconds
         self.last_active_image_time = now
         self.latest_frame = (msg, source)
 

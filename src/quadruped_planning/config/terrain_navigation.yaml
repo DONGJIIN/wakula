@@ -113,10 +113,14 @@ navigation_speed_gate:
     # 发布纯旋转恢复许可。approach 只用于消除障碍前最后几度误差；速度门会
     # 强制 linear=0，并且断流 0.8 s 自动关闭。handoff/traversal 不发布。
     rotation_recovery_timeout: 0.8
-    # autonomous_mission 以 4 Hz 发布 volatile 运动许可。该进程退出、卡死或网络断开后，
-    # 0.8 s 内自主 Nav2 分支归零；Bool 没有 session ID，过期后迟到的 true/false
-    # 均不解锁，需重启 navigation_speed_gate/核心栈。未过期 ACTIVE 的清洁 false（正常
-    # Ctrl-C 收尾）仍会释放为 UNOWNED。/cmd_vel_joy 等人工候选话题不经过这个门。
+    # autonomous_mission 以 4 Hz 发布 volatile AutonomyLease。每次进程启动生成独立
+    # session_id，并让 sequence 从 1 严格递增；motion_allowed 与 owner 状态在同一消息
+    # 原子更新，新 session 首包强制为 false，只有 accepted 且已绑定 result watchdog 的
+    # Nav2 goal 才发布 true。因此旧进程迟到的 stop=false、release、重复或回退 heartbeat
+    # 都不能解锁/释放/刷新当前 owner。进程退出、卡死或网络断开后，0.8 s 内自主 Nav2
+    # 分支归零并进入 EXPIRED，需重启 navigation_speed_gate/核心栈；只有未过期且 session
+    # 匹配的递增 active=false（正常 Ctrl-C 收尾）才释放为 UNOWNED。
+    # /cmd_vel_joy 等人工候选话题不经过这个门。
     autonomy_lease_timeout: 0.8
 
 # 越障引导只发布入口目标和交接状态，不发送 NavigateToPose，也不产生任何腿部动作。

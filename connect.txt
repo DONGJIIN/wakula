@@ -33,10 +33,14 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   注意：点云必须带有效 frame_id 和传感器到 base_link 的 TF。
         候选消息须通过非零新鲜 Header、缓冲区/x-y-z 布局、解码、有限数值及采样时刻 TF
         变换后才锁定来源；坏布局、解码或 TF 失败会进入有限 cooldown，让健康备用源接管。
-        当前来源只接受 Header 时间严格递增的点云；重复/乱序包不刷新心跳。切源、时钟回拨、
+        当前来源只接受 Header 时间严格递增且未来偏差不超过 0.10 s 的点云；重复/乱序包不刷新
+        心跳。切源、时钟回拨、
         地面先验超龄或连续高度冲突会清除先验。
         确认坑洞会以虚拟障碍点写入局部代价地图；中央走廊无回波且没有真实低点时输出
-        UNKNOWN/无效，既不判 PIT，也不判 CLEAR。
+        UNKNOWN/无效，既不判 PIT，也不判 CLEAR。每个有效纵向切片必须同时有中心、左侧和
+        右侧地面支撑，单侧窄条不能代表完整机身通道。即使已经看见远处障碍，每帧也会在默认
+        0.80 m 滚动安全前视内检查到 min(0.80 m, 障碍前缘前一格) 的接近走廊；远处盲带进入
+        该窗口后会触发 UNKNOWN，不能被远墙、台阶或横杆掩盖。
         地面由近场有效栅格锚定；同帧多结构按前缘选择最近的有效异常连通域，支撑点数只计
         正/负高度异常原始回波，避免远墙遮住近杆或稀疏飞点抢占真障碍。横杆落地支柱和
         窄立柱分别用高度带/原始回波复核。
@@ -50,7 +54,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         /vision/debug_mask（可选）及调试信息。
   注意：仅在 vision:=true 时启动；视觉结果不包含可靠的米制距离；断流恢复会重新累计多帧证据。
         Image 必须具有非零新鲜时间戳、合法 frame/编码/宽高/step 和完整数据；不合格候选源不锁定。
-        当前来源只接受 Header 时间严格递增的图像，重复/乱序包不刷新心跳或多帧投票。
+        当前来源只接受 Header 时间严格递增且未来偏差不超过 0.10 s 的图像，重复/乱序包不刷新
+        心跳或多帧投票。多帧历史同时按接收时间和 Image Header 间隔重置，批量补发旧帧不能
+        沿用上一段投票。
         时序门按相邻匹配帧检查位移/尺度，允许目标随接近平滑放大；发布框与当前 Image Header 同帧。
         蓝白限高杆需至少三段尺寸相近、水平对齐且间距规律的蓝色短段；单根着色细柱可提示立柱。孤立 Canny
         横边或大框不会单独输出横杆/墙，WALL 由点云确认。
@@ -113,11 +119,12 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   转向恢复输入：/navigation/rotation_recovery（std_msgs/Bool，4 Hz 心跳）。仅自主任务拥有
         Nav2 转向的返航、探索、覆盖、回访、接近、对正和换视角阶段为 true；断流 0.8 s
         自动失效。速度门只提取最大 0.30 rad/s yaw，绝不放行 linear，全部安全守卫仍有效。
-  所有权：lease 为 reliable + volatile，状态为 UNOWNED/ACTIVE/EXPIRED。UNOWNED 允许普通
-        RViz/Nav2；ACTIVE 要求 0.8 s 内持续心跳；超时转 EXPIRED、清旧 Twist 并锁自动分支，
-        ACTIVE 未超时且任务确认所有权释放时，false 可回到 UNOWNED。EXPIRED 是失联
-        锁存；因 Bool 无 session，后到 true 或任意 false 都不解锁，必须确认旧控制器停止后
-        重启 navigation_speed_gate/核心栈。人工候选不经过本节点。
+  所有权：lease 为 reliable + volatile 的强类型 AutonomyLease，状态为
+        UNOWNED/ACTIVE/EXPIRED。UNOWNED 允许普通 RViz/Nav2；ACTIVE 只接受同一 session_id
+        且 sequence 严格递增的 0.8 s 心跳，并且只有 motion_allowed=true 才放行自主 Twist。
+        首个新会话强制保持停车；旧进程、重复/回退序号和异会话释放均被忽略。超时转
+        EXPIRED、清旧 Twist 并锁自动分支；EXPIRED 只能在确认旧控制器停止后通过重启
+        navigation_speed_gate/核心栈复位。人工候选不经过本节点。
 
 /autonomous_mission（quadruped_planning / autonomous_mission）
   作用：在未知地图中选择探索前沿；确认障碍后让 Nav2 到达入口、调用越障 Action，成功后
@@ -143,10 +150,12 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
   停滞时限：前沿/覆盖/入口等普通 Nav2 目标 5 s 无位姿进展即取消改选；return_home 使用
         20 s，允许 Nav2 行为树先执行 Spin/BackUp/重规划；若仍被正前障碍锁住，则先执行
         有界转向和安全换站，再重试终点。
-  安全输出：启动先以 autonomy_stop=true 清旧自动 Twist 并持续发布 lease=true；只有发送新
-        Nav2 goal 时才解除停车锁。Ctrl-C 先停车并取消 Action，所有权确认释放后发布
-        lease=false。autonomy_stop 只锁自动 Twist，人工候选由外部 mux 独立仲裁；外部越障
-        关节动作未知时仍须硬件急停/停服。
+  安全输出：每次进程启动生成唯一 session_id，并以严格递增 sequence 持续发布
+        AutonomyLease。启动、取消、交接和异常阶段保持 active=true/motion_allowed=false；只有
+        Nav2 Goal 已接受、结果监视已建立且健康/截止条件再次通过后才发布 motion_allowed=true。
+        Ctrl-C 先停车并取消 Action，所有权确认释放后发布同会话 active=false。
+        autonomy_stop=true 是额外的即时停车否决；匿名 false 不能解除强类型租约。人工候选由
+        外部 mux 独立仲裁；外部越障关节动作未知时仍须硬件急停/停服。
   Nav 健康：false 或 0.8 s 断流时取消当前 Nav2 目标但保留目标，不计失败/黑名单/退避；连续
         健康 1.0 s 后重发同一目标。等待状态为 WAITING_FOR_NAVIGATION_HEALTH；已接管的
         Traverse Action 不因 SLAM/Nav 健康下降而由任务层直接取消。
@@ -167,8 +176,9 @@ frame 差异只放 sensor_profiles.yaml、launch remap 或 TF。另一台电脑�
         Action 结果 Future 异常按“控制权未知”锁住自主 Twist，不会清句柄后盲目重试；
         外部越障关节运动仍由其服务端取消和硬件急停负责。
   身份与时间：任务只消费 Safety/Guidance.semantic_id，不消费中文名称。两消息必须具有非零
-        递增 Header、同一 observation_frame、时间差不超过 0.05 s，并且 obstacle_type/
-        semantic_id 一致；地图位置使用该 Header 时刻的历史 TF，latest TF 不可替代。
+        递增 Header，并且 frame_id、sec、nanosec、obstacle_type 和 semantic_id 全部精确一致；
+        任务不把两个近似时刻拼成一个 Action 快照。地图位置使用该 Header 时刻的历史 TF，
+        latest TF 不可替代。
   地图边缘：普通目标贴近当前 OccupancyGrid 外框时禁止交接；只有语义已确认为 high_wall、
         实时粗类型为 WALL 且名称不是场地边界时，才允许墙体遮挡造成的“墙后未知区”特例。
         该规则不新增话题，也不能用于放行通用 WALL、未知边界或未确认障碍。
@@ -458,15 +468,17 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
 
 /navigation/healthy，std_msgs/msg/Bool；/diagnostics，diagnostic_msgs/msg/DiagnosticArray。
   健康监控检查 LaserScan 厂商量程、NaN/±Inf、里程计有限性/协方差/四元数、采样时间戳、
-  接收超时、动态 map -> base_link TF 源时间和位置突跳。正 Inf 表示量程内无障碍，仍是
-  合法 LaserScan 回波；诊断键 tf_age_seconds 给出 TF 年龄，缺失/零时间为 unavailable。
+  接收超时、动态 map -> base_link TF 源时间和位置突跳。定时器会重新计算已缓存 scan/odom
+  的源 Header 年龄，不能因 DDS 刚收到一条已经很旧的数据而延长许可。正 Inf 表示量程内无
+  障碍，仍是合法 LaserScan 回波；诊断键 tf_age_seconds 给出 TF 年龄，缺失/零时间为
+  unavailable。
 
-/navigation/autonomy_lease，std_msgs/msg/Bool（reliable + volatile）
-  自主任务以 4 Hz 发布的运动所有权心跳，不是普通使能位。true 表示 ACTIVE；false 显式释放为
-  UNOWNED，但只在 ACTIVE 未超时且任务已确认 Nav2/Traverse 所有权释放时有效。ACTIVE
-  超时进入 EXPIRED 后，因 Bool 不含 session/generation，任意 false 或迟到 true 均无法安全
-  证明旧所有者已释放；EXPIRED 锁存到 navigation_speed_gate/核心栈重启。人工候选不经过
-  该自动速度门。
+/navigation/autonomy_lease，quadruped_interfaces/msg/AutonomyLease（reliable + volatile）
+  字段：session_id、sequence、active、motion_allowed。自主任务每次启动生成新的 session_id，
+  以 4 Hz 严格递增 sequence 发布运动所有权和许可。active=true 表示会话持有自动分支；只有
+  同会话较新消息的 motion_allowed=true 才允许自主 Twist。active=false 是同会话的有序清洁
+  释放；旧会话、重复/回退序号和矛盾字段均忽略。ACTIVE 超时进入 EXPIRED 后锁存到
+  navigation_speed_gate/核心栈重启；人工候选不经过该自动速度门。
 
 /terrain/visual_assist_active，std_msgs/msg/Bool
   表示当前速度上限是否受稳定视觉证据限制，仅供调试和 rosbag 统计。
@@ -493,8 +505,8 @@ TF 链路检查使用 ./scripts/diagnose.sh；脚本会安全截取 tf2_echo 输
   approach_y、approach_yaw、speed_limit。
   语义：APPROACH/ALIGN 表示 Nav2 应到达障碍前方入口并对正；READY 表示可以由未来运动
   控制器申请接管。它不是“越障已经完成”，也不是关节命令。任务消费者要求 Safety/Guidance
-  Header 非零递增、frame 相同、时间差不超过 0.05 s，且 obstacle_type/semantic_id 一致；
-  地图投影使用 Header 时刻的历史 TF，不允许 latest TF 替代。
+  Header 非零递增，frame_id、sec、nanosec、obstacle_type 和 semantic_id 必须精确一致；地图
+  投影使用 Header 时刻的历史 TF，不允许 latest TF 替代。
 
 /traversal/approach_pose，geometry_msgs/msg/PoseStamped
   相对入口建议，frame 通常为 base_link；autonomous_mission 在接收时转换到 map 后再发送
@@ -604,7 +616,7 @@ Isaac Lab 训练/策略接口同样尚未定义。应在真机关节、状态估
 | `/cmd_vel_smoothed` | 本项目 Nav2 velocity_smoother | `speed_gate:=false` 时目标仲裁器必须把它接成自动候选 |
 | `/cmd_vel` | 目标 twist_mux/安全层，或本项目 speed gate 二选一 | 只能有一个最终发布链 |
 | `/navigation/autonomy_stop` | autonomous_mission | 目标仲裁器必须只封锁自动候选，不得封锁人工分支 |
-| `/navigation/autonomy_lease` | autonomous_mission | volatile 所有权心跳；目标仲裁器须实现 UNOWNED/ACTIVE/EXPIRED，EXPIRED 需确认旧所有者已停后重启仲裁器复位 |
+| `/navigation/autonomy_lease` | autonomous_mission | 强类型有序所有权/运动许可；目标仲裁器须按 session_id + sequence 实现 UNOWNED/ACTIVE/EXPIRED，并仅在 motion_allowed=true 时放行自主候选 |
 | `/navigation/healthy` | 本项目 navigation_health_monitor | 速度门和任务层共同消费；false/断流时自动分支停车 |
 | `/teleop/emergency_stop` | xbox_teleop | 最终仲裁器让 true 覆盖人工+自主并清旧 Twist；仍不能替代硬件急停 |
 | `/navigate_to_pose` | 本项目 Nav2 bt_navigator | autonomous_mission 为客户端 |
@@ -621,8 +633,10 @@ quadruped_planning、quadruped_bringup、slam 六个包。传感器、里程计�
 `speed_gate:=false`；Wakula 此时只把 Nav2 自动候选发布到 `/cmd_vel_smoothed`，不会发布
 `/cmd_vel`。目标层必须订阅该候选以及 `/terrain/navigation_safety`、`/navigation/healthy`、
 `/navigation/autonomy_stop`、`/navigation/autonomy_lease` 和 `/teleop/emergency_stop`，再结合
-命令超时、雷达与硬件急停条件唯一发布 `/cmd_vel`；其中 autonomy_stop/lease 只封锁自动候选，
-emergency_stop 覆盖自动与人工且解除后等待新 Twist。否则 Nav2 速度不会到达真机，Ctrl-C
+命令超时、雷达与硬件急停条件唯一发布 `/cmd_vel`；其中 autonomy_stop 是自主分支的额外
+停车否决，AutonomyLease 必须按 session_id/sequence 验证且仅在 active=true、
+motion_allowed=true、心跳新鲜时放行，emergency_stop 覆盖自动与人工且解除后等待新 Twist。
+否则 Nav2 速度不会到达真机，Ctrl-C
 也无法锁住目标仲裁器的
 自动分支。这不表示复用目标 SLAM/Nav2；目标端不能把 STEP/CLIMB/READY 直接解释成关节动作。
 
