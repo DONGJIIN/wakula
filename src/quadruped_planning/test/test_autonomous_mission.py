@@ -1130,7 +1130,7 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["odom_progress_timeout"] == 0.5
     assert params["nav_progress_translation"] == 0.04
     assert params["nav_progress_rotation"] == 0.06
-    assert params["controller_wait_timeout"] == 5.0
+    assert params["controller_wait_timeout"] == 2.0
     assert params["action_response_timeout"] == 2.0
     assert params["action_cancel_timeout"] == 2.0
     assert params["traversal_progress_timeout"] == 5.0
@@ -1142,15 +1142,16 @@ def test_shipped_mission_uses_bounded_recovery_and_return_policy():
     assert params["approach_stall_handoff_max_distance"] == 2.35
     assert params["approach_stall_handoff_max_heading_error"] == 0.22
     assert params["direct_handoff_max_distance"] == 1.45
-    assert params["maximum_search_turns"] == 8
+    assert params["maximum_search_turns"] == 4
+    assert params["pre_alignment_trigger_angle"] == 0.14
     assert params["inventory_log_period"] == 5.0
     assert params["mission_timeout"] == 300.0
     assert params["return_time_reserve"] == 60.0
     assert params["obstacle_revisit_max_cooldown"] == 64.0
     assert params["semantic_confirmation_votes"] == 3
     assert params["semantic_recent_window"] == 6
-    assert params["semantic_verification_max_attempts"] == 2
-    assert params["failed_entry_turn_angle"] == 1.570796
+    assert params["semantic_verification_max_attempts"] == 1
+    assert params["failed_entry_turn_angle"] == 1.047198
     assert params["failed_entry_settle_time"] == 0.80
     assert params["failed_entry_memory_duration"] == 45.0
     assert params["failed_entry_station_tolerance"] == 0.65

@@ -27,6 +27,7 @@ from std_msgs.msg import Bool, Float32
 import quadruped_planning.autonomous_mission as mission_module
 from quadruped_planning.autonomous_mission import (
     AutonomousMission,
+    Frontier,
     ObservedObstacle,
     traversal_feedback_transition_is_valid,
 )
@@ -761,7 +762,7 @@ def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
         assert mission.params["nav_stall_timeout"] == 5.0
         assert mission.params["nav_progress_translation"] == 0.04
         assert mission.params["nav_progress_rotation"] == 0.06
-        assert mission.params["controller_wait_timeout"] == 5.0
+        assert mission.params["controller_wait_timeout"] == 2.0
         assert mission.params["action_response_timeout"] == 2.0
         assert mission.params["action_cancel_timeout"] == 2.0
         assert mission.params["traversal_progress_timeout"] == 5.0
@@ -774,7 +775,8 @@ def test_mission_runtime_uses_five_second_recovery_defaults(ros_context):
         assert mission.params["navigation_health_timeout"] == 0.80
         assert mission.params["navigation_health_recovery_duration"] == 1.00
         assert mission.params["approach_stall_handoff_count"] == 1
-        assert mission.params["maximum_search_turns"] == 8
+        assert mission.params["maximum_search_turns"] == 4
+        assert mission.params["pre_alignment_trigger_angle"] == 0.14
     finally:
         mission.destroy_node()
     with pytest.raises(ValueError, match="safety_geometry_stale_seconds"):
@@ -1238,6 +1240,29 @@ def test_pending_nav_response_cannot_freeze_a_traverse_handoff(ros_context):
         assert late_handle.cancel_calls == 0
         assert late_handle.result_future.callback is not None
         assert mission.pending_traverse is None
+    finally:
+        mission.destroy_node()
+
+
+def test_unstable_live_identity_does_not_report_handoff_queued(ros_context):
+    """A rejected controller wait must return false and release the scheduler."""
+    mission = AutonomousMission()
+    mission.enabled = True
+    mission.traverse_client = FakeActionClient(False)
+    mission._action_semantic_id = lambda *_args: ""
+    try:
+        queued = mission._queue_traversal_handoff(
+            valid_wall_guidance(),
+            "high_wall",
+            (1.0, 0.0),
+            time.monotonic(),
+        )
+        assert not queued
+        assert mission.pending_traverse is None
+        assert mission.pending_traverse_id == ""
+        assert mission.state == "RECOVERY"
+        assert mission.blocked_obstacles
+        assert mission.cooldown_until > 0.0
     finally:
         mission.destroy_node()
 
@@ -2390,6 +2415,122 @@ def test_work_deadline_does_not_cancel_an_already_active_return_goal(ros_context
         mission.destroy_node()
 
 
+def test_successful_search_turn_reopens_free_space_coverage(ros_context):
+    """A scan must be followed by fresh translational coverage, not another scan."""
+    mission = AutonomousMission()
+    mission.enabled = True
+    mission.nav_generation = 4
+    mission.nav_handle = FakeGoalHandle()
+    mission.nav_purpose = "search_turn"
+    mission.nav_target = (0.0, 0.0)
+    mission.coverage_visited = [(0.0, 0.0), (3.0, 0.0), (3.0, 2.0)]
+    mission._robot_pose = lambda *_args: (1.25, -0.75, 1.0)
+    try:
+        result = PendingFuture()
+        result.value = SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED)
+        mission._nav_result(result, 4)
+        assert mission.coverage_visited == [(1.25, -0.75)]
+        assert mission.state == "EXPLORING"
+    finally:
+        mission.destroy_node()
+
+
+def test_coverage_prefers_live_costmap_for_translational_goal(
+    ros_context, monkeypatch
+):
+    """Free roaming must choose stations against current terrain obstacles."""
+    mission = AutonomousMission()
+    mission.nav_client = FakeActionClient(True)
+    grid = OccupancyGrid()
+    grid.header.frame_id = "map"
+    grid.info.width = 20
+    grid.info.height = 20
+    grid.info.resolution = 0.2
+    grid.info.origin.position.x = -2.0
+    grid.info.origin.position.y = -2.0
+    grid.info.origin.orientation.w = 1.0
+    grid.data = [0] * 400
+    costmap = deepcopy(grid)
+    now = time.monotonic()
+    mission.enabled = True
+    mission.map_msg = grid
+    mission.map_received = now
+    mission.costmap_msg = costmap
+    mission.costmap_received = now
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.mission_started = now
+    mission.mission_ready_after = 0.0
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    install_stable_navigation_health(mission)
+    observed_grids = []
+    monkeypatch.setattr(
+        mission_module, "extract_frontiers", lambda *args, **kwargs: []
+    )
+
+    def coverage_candidates(candidate_grid, *args, **kwargs):
+        observed_grids.append(candidate_grid)
+        return [Frontier(1.0, 0.0, 1, 1.0, 1.0)]
+
+    monkeypatch.setattr(
+        mission_module, "extract_coverage_goals", coverage_candidates
+    )
+    try:
+        mission._tick()
+        assert observed_grids == [costmap]
+        assert mission.nav_send_pending
+        assert mission.nav_purpose == "coverage"
+        assert mission.state == "COVERAGE_EXPLORING"
+    finally:
+        mission.destroy_node()
+
+
+def test_offline_traversal_controller_records_obstacle_and_keeps_exploring(
+    ros_context, monkeypatch
+):
+    """Perception-only mode must not stop and align at every observed obstacle."""
+    mission = AutonomousMission()
+    mission.nav_client = FakeActionClient(True)
+    mission.traverse_client = FakeActionClient(False)
+    grid = OccupancyGrid()
+    grid.header.frame_id = "map"
+    grid.info.width = 20
+    grid.info.height = 20
+    grid.info.resolution = 0.2
+    grid.info.origin.position.x = -2.0
+    grid.info.origin.position.y = -2.0
+    grid.info.origin.orientation.w = 1.0
+    grid.data = [0] * 400
+    now = time.monotonic()
+    mission.enabled = True
+    mission.map_msg = grid
+    mission.map_received = now
+    mission.home_pose = (0.0, 0.0, 0.0)
+    mission.mission_started = now
+    mission.mission_ready_after = 0.0
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    install_stable_navigation_health(mission)
+    guidance = valid_wall_guidance()
+    guidance.phase = TraversalGuidance.PHASE_APPROACH
+    guidance.ready_for_handoff = False
+    mission._fresh_target = lambda: guidance
+    mission._obstacle_position = lambda *_args: (0.8, 0.0)
+    mission._current_obstacle_id = lambda *_args: "high_wall"
+    monkeypatch.setattr(
+        mission_module,
+        "extract_frontiers",
+        lambda *args, **kwargs: [Frontier(1.2, 0.6, 20, 1.34, 20.0)],
+    )
+    try:
+        mission._tick()
+        assert mission.pending_traverse is None
+        assert mission.blocked_obstacles
+        assert mission.nav_send_pending
+        assert mission.nav_purpose == "frontier"
+        assert mission.state == "EXPLORING"
+    finally:
+        mission.destroy_node()
+
+
 def test_nav_server_not_ready_does_not_consume_search_recovery_or_revisit(
     ros_context, monkeypatch
 ):
@@ -2450,7 +2591,7 @@ def test_nav_server_not_ready_does_not_consume_search_recovery_or_revisit(
 
 
 def test_missing_traversal_controller_keeps_task_pending_and_changes_action(ros_context):
-    """A controller timeout must clear HANDOFF, cool the entry, and resume recovery."""
+    """A missing server cools the entry but must not force another in-place turn."""
     mission = AutonomousMission()
     try:
         mission.pending_traverse = object()
@@ -2465,5 +2606,28 @@ def test_missing_traversal_controller_keeps_task_pending_and_changes_action(ros_
         assert mission.state == "RECOVERY"
         assert mission.blocked_obstacles
         assert mission.cooldown_until > 0.0
+        assert mission.failed_entry_turn_pending == 0.0
+        assert mission.failed_entry_escape_pending == 0.0
+    finally:
+        mission.destroy_node()
+
+
+def test_ambiguous_obstacle_uses_one_view_then_releases_for_translation(ros_context):
+    """Exhausted semantics must not append another in-place recovery rotation."""
+    mission = AutonomousMission()
+    guidance = valid_wall_guidance()
+    mission._robot_pose = lambda *_args: (0.0, 0.0, 0.0)
+    mission._obstacle_position = lambda *_args: (1.0, 0.0)
+    mission.semantic_verification_attempts = int(
+        mission.params["semantic_verification_max_attempts"]
+    )
+    mission.semantic_verification_position = (0.0, 0.0)
+    try:
+        mission._verify_ambiguous_obstacle(guidance, time.monotonic())
+        assert mission.state == "RECOVERY"
+        assert mission.blocked_obstacles
+        assert mission.failed_entry_turn_pending == 0.0
+        assert mission.failed_entry_escape_pending == 0.0
+        assert mission.locked_obstacle_position is None
     finally:
         mission.destroy_node()

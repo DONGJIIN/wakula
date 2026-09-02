@@ -72,19 +72,20 @@ autonomous_mission:
     # 小于该角度的原地旋转会被 Nav2 立即判成功；改走严格交接或语义换视角复核。
     # 略高于 Nav2 yaw_goal_tolerance=0.12 rad，确保原地目标不会被立即判成功。
     minimum_alignment_command_angle: 0.14
-    # 已确认障碍先原地对准再接近：大于约 10° 才触发，每次最多修正 30°。
-    # 转后等待 0.6 s 新点云，防止重复使用旋转前的旧方向数据。
-    pre_alignment_trigger_angle: 0.18
+    # 已确认障碍先原地对准再接近：偏角达到约 8° 就触发，每次最多修正 30°。
+    # 该值与 minimum_alignment_command_angle 对齐，消除“高于严格交接 7°、却又低于
+    # 旧 10° 对正门”的等待死区。转后等待 0.6 s 新点云，防止复用旧方向数据。
+    pre_alignment_trigger_angle: 0.14
     pre_alignment_max_step: 0.523599
     pre_alignment_settle_time: 0.60
     # Nav2 lifecycle 尚未 ACTIVE 时 Action 会短暂拒绝目标；退避重试而非误记为不可达。
     nav_rejection_retry_delay: 1.0
     # 规划中止/取消后留给 costmap、行为树和 SLAM 地图边界的恢复时间，避免高频重发。
     nav_failure_retry_delay: 1.0
-    # 越障服务拒绝或障碍挡住 Nav2 后，交替左/右转 90°，先把结构移出前向安全 ROI，
-    # 再尝试换观察站。实跑的 45° 仍让 1 m 宽结构留在正前方，使换站线速度持续被锁零。
-    # 真机应从 60° 逐步试到 90°；更大角度会丢失局部目标并增加定位压力。
-    failed_entry_turn_angle: 1.570796
+    # 越障服务拒绝或障碍挡住 Nav2 后，只做一次左右交替的 60° 有界换向，随后必须请求
+    # 新观察站平移。相比旧 90° 可减少原地旋转时间；若宽障碍仍占据正前安全 ROI，
+    # recovery_station 会选择侧向/反向的已知自由路径，绝不直接穿过障碍。
+    failed_entry_turn_angle: 1.047198
     # 转向后至少等待数帧稳定点云；相机曝光较慢或点云频率低时应适当增大。
     failed_entry_settle_time: 0.80
     # 同一站位、同一航向已被 Action 拒绝时，45 秒内不允许重新交接；移动超过 0.65 m
@@ -156,8 +157,10 @@ autonomous_mission:
     # Action 必须在 5 秒内推进反馈状态或全局进度；无反馈、非法/倒序反馈或进度不变会请求
     # cancel，但仍等待 result 证明远端释放控制权。真机先测最长合法重心转移再小步增大。
     traversal_progress_timeout: 5.0
-    # 到达入口后越障 Action 服务仍未就绪，最多原地等待 5 秒；随后保留为未完成并换目标。
-    controller_wait_timeout: 5.0
+    # 到达入口后越障 Action 服务仍未就绪，最多原地等待 2 秒；随后保留为未完成并换目标。
+    # 服务端在启动自动任务前应已就绪；缺失时只短等 2 s，随后保留障碍待办并平移探索
+    # 其他区域。控制器未接入不是越障失败，不能因此强制原地恢复旋转。
+    controller_wait_timeout: 2.0
     # Action 最终几何只接受 0.35 s 内的新鲜 NavigationSafety。真机若点云稳定低于 5 Hz，
     # 先修复驱动时间戳/频率，再按实测最大帧间隔小步增大；过大会让断流后的旧尺寸继续存活。
     safety_geometry_stale_seconds: 0.35
@@ -187,12 +190,12 @@ autonomous_mission:
     # sustained recent evidence 纠正旧锁。真机掉帧严重时先降低感知频率，不建议减回 2。
     semantic_confirmation_votes: 3
     semantic_recent_window: 6
-    # 结构已确认但专名仍有歧义时，仅原地小角度换视角；两次仍不能确认则暂时跳过。
-    # 0.30 rad 与 Nav2 最小有效旋转一致；交替视角的第三次可覆盖约 50° 的坡侧误差。
+    # 结构已确认但专名仍有歧义时，只允许一次小角度换视角；仍不能确认就冷却该位置，
+    # 让 Nav2 选择新的平移观察点，稍后从新位置重新累计语义票。
     semantic_verification_turn_angle: 0.30
-    semantic_verification_max_attempts: 2
+    semantic_verification_max_attempts: 1
     # 换视角序列按机器人驻留点而不是会漂移的障碍前缘计数；该半径表示位姿移动多远
-    # 才算真正的新观察站。过大会合并相邻观察站，过小会在同一地点重复 1/2。
+    # 才算真正的新观察站。过大会合并相邻观察站，过小会在同一地点重复验证。
     semantic_verification_lock_radius: 1.50
     # 原地换视角结束后等待至少六帧 5 Hz 深度数据，禁止使用旋转残影立即交接。
     semantic_post_turn_settle_time: 1.20
@@ -216,11 +219,11 @@ autonomous_mission:
     # 每次回访按 8/16/32/64 秒退避；到达旧观察位但没重新识别也算一次尝试。
     # 真机目标恢复后迟迟不重试可减小上限；过小会让旧记录反复抢占任务。
     obstacle_revisit_max_cooldown: 64.0
-    # 无前沿不是结束条件：连续约 1 秒无候选后原地转 90° 补扫，四次补扫后重新尝试
-    # 暂时失败的前沿；达到下面的补扫上限仍无新目标，才携带当前清单返回终点。
+    # 无前沿不是结束条件：连续约 1 秒无候选后原地转 90° 补扫。每次补扫成功都会开启
+    # 新一轮自由区覆盖，下一步必须优先选择平移目标，而不是连续提交旋转。
     empty_frontier_confirmations: 4
-    # 每次 90°，最多补扫两圈；仍无前沿/覆盖/待办目标就返回任务启动点。
-    maximum_search_turns: 8
+    # 每次 90°，最多补扫一圈；仍无前沿/覆盖/待办目标就返回任务启动点。
+    maximum_search_turns: 4
     search_turn_angle: 1.570796
     # Nav2 Action 尚未结束但里程计位姿连续 5 秒既没有 4 cm 平移，也没有 0.06 rad 转动，
     # 视为局部停滞并取消重规划，避免表现成“自动导航走到一半自己停下”。
