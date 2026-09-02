@@ -56,7 +56,13 @@ DEFAULT_PREPARATION_ANGULAR_SPEED = 0.35
 DEFAULT_PREPARATION_TIMEOUT = 25.0
 DEFAULT_ODOMETRY_HISTORY_DURATION = 2.0
 DEFAULT_ODOMETRY_HISTORY_MAX_SAMPLES = 256
-DEFAULT_ODOMETRY_SNAPSHOT_MAX_GAP = 0.15
+# Gazebo publishes the staged semantic hint at 10 Hz while its bridged odometry may arrive at
+# roughly 5 Hz under full SLAM/Nav2 load.  A 0.15 s bound sat just below the observed 0.16 s phase
+# offset and rejected an otherwise current, valid traversal snapshot, sending autonomy into
+# repeated recovery turns.  0.25 s spans one 5 Hz odometry period while remaining well below the
+# server's 0.75 s maximum snapshot age.  This parameter belongs only to the simulation adapter;
+# real controllers must use their synchronized state estimator history.
+DEFAULT_ODOMETRY_SNAPSHOT_MAX_GAP = 0.25
 
 # A finish pose is a synchronization contract, not merely a TF cache lookup.  Once the
 # simulator returns the model home, the localization transform must advance beyond both
@@ -572,6 +578,30 @@ def odometry_pose_at_stamp(history, stamp, maximum_gap):
     return None
 
 
+def benchmark_hint_odometry_is_ready(
+    sample_sequence, minimum_sequence, sample, expected_pose, tolerance=0.25
+):
+    """Return whether odometry has observed the simulator's staged pose.
+
+    The sequence requirement distinguishes a genuinely post-SetEntityPose sample from a cached
+    pre-teleport pose.  Position *and* wrapped yaw are checked because a correct location with the
+    previous heading would still make the synthetic body-frame obstacle snapshot inconsistent.
+    """
+    if expected_pose is None:
+        return True
+    if int(sample_sequence) <= int(minimum_sequence) or sample is None:
+        return False
+    return bool(
+        hypot(
+            float(sample.x) - float(expected_pose[0]),
+            float(sample.y) - float(expected_pose[1]),
+        )
+        <= float(tolerance)
+        and abs(normalize_angle(float(sample.yaw) - float(expected_pose[2])))
+        <= float(tolerance)
+    )
+
+
 def frozen_entry_from_history(goal, history, maximum_gap, standoff):
     """Freeze the body-frame entry geometry against Goal-time odometry history."""
     stamp = _header_stamp_seconds(goal.header)
@@ -986,6 +1016,13 @@ class SimTraverseObstacle(Node):
         self.active_benchmark_target = (
             BENCHMARK_TASK_ORDER[0] if benchmark_enabled else ""
         )
+        # Later targets are teleported to an observation station.  Do not publish their synthetic
+        # semantic frame until odometry has actually observed that SetEntityPose commit; a wall
+        # delay alone can expire while Gazebo's sensor update is late under full SLAM/Nav2 load.
+        # Otherwise the mission freezes a perfectly fresh perception Header for which the Action
+        # server has no same-pose odometry sample and enters an avoidable rotate/retry loop.
+        self.benchmark_hint_min_odom_sequence = 0
+        self.benchmark_hint_expected_pose = None
         self.benchmark_hint_ready_at = time.monotonic() + (
             max(
                 0.0,
@@ -1165,11 +1202,10 @@ class SimTraverseObstacle(Node):
             self.pending_benchmark_target = target
             self.pending_benchmark_deadline = time.monotonic() + 0.50
             return
-        precommit_odom_sequence = 0
+        with self.odom_history_lock:
+            precommit_odom_sequence = self.odom_sample_sequence
         precommit_tf_stamp = None
         if target == "__home__":
-            with self.odom_history_lock:
-                precommit_odom_sequence = self.odom_sample_sequence
             precommit_tf_stamp = self._latest_map_base_stamp()
         if not self._set_model_pose(*pose):
             self.pending_benchmark_target = target
@@ -1183,6 +1219,8 @@ class SimTraverseObstacle(Node):
         commit_ros_stamp = self.get_clock().now().nanoseconds * 1.0e-9
         self._stop()
         self.active_benchmark_target = target if target != "__home__" else ""
+        self.benchmark_hint_min_odom_sequence = precommit_odom_sequence
+        self.benchmark_hint_expected_pose = pose if target != "__home__" else None
         self.benchmark_hint_ready_at = time.monotonic() + max(
             0.0,
             float(self.get_parameter("benchmark_semantic_hint_settle").value),
@@ -1320,6 +1358,22 @@ class SimTraverseObstacle(Node):
             or time.monotonic() < self.benchmark_hint_ready_at
         ):
             return
+        expected = self.benchmark_hint_expected_pose
+        if expected is not None:
+            with self.odom_history_lock:
+                odom_sequence = self.odom_sample_sequence
+                odom_sample = (
+                    planar_pose_sample_from_odometry(self.latest_odom)
+                    if self.latest_odom is not None
+                    else None
+                )
+            if not benchmark_hint_odometry_is_ready(
+                odom_sequence,
+                self.benchmark_hint_min_odom_sequence,
+                odom_sample,
+                expected,
+            ):
+                return
         fused = benchmark_fused_obstacle(target)
         if fused is None:
             return

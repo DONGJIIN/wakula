@@ -100,6 +100,7 @@ TERRAIN_PARAMETER_NAMES = (
     "min_connected_region_cells",
     "min_connected_region_points",
     "clear_ground_corridor_half_width",
+    "clear_ground_start_x",
     "clear_ground_required_distance",
     "clear_ground_max_gap",
     "clear_ground_min_lateral_fraction",
@@ -433,17 +434,26 @@ def validate_terrain_parameters(values: Mapping[str, object]) -> None:
         errors.append(
             "clear_ground_corridor_half_width must not exceed lateral_half_width"
         )
+    clear_start_x = _number(values, "clear_ground_start_x", errors)
+    if not x_min <= clear_start_x < x_max:
+        errors.append(
+            "clear_ground_start_x must be in [front_x_min, front_x_max)"
+        )
     required_distance = _number(
         values, "clear_ground_required_distance", errors
     )
-    if not x_min < required_distance <= x_max:
+    if not clear_start_x < required_distance <= x_max:
         errors.append(
-            "clear_ground_required_distance must be in (front_x_min, front_x_max]"
+            "clear_ground_required_distance must be in "
+            "(clear_ground_start_x, front_x_max]"
         )
     maximum_gap = _positive(values, "clear_ground_max_gap", errors)
     if maximum_gap < max(0.02, grid_cell_size):
         errors.append("clear_ground_max_gap must be at least grid_cell_size")
-    if required_distance > x_min and maximum_gap >= required_distance - x_min:
+    if (
+        required_distance > clear_start_x
+        and maximum_gap >= required_distance - clear_start_x
+    ):
         errors.append(
             "clear_ground_max_gap must be smaller than the required clear-ground span"
         )

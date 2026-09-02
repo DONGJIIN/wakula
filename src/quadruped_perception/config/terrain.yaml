@@ -102,7 +102,7 @@ terrain_analyzer:
     min_connected_region_points: 16
 
     # ---------- CLEAR 连续可见地面合同（防止把无回波坑/场地边缘当平地） ----------
-    # 只有机器人中央通道从 front_x_min 到 required_distance 都获得足够横向地面回波，且
+    # 只有机器人中央通道从 start_x 到 required_distance 都获得足够横向地面回波，且
     # 任一连续缺带不超过 max_gap，才允许发布 CLEAR。识别出障碍时同样检查“配置前视距离”
     # 与“其前缘前一格”两者较近处之前的 approach corridor，避免隔着无回波坑/黑色区域
     # 接近远处障碍。缺带只表示 UNKNOWN/停车，不凭空判 PIT；障碍本体占用的栅格不要求
@@ -111,7 +111,14 @@ terrain_analyzer:
     # 调整 required_distance/max_gap。减小 max_gap 更安全但会增加弱纹理地面误停；不得为了
     # 消除误停把它增大到足以跨过比赛坑洞或场地边缘。
     clear_ground_corridor_half_width: 0.25
-    clear_ground_required_distance: 0.80
+    # start_x 是“机器人前缘与传感器近场盲区”两者较远处的 base_link x 坐标，不是任意
+    # 放宽项。Gazebo 相机安装在 x=0.52 m、z=0.42 m，首个稳定地面回波约在 x=1.04 m；
+    # 0.90 m 起点配合 0.15 m 缺带容差覆盖该光学盲区。真机必须用平地 rosbag 实测首个
+    # 稳定地面回波，并确保 start_x 不小于机身/前腿的最前安全边界。
+    clear_ground_start_x: 0.90
+    # 这是 base_link 下的绝对前向终点；当前实际验证区间为 0.90～1.70 m（长 0.80 m）。
+    # 增大可更早发现坑/黑色无回波，但远距深度稀疏会增加 UNKNOWN；减小则缩短停车余量。
+    clear_ground_required_distance: 1.70
     clear_ground_max_gap: 0.15
     # 每个纵向栅格至少要覆盖中央通道横向栅格数的该比例，避免一条侧边回波冒充整条地面。
     clear_ground_min_lateral_fraction: 0.25

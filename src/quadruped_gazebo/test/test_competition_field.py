@@ -369,7 +369,6 @@ def test_goal_time_odometry_rejects_missing_or_distant_history():
     )
     assert frozen is None
     assert "odometry history unavailable" in reason
-
     # Exercise the real admission callback as well: syntactically valid geometry is
     # still rejected before reservation when no odometry can anchor header.stamp.
     node = module.SimTraverseObstacle.__new__(module.SimTraverseObstacle)
@@ -409,6 +408,28 @@ def test_goal_time_odometry_rejects_missing_or_distant_history():
     )
     assert frozen is None
     assert "odometry history unavailable" in reason
+
+
+def test_benchmark_hint_waits_for_post_staging_odometry_pose():
+    """A wall-clock settle alone cannot publish a snapshot before odom sees teleport."""
+    module = _load_sim_traverse_module("sim_traverse_hint_odom_gate")
+    expected = (-4.30, 1.05, math.pi / 2.0)
+    old_pose = module.PlanarPoseSample(
+        stamp=10.0, x=-2.50, y=-0.20, yaw=math.pi
+    )
+    staged_pose = module.PlanarPoseSample(
+        stamp=10.2, x=-4.30, y=1.05, yaw=math.pi / 2.0
+    )
+    assert not module.benchmark_hint_odometry_is_ready(
+        10, 10, staged_pose, expected
+    )
+    assert not module.benchmark_hint_odometry_is_ready(
+        11, 10, old_pose, expected
+    )
+    assert module.benchmark_hint_odometry_is_ready(
+        11, 10, staged_pose, expected
+    )
+    assert module.benchmark_hint_odometry_is_ready(0, 0, None, None)
 
 
 @pytest.mark.parametrize(

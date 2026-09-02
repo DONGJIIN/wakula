@@ -357,7 +357,11 @@ class TerrainAnalyzer(Node):
         self.declare_parameter("min_connected_region_cells", 4)
         self.declare_parameter("min_connected_region_points", 16)
         self.declare_parameter("clear_ground_corridor_half_width", 0.25)
-        self.declare_parameter("clear_ground_required_distance", 0.80)
+        # The RGB-D/3-D lidar cannot observe ground beneath the body or inside its optical near
+        # blind zone.  Start the proof just ahead of that calibrated boundary; requiring returns
+        # from front_x_min would make every physically valid elevated-camera frame UNKNOWN.
+        self.declare_parameter("clear_ground_start_x", 0.90)
+        self.declare_parameter("clear_ground_required_distance", 1.70)
         self.declare_parameter("clear_ground_max_gap", 0.15)
         self.declare_parameter("clear_ground_min_lateral_fraction", 0.25)
 
@@ -469,6 +473,9 @@ class TerrainAnalyzer(Node):
         # 的回波缺带。缺带返回 UNKNOWN，而不是凭空把无回波猜成 PIT。
         self.clear_ground_corridor_half_width = float(
             self.get_parameter("clear_ground_corridor_half_width").value
+        )
+        self.clear_ground_start_x = float(
+            self.get_parameter("clear_ground_start_x").value
         )
         self.clear_ground_required_distance = float(
             self.get_parameter("clear_ground_required_distance").value
@@ -699,7 +706,7 @@ class TerrainAnalyzer(Node):
             ground_height_prior=self.ground_height_prior,
             ground_prior_max_height_shift=self.ground_prior_max_height_shift,
             clear_ground_corridor_half_width=self.clear_ground_corridor_half_width,
-            clear_ground_start_x=self.x_min,
+            clear_ground_start_x=self.clear_ground_start_x,
             clear_ground_required_distance=self.clear_ground_required_distance,
             clear_ground_max_gap=self.clear_ground_max_gap,
             clear_ground_min_lateral_fraction=self.clear_ground_min_lateral_fraction,

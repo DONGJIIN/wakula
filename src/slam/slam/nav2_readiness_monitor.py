@@ -79,7 +79,10 @@ class Nav2ReadinessMonitor(Node):
         # ROS service futures have no built-in response deadline.  A lifecycle manager
         # which disappears after discovery must therefore be bounded here, otherwise
         # one never-completing future can hold Nav2 inactive until the process restarts.
-        self.declare_parameter("service_request_timeout", 2.0)
+        # A first Nav2 bringup configures costmaps, plugins and five lifecycle bonds.  On this
+        # machine that valid transaction takes about 2.2 s, so a 2 s deadline races the successful
+        # response and then repeatedly sends STARTUP to nodes which are already active.
+        self.declare_parameter("service_request_timeout", 5.0)
         # Readiness owns lifecycle activation, so invalid topics/frames must stop here rather
         # than leave Nav2 waiting forever with a misleading "missing input" message.
         validate_nav2_readiness_parameters(
@@ -560,18 +563,22 @@ class Nav2ReadinessMonitor(Node):
             self._finish_slam_recovery_request()
 
     def _startup_response(self, future, generation=None) -> None:
-        """处理 lifecycle STARTUP 服务结果，并允许失败后重试。"""
+        """Handle one lifecycle STARTUP result without retrying an active stack.
+
+        A completed ``success=True`` response is authoritative evidence that the lifecycle manager
+        activated every managed node.  Accept it even when it arrives a few milliseconds beyond
+        the local wall deadline, provided its generation is still current.  The timer invalidates
+        and increments the generation before issuing any retry, so a truly stale response can
+        never overwrite a newer transaction.  This distinction avoids the former failure mode:
+        a valid 2.2 s initial activation lost a 2.0 s race and STARTUP was then spammed forever at
+        already-active nodes.
+        """
         if generation is not None and generation != self.startup_request_generation:
             return
-        if (
+        deadline_expired = bool(
             self.startup_request_deadline > 0.0
             and time.monotonic() >= self.startup_request_deadline
-        ):
-            self._invalidate_startup_request(future)
-            self.get_logger().error(
-                "Ignoring late Nav2 startup response after its deadline"
-            )
-            return
+        )
         self.startup_request_future = None
         self.startup_request_deadline = 0.0
         try:
@@ -580,12 +587,22 @@ class Nav2ReadinessMonitor(Node):
             self.startup_requested = False
             self.get_logger().error(f"Nav2 startup request failed: {exc}")
             return
+        if response.success:
+            self.startup_complete = True
+            self.get_logger().info("Nav2 activated successfully")
+            return
+        if deadline_expired:
+            # No newer generation exists, but a late negative result still proves nothing became
+            # active.  Release the guard and retry after the normal readiness period.
+            self.startup_requested = False
+            self.get_logger().error(
+                "Late Nav2 startup response reported failure; readiness will retry"
+            )
+            return
         if not response.success:
             self.startup_requested = False
             self.get_logger().error("Nav2 lifecycle manager rejected startup")
             return
-        self.startup_complete = True
-        self.get_logger().info("Nav2 activated successfully")
 
 
 def main(args=None):

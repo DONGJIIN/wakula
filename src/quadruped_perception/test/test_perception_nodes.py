@@ -78,10 +78,10 @@ def _vision(stamp):
 def _flat_ground_points():
     """Return dense base_link ground echoes that satisfy the online CLEAR coverage contract."""
     # Geometry cells require at least two raw echoes.  A 2.5 cm lattice supplies four samples per
-    # 5 cm cell and continuously covers x=0.10..0.80 m across the configured body corridor.
+    # 5 cm cell and continuously covers x=0.90..1.70 m across the configured body corridor.
     return [
-        (0.101 + x_index * 0.025, -0.249 + y_index * 0.025, -0.30)
-        for x_index in range(30)
+        (0.901 + x_index * 0.025, -0.249 + y_index * 0.025, -0.30)
+        for x_index in range(34)
         for y_index in range(20)
     ]
 

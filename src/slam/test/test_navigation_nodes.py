@@ -374,10 +374,10 @@ def test_readiness_service_dispatch_errors_never_leave_a_pending_guard(ros_conte
         monitor.destroy_node()
 
 
-def test_readiness_callbacks_reject_responses_past_wall_deadline(
+def test_readiness_callbacks_accept_current_success_but_reject_other_late_responses(
     ros_context, monkeypatch
 ):
-    """A late reply cannot exploit the interval before the next timeout timer tick."""
+    """A current successful STARTUP closes the active-state race; other replies stay bounded."""
     monitor = Nav2ReadinessMonitor()
     try:
         monkeypatch.setattr(
@@ -389,9 +389,9 @@ def test_readiness_callbacks_reject_responses_past_wall_deadline(
         monitor._startup_response(
             _CompletedFuture(SimpleNamespace(success=True)), generation=2
         )
-        assert not monitor.startup_complete
-        assert not monitor.startup_requested
-        assert monitor.startup_request_generation == 3
+        assert monitor.startup_complete
+        assert monitor.startup_requested
+        assert monitor.startup_request_generation == 2
 
         transition_client = _CountingClient()
         monitor.slam_change_state_client = transition_client

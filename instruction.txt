@@ -171,14 +171,18 @@ Action 成功也不能声称真机已经具备越障能力。
    高度突变、占据分布、空洞和净空分类 CLEAR/STEP/PIT/
    WALL/BAR/POLE。连续坡面还要通过纵横跨度和低平面残差门，离散踏面继续保持 STEP；
    带支柱横杆用主高度带估计净空，70 mm 立柱允许少格但必须有足够原始回波及三维跨度。
-   CLEAR 不是“没有检测到障碍”的默认值：中央走廊必须从近场开始具有连续地面覆盖；每个
+   CLEAR 不是“没有检测到障碍”的默认值：中央走廊必须从已标定的机身前缘/传感器近场盲区
+   之外开始具有连续地面覆盖；每个
    纵向切片还必须同时含中心、左侧和右侧支撑，单侧窄条不能代表完整机身通道，并满足
    clear_ground_required_distance、clear_ground_max_gap 和横向覆盖率。黑色/反光材料造成的
    无回波带没有真实低点时既不能推断 PIT，也不能判 CLEAR；输出 UNKNOWN/几何无效，由安全
    层停车并等待换视角或备用传感器。即使已经识别出远处 STEP/PIT/WALL/BAR/POLE，也必须
-   在每帧默认 0.80 m 滚动安全前视内，对到 min(0.80 m, 障碍前缘前一格) 的接近走廊执行
+   在每帧默认 base_link x=0.90～1.70 m 的 0.80 m 滚动安全前视内，对到
+   min(x=1.70 m, 障碍前缘前一格) 的接近走廊执行
    同一连续覆盖检查；障碍本体不要求地面回波。更远盲带会在机器人接近、进入该窗口后触发
-   UNKNOWN，不能被远障碍长期掩盖。只有真实低回波连通域才能支持坑洞分类。
+   UNKNOWN，不能被远障碍长期掩盖。0.90 m 只适用于当前 Gazebo 安装；真机接入时先用平地
+   rosbag 测量稳定地面回波的最近 x，并同时覆盖机器人最前安全边界，再调整
+   clear_ground_start_x/clear_ground_required_distance。只有真实低回波连通域才能支持坑洞分类。
 
    terrain_safety_assessor.py：每次分类原子产生稳定英文 semantic_id 和中文 display_name；
    semantic_id 写入同 Header 的 NavigationSafety，是任务与控制使用的机器身份，中文

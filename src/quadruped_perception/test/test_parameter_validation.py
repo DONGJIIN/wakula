@@ -236,6 +236,19 @@ def test_terrain_validation_rejects_roi_narrower_than_clear_ground_corridor():
     with pytest.raises(ValueError, match="clear_ground_corridor_half_width"):
         validate_terrain_parameters(values)
 
+    # The observable corridor starts after the camera's calibrated near blind
+    # zone.  It must remain inside the forward ROI and leave a positive span;
+    # otherwise a typo could silently turn every frame into UNKNOWN.
+    values = deepcopy(_parameters("terrain.yaml", "terrain_analyzer"))
+    values["clear_ground_start_x"] = values["front_x_min"] - 0.01
+    with pytest.raises(ValueError, match="clear_ground_start_x"):
+        validate_terrain_parameters(values)
+
+    values = deepcopy(_parameters("terrain.yaml", "terrain_analyzer"))
+    values["clear_ground_required_distance"] = values["clear_ground_start_x"]
+    with pytest.raises(ValueError, match="clear_ground_required_distance"):
+        validate_terrain_parameters(values)
+
 
 @pytest.mark.parametrize("node_name", ("vision_obstacle_detector", "terrain_analyzer"))
 @pytest.mark.parametrize("value", (0.0, 0.10))

@@ -321,4 +321,6 @@ nav2_readiness_monitor:
     # Wall-clock deadline for each Nav2/slam_toolbox lifecycle service request.
     # Increase only when rosbag measurements show healthy service replies exceed 2 s;
     # a larger value also delays recovery from a server that vanished after discovery.
-    service_request_timeout: 2.0
+    # 首次 Nav2 配置/激活在当前整栈约需 2.2 s；5 s 给 costmap/plugin/bond 留出余量。
+    # 超时仍用墙钟有界，且代次隔离会忽略已经开始重试后的旧响应。
+    service_request_timeout: 5.0
